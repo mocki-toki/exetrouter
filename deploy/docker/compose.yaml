@@ -1,0 +1,56 @@
+name: exetrouter
+services:
+  credentials:
+    image: ${EXETROUTER_IMAGE:-exetrouter:local}
+    user: '0:0'
+    entrypoint: ['/bin/sh', '/prepare-credentials.sh']
+    environment:
+      APP_UID: ${EXETROUTER_UID:-10001}
+      APP_GID: ${EXETROUTER_GID:-10002}
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ${EXETROUTER_RUNTIME:-/run/exetrouter}:/run/exetrouter
+      - ./prepare-credentials.sh:/prepare-credentials.sh:ro
+    secrets: [hmac_key, oauth_key]
+    restart: 'no'
+  exrd:
+    image: ${EXETROUTER_IMAGE:-exetrouter:local}
+    user: '${EXETROUTER_UID:-10001}:${EXETROUTER_GID:-10002}'
+    depends_on:
+      credentials:
+        condition: service_completed_successfully
+    command: ['serve', '--allow-container-listen']
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+    pids_limit: 128
+    mem_limit: 512m
+    stop_grace_period: 25s
+    tmpfs: ['/tmp:rw,noexec,nosuid,size=16m']
+    volumes:
+      - ${EXETROUTER_STATE:-/var/lib/exetrouter}:/var/lib/exetrouter
+      - ${EXETROUTER_RUNTIME:-/run/exetrouter}:/run/exetrouter
+      - ${EXETROUTER_CONFIG:-./config.json}:/etc/exetrouter/config.json:ro
+    ports: ['127.0.0.1:${EXETROUTER_API_PORT:-8787}:8787']
+    healthcheck:
+      test: ['CMD', 'curl', '--fail', '--silent', 'http://127.0.0.1:8787/healthz']
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: local
+      options:
+        max-size: '5m'
+        max-file: '2'
+    restart: unless-stopped
+secrets:
+  hmac_key:
+    file: ${EXETROUTER_HMAC_KEY:-/etc/exetrouter/exetrouter.key}
+  oauth_key:
+    file: ${EXETROUTER_OAUTH_KEY:-/etc/exetrouter/exetrouter.oauth.key}

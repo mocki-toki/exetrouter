@@ -1,0 +1,68 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Verify version and publication
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          python3 -c 'import os,tomllib; assert "v"+tomllib.load(open("Cargo.toml","rb"))["package"]["version"]==os.environ["RELEASE_TAG"]'
+          rustc -vV | sed -n 's/^host: //p' | python3 -c 'import os,sys; assert sys.stdin.read().strip()==os.environ["EXPECTED_TARGET"]'
+          python3 scripts/check-publication.py
+      - run: cargo test --locked
+      - run: cargo build --locked --release --bins
+      - name: Package clean release binaries
+        env:
+          TARGET_NAME: ${{ matrix.target }}
+        run: |
+          mkdir -p dist staging
+          cp target/release/exr target/release/exrd LICENSE staging/
+          COPYFILE_DISABLE=1 tar -czf "dist/exetrouter-$TARGET_NAME.tar.gz" -C staging exr exrd LICENSE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Verify asset inventory and publish checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$(find dist -name '*.tar.gz' | wc -l)" -eq 4
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS --verify-tag --generate-notes --title "ExetRouter $RELEASE_TAG"

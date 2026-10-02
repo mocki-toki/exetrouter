@@ -1,0 +1,12 @@
+[Unit]
+Description=ExetRouter restricted SSH gateway
+After=network.target exetrouter.service
+Requires=exetrouter.service
+
+[Service]
+ExecStart=/usr/sbin/sshd -D -e -f /etc/exetrouter/sshd_config
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

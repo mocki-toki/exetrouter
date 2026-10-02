@@ -1,0 +1,102 @@
+#!/bin/sh
+# Root-owned operator action: build a published tag, snapshot state, replace image, validate or roll back.
+set -eu
+if [ "$(id -u)" -ne 0 ]; then exec sudo -- "$0" "$@"; fi
+root=${EXRD_DEPLOYMENT_ROOT:-/opt/exetrouter/docker}
+native=${EXRD_NATIVE_BINARY:-/usr/local/libexec/exetrouter/exrd}
+exec 9>"$root/.update.lock"
+flock -n 9 || { printf '%s\n' 'Another Docker update is running' >&2; exit 1; }
+report=$("$native" update --check --json)
+tag=$(printf '%s' "$report" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["latest"] if d["available"] else "")')
+if [ -z "$tag" ]; then printf '%s\n' 'exrd is up to date.'; exit 0; fi
+case "$tag" in v[0-9]*.[0-9]*.[0-9]*) ;; *) printf '%s\n' 'Invalid release tag' >&2; exit 1 ;; esac
+case "$tag" in *[!v0-9.]*) exit 1 ;; esac
+# Fixed root-controlled deployment files; no environment evaluation of .env.
+compose() {
+    if [ -f "$root/compose.host-network.yaml" ]; then
+        docker compose --project-directory "$root" -f "$root/compose.yaml" -f "$root/compose.host-network.yaml" "$@"
+    else
+        docker compose --project-directory "$root" -f "$root/compose.yaml" "$@"
+    fi
+}
+umask 077
+work=$(mktemp -d "$(dirname "$root")/update.XXXXXX")
+changed=false
+finished=false
+container=
+cleanup() {
+    if [ "$changed" = true ] && [ "$finished" = false ]; then
+        cp -p "$work/old.env" "$root/.env"
+        install -m 755 "$work/old.exrd" "$native.new"
+        mv -f "$native.new" "$native"
+        systemctl restart exetrouter.service || true
+        systemctl start exetrouter-sshd.service || true
+    fi
+    if [ -n "$container" ]; then docker rm "$container" >/dev/null 2>&1 || true; fi
+    rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "https://github.com/mocki-toki/exetrouter/archive/refs/tags/$tag.tar.gz" -o "$work/source.tar.gz"
+tar -tzf "$work/source.tar.gz" > "$work/files"
+while IFS= read -r entry; do case "$entry" in /*|../*|*/../*|*/..) printf '%s\n' 'Unsafe source archive' >&2; exit 1 ;; esac; done < "$work/files"
+mkdir "$work/source"
+tar -xzf "$work/source.tar.gz" --strip-components=1 -C "$work/source"
+# Packaging upgrades must not silently introduce a schema migration.
+# Check the new migration set against the last supported schema before stopping anything.
+if [ "$(find "$work/source/src/migrations" -name '*.sql' | wc -l | tr -d ' ')" != 6 ]; then
+    printf '%s\n' 'This release changes the database schema; review migrations and perform a planned operator upgrade.' >&2
+    exit 1
+fi
+image="exetrouter:${tag#v}"
+docker buildx build --load --tag "$image" --file "$work/source/deploy/docker/Dockerfile" "$work/source"
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+backup="/var/lib/exetrouter/backups/pre-update-$stamp"
+compose exec -T exrd /bin/sh -c 'mkdir -p /var/lib/exetrouter/backups; chmod 700 /var/lib/exetrouter/backups'
+compose exec -T exrd /usr/local/bin/exrd admin backup create --to "$backup"
+compose exec -T exrd /usr/local/bin/exrd admin backup verify --from "$backup"
+cp -p "$root/.env" "$work/old.env"
+cp -p "$native" "$work/old.exrd"
+container=$(docker create "$image")
+docker cp "$container":/usr/local/bin/exrd "$work/new.exrd"
+docker rm "$container" >/dev/null
+container=
+"$work/new.exrd" --version >/dev/null
+# Persist rollback before touching the working stack; keys and DB remain private.
+rollback="$(dirname "$root")/rollback/update-$stamp"
+install -d -m 700 "$rollback"
+cp -p "$work/old.env" "$rollback/environment"
+cp -p "$work/old.exrd" "$rollback/exrd"
+changed=true
+python3 - "$root/.env" "$image" <<'PY'
+import os, sys, tempfile
+p,image=sys.argv[1:]
+rows=open(p).read().splitlines()
+rows=[r for r in rows if not r.startswith('EXETROUTER_IMAGE=')]
+rows.append('EXETROUTER_IMAGE='+image)
+fd,tmp=tempfile.mkstemp(prefix='.env-update-',dir=os.path.dirname(p))
+try:
+    with os.fdopen(fd,'w') as f:
+        f.write('\n'.join(rows)+'\n'); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,p)
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
+PY
+install -m 755 "$work/new.exrd" "$native.new"
+mv -f "$native.new" "$native"
+if ! systemctl restart exetrouter.service; then
+    printf '%s\n' 'Update failed health validation; previous image and gateway restored.' >&2
+    exit 1
+fi
+systemctl start exetrouter-sshd.service
+finished=true
+# Upgrade the executable host helpers, preserving deployment config and Compose customizations.
+for helper in update-host exrd-host; do
+    if [ "$helper" = update-host ]; then destination="$root/update-host"; else destination=/usr/local/bin/exrd; fi
+    if [ -f "$work/source/deploy/docker/$helper" ]; then
+        cp -p "$destination" "$rollback/$helper"
+        install -m 755 "$work/source/deploy/docker/$helper" "$destination.new"
+        mv -f "$destination.new" "$destination"
+    fi
+done
+printf 'Updated exrd to %s. Accounts, keys and tokens were preserved.\n' "$tag"

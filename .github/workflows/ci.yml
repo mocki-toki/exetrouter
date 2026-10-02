@@ -1,0 +1,33 @@
+name: CI
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Rust stable with checks
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: Publication and installer checks
+        run: |
+          python3 scripts/check-publication.py
+          python3 scripts/test-installer.py
+          python3 scripts/test-docker-update.py
+          cargo package --locked --list > package-files.txt
+          python3 scripts/check-publication.py --package-list package-files.txt

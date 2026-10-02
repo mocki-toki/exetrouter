@@ -1,0 +1,4 @@
+interface:
+  display_name: "ExetRouter client"
+  short_description: "Use standalone or remote exr and manage local accounts"
+  default_prompt: "Use $exr to inspect my ExetRouter connection, models, usage and upstream limits."

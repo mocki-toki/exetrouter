@@ -1,0 +1,78 @@
+{
+  "reviewed_at": "2026-10-02",
+  "projects": [
+    {
+      "id": "codex",
+      "repository": "openai/codex",
+      "version": "0.160.0",
+      "tag": "rust-v0.160.0",
+      "commit": "a956835d020762cb2b570053af06f643a11c0ecc",
+      "files": [
+        {
+          "path": "codex-rs/codex-api/src/requests/headers.rs",
+          "sha256": "98c9579a8f17327fda1792ffbf22e8d09241fdc79620c37b699d94cd9637cd47"
+        },
+        {
+          "path": "codex-rs/codex-api/src/common.rs",
+          "sha256": "1b01d4b2d7784c67e302b38d5b44aaa5ff733d8b575fb776cc4e2902ccb3a14c"
+        },
+        {
+          "path": "codex-rs/core/src/client.rs",
+          "sha256": "605ced35cd853fcc4e23f6edd724c96f96f74c736a45e6ea95bf5300f3ab814c"
+        },
+        {
+          "path": "codex-rs/core/src/responses_retry.rs",
+          "sha256": "0a008d81033ce5eb7ab76edcd0881750ed01450c47350a6fd99077bf5a6e53c2"
+        },
+        {
+          "path": "codex-rs/http-client/src/request.rs",
+          "sha256": "e909859af99adabad04daf3663ff77fae736e7587870a3dc3545c7d5f3ffe4a1"
+        },
+        {
+          "path": "codex-rs/core/src/responses_metadata.rs",
+          "sha256": "17821e5baed960026bc9b54f0af5085883c9c057647631fcd4d0070fdb3827bd"
+        }
+      ],
+      "npm_package": "@openai/codex"
+    },
+    {
+      "id": "opencode",
+      "repository": "anomalyco/opencode",
+      "version": "2.0.22",
+      "tag": "v2.0.22",
+      "commit": "527f0b931d1f9b3ebd34e106c51b31ce5db5b075",
+      "files": [
+        {
+          "path": "packages/core/src/plugin/provider/openai.ts",
+          "sha256": "710aab472443a9a4516dc34e4911d006899e4f12619432ffc37e8e71cadb5aaa"
+        },
+        {
+          "path": "packages/core/src/plugin/provider/chatgpt.ts",
+          "sha256": "b7161d093f97822458398ebda555e2fd55bcc2e1e073dafc62a900fdcea95a42"
+        },
+        {
+          "path": "packages/ai/src/protocols/openai-responses.ts",
+          "sha256": "96cee1045495e61119f56fec13e7846677252f2bb6c64c05a53c1a3b3644f8e5"
+        },
+        {
+          "path": "packages/ai/src/protocols/open-responses-continuation.ts",
+          "sha256": "5ad84c6e89641c701815e40c35d888cbfa43f9961506b3647c321d522016bf4e"
+        }
+      ],
+      "npm_package": "@opencode/cli"
+    },
+    {
+      "id": "opencode-v1",
+      "repository": "anomalyco/opencode",
+      "version": "1.18.34",
+      "tag": "v1.18.34",
+      "commit": "aec0b9a6d8898f68f923aaf08b7306d931fd9d76",
+      "files": [
+        {
+          "path": "packages/opencode/src/plugin/openai/codex.ts",
+          "sha256": "9480ee62a3de6cfd8c49651a1651f27a7381c2fa7a183a5eedff5960d284c202"
+        }
+      ]
+    }
+  ]
+}

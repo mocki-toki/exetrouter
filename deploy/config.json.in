@@ -1,0 +1,8 @@
+{
+  "db": "/var/lib/exetrouter/exetrouter.sqlite",
+  "key": "/run/exetrouter/hmac.key",
+  "oauth_key": "/run/exetrouter/oauth.key",
+  "control_socket": "/run/exetrouter/control.sock",
+  "gateway_uid": GATEWAY_UID,
+  "listen": "127.0.0.1:8787"
+}

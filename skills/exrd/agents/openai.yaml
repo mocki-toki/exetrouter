@@ -1,0 +1,4 @@
+interface:
+  display_name: "ExetRouter server"
+  short_description: "Configure and operate Docker or native exrd servers"
+  default_prompt: "Use $exrd to inspect and operate my ExetRouter server with its existing configuration and state."

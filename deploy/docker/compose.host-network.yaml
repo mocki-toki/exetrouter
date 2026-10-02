@@ -1,0 +1,7 @@
+# Legacy-host migration only: preserve a real loopback listener without Docker port publishing.
+# Pair with config listen=127.0.0.1:8787. Default bridge deployments require Docker >=28.
+services:
+  exrd:
+    network_mode: host
+    ports: !reset []
+    command: ['serve']

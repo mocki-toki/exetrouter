@@ -1,0 +1,39 @@
+[Unit]
+Description=ExetRouter model API and SSH control
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=exetrouter
+Group=exetrouter-gateway
+WorkingDirectory=/var/lib/exetrouter
+StateDirectory=exetrouter
+StateDirectoryMode=0700
+RuntimeDirectory=exetrouter
+RuntimeDirectoryMode=2710
+LoadCredential=hmac.key:/etc/exetrouter/exetrouter.key
+LoadCredential=oauth.key:/etc/exetrouter/exetrouter.oauth.key
+# systemd credentials may use group-readable modes inside an isolated mount.
+# Materialize private copies to satisfy exrd's portable file permission checks.
+ExecStartPre=/usr/bin/install -m 600 %d/hmac.key /run/exetrouter/hmac.key
+ExecStartPre=/usr/bin/install -m 600 %d/oauth.key /run/exetrouter/oauth.key
+# Paths and gateway UID are saved once in /etc/exetrouter/config.json.
+ExecStart=/usr/local/bin/exrd serve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictSUIDSGID=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

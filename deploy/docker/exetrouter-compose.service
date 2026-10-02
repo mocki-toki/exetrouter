@@ -1,0 +1,25 @@
+[Unit]
+Description=ExetRouter Docker application
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/exetrouter/docker
+ExecStartPre=/usr/bin/install -d -m 2710 /run/exetrouter
+ExecStart=/usr/bin/docker compose up -d --wait --wait-timeout 60
+ExecStop=/usr/bin/docker compose stop -t 25
+TimeoutStartSec=90
+TimeoutStopSec=45
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/exetrouter
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

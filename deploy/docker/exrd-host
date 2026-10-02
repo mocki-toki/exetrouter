@@ -1,0 +1,16 @@
+#!/bin/sh
+# Root-owned host launcher. SSH gateway never receives Docker privileges.
+set -eu
+native=/usr/local/libexec/exetrouter/exrd
+if [ "${1:-}" = update ]; then
+    if [ "${2:-}" != --check ] && [ "$(id -u)" -ne 0 ]; then exec sudo -- "$0" "$@"; fi
+    case "${2:-}" in --check) exec "$native" "$@" ;; "") exec /opt/exetrouter/docker/update-host ;; *) printf '%s\n' 'Use exrd update or exrd update --check [--json]' >&2; exit 2 ;; esac
+fi
+for argument in "$@"; do
+    case "$argument" in gateway|--help|-h|--version|-V) exec "$native" "$@" ;; esac
+done
+if [ "$(id -u)" -ne 0 ]; then exec sudo -- "$0" "$@"; fi
+set -- "$@"
+if [ -t 0 ] && [ -t 1 ]; then tty_flag=-it; else tty_flag=-T; fi
+exec docker compose --project-directory /opt/exetrouter/docker \
+    -f /opt/exetrouter/docker/compose.yaml exec "$tty_flag" exrd /usr/local/bin/exrd "$@"

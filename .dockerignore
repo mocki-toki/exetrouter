@@ -1,0 +1,10 @@
+**
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!deploy/
+!deploy/docker/
+!deploy/docker/Dockerfile
+!scripts/
+!scripts/install.sh

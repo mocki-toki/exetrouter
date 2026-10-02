@@ -1,0 +1,41 @@
+[package]
+name = "exetrouter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.88"
+description = "A privacy-conscious Codex/OpenCode model router with SSH management"
+repository = "https://github.com/mocki-toki/exetrouter"
+readme = "README.md"
+include = ["src/**", "tests/**", "clients/**", "docs/**", "deploy/**", "scripts/**", "skills/**", "prompts/**", "Cargo.lock", "README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md", "AGENTS.md", "CLAUDE.md"]
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+chacha20poly1305 = "0.10"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+futures-util = "0.3"
+hmac = "0.12"
+iana-time-zone = "0.1"
+libc = "0.2"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+zstd = { version = "0.13", default-features = false }
+
+crossterm = "0.29"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+
+[dev-dependencies]
+tempfile = "3"
