@@ -62,8 +62,8 @@ Run `exrd` on a server to share your ChatGPT account pool with friends, tools an
 
 Choose a server installation:
 
-- [Docker Compose](deploy/docker/README.md) — the recommended setup, using ready-made Linux AMD64/ARM64 images.
-- [Native server](deploy/README.md) — run `exrd` directly with systemd, OpenSSH and a TLS reverse proxy.
+- [Docker Compose](deploy/docker/README.md)
+- [Native server](deploy/README.md)
 
 ## Usage
 
