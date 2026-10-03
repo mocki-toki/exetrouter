@@ -8,7 +8,7 @@ This audit compares released client source with ExetRouter. It is a versioned en
 | --- | --- | --- |
 | [Codex](https://github.com/openai/codex/tree/a956835d020762cb2b570053af06f643a11c0ecc) | 0.160.0 | Native request construction, Lite, identity, compression and recovery. |
 | [OpenCode V2](https://github.com/anomalyco/opencode/tree/527f0b931d1f9b3ebd34e106c51b31ce5db5b075) | 2.0.22 | Responses lowering, continuation, compaction and ChatGPT adapters. |
-| [OpenCode V1](https://github.com/anomalyco/opencode/blob/aec0b9a6d8898f68f923aaf08b7306d931fd9d76/packages/opencode/src/plugin/openai/codex.ts) | 1.18.34 | Separate OAuth/transport implementation; source reviewed, outside our native execution matrix. |
+| [OpenCode V1](https://github.com/anomalyco/opencode/blob/aec0b9a6d8898f68f923aaf08b7306d931fd9d76/packages/opencode/src/plugin/openai/codex.ts) | 1.18.34 | Separate OAuth/transport implementation; October 3 mock HTTP tool/resume passed. Unmodified client retries errors; provider-scoped V1 bridge passed four one-submission error cases. See [V1 evidence](compatibility.md#opencode-v1-check-2026-10-03). |
 
 Exact commits, selected file hashes and reviewed native test versions live in [protocol-sources.json](protocol-sources.json). Versions were resolved against npm stable tags or GitHub latest releases; release tags were resolved to commits. Development branches are not substituted for releases.
 

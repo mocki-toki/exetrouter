@@ -139,6 +139,49 @@ impl Run<'_> {
                 }
                 command.arg(self.prompt);
             }
+            "opencode-v1" | "opencode-v1-bridge" => {
+                // V1 continuation checks process reopening only. Its summarizing
+                // compaction protocol is not part of this fixture.
+                if self.websocket {
+                    return Err("OpenCode V1 fixture only supports HTTP".into());
+                }
+                let provider = if self.client == "opencode-v1-bridge" {
+                    "exetrouter"
+                } else {
+                    "openai"
+                };
+                let model = format!("{provider}/{}", self.model);
+                let mut options = json!({"model":model,"enabled_providers":[provider],"provider":{provider:{"npm":"@ai-sdk/openai","env":["EXETROUTER_TOKEN"],"options":{"baseURL":format!("{}/v1",self.url)},"models":{self.model:{"name":"Synthetic fixture","limit":{"context":128000,"output":8192},"options":{"store":false}}}}},"permission":{"*":"allow"}});
+                if self.client == "opencode-v1-bridge" {
+                    let plugin = Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("clients/opencode-v1/exetrouter.mjs");
+                    options["plugin"] = json!([format!("file://{}", plugin.display())]);
+                }
+                command
+                    .env("XDG_CONFIG_HOME", &config)
+                    .env("XDG_DATA_HOME", self.directory.join("data"))
+                    .env("XDG_STATE_HOME", self.directory.join("state"))
+                    .env("XDG_CACHE_HOME", self.directory.join("cache"))
+                    .env("OPENCODE_CONFIG_DIR", &config)
+                    .env("OPENCODE_CONFIG_CONTENT", options.to_string())
+                    .env("OPENCODE_DISABLE_AUTOUPDATE", "true")
+                    .env("OPENCODE_DISABLE_MODELS_FETCH", "true")
+                    .env("OPENCODE_DISABLE_PROJECT_CONFIG", "true")
+                    .args([
+                        "run",
+                        "--auto",
+                        "--format",
+                        "json",
+                        "--model",
+                        &model,
+                        "--title",
+                        "Compatibility fixture",
+                    ]);
+                if policy.is_some_and(|policy| policy.resume) {
+                    command.arg("--continue");
+                }
+                command.arg(self.prompt);
+            }
             "opencode" => {
                 let plugin = config.join("no-retries");
                 fs::create_dir_all(&plugin)?;

@@ -16,6 +16,12 @@ Export `exr models --json --format opencode-jsonc`; merge `providers.exetrouter.
 
 Install the repository's `clients/opencode/exetrouter` plugin using an absolute path in `plugins`. It removes unsupported automatic output caps and disables this provider's session retry hook. It does not guarantee every possible client recovery path. Change transport to `http` for an isolated HTTP/SSE test.
 
+## OpenCode V1
+
+The exact checked client is `opencode-ai` 1.18.34, HTTP/SSE only. Use singular `plugin` and `provider`, `npm="@ai-sdk/openai"`, env `EXETROUTER_TOKEN`, options `baseURL`, and provider ID `exetrouter`. Load the separate absolute `file://.../clients/opencode-v1/exetrouter.mjs` plugin. Its public config hook wraps only this provider's transport and turns failures into fixed non-retryable client errors; it also removes caps/sampling and sets store=false. Detailed upstream errors are suppressed. The unmodified V1 client automatically retries errors and is unsuitable for the no-replay contract.
+
+Convert the exported model metadata to V1 descriptors as shown in `docs/compatibility.md`; do not copy V2 configuration. Tools/process resume and four synthetic failure cases passed. V1 real upstream, WebSocket, compaction and long context remain unverified. Avoid experimental native LLM/WebSocket paths and do not apply this bridge to an unreviewed version.
+
 ## SDKs and service APIs
 
 Python: `OpenAI(base_url=URL, api_key=os.environ["EXETROUTER_TOKEN"], max_retries=0)`. JavaScript: `new OpenAI({baseURL: URL, apiKey: process.env.EXETROUTER_TOKEN, maxRetries: 0})`.

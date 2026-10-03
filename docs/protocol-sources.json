@@ -71,8 +71,41 @@
         {
           "path": "packages/opencode/src/plugin/openai/codex.ts",
           "sha256": "9480ee62a3de6cfd8c49651a1651f27a7381c2fa7a183a5eedff5960d284c202"
+        },
+        {
+          "path": "packages/opencode/src/provider/provider.ts",
+          "sha256": "9fb8958a521bbc5a70e5e6d4ecb130149115fe891fb78bca0ae73a966b9f547a"
+        },
+        {
+          "path": "packages/opencode/src/session/llm.ts",
+          "sha256": "5f1dcfb734853e39760e4dd05470f0c7d8752fc5dcc64e118c065149602e402d"
+        },
+        {
+          "path": "packages/opencode/src/session/llm/request.ts",
+          "sha256": "90077551a9a46e11a37f44279c584832918d722c0ba0407ff8cad8d3437dd0de"
+        },
+        {
+          "path": "packages/opencode/src/session/retry.ts",
+          "sha256": "7e24b96622f7b46586eabb68d3c2464d1c68f5cc58262f2d305878d5e55b9aed"
+        },
+        {
+          "path": "packages/opencode/src/session/processor.ts",
+          "sha256": "0b31e207beda56bd9a4b9b88c9e42d89a0651dd011773748c8e2938dfc3dcb74"
+        },
+        {
+          "path": "packages/opencode/src/config/config.ts",
+          "sha256": "87a9071af1ddb04d65947dba49be3fb4c94ecf63e120f17ce46ee81ff25dd45a"
+        },
+        {
+          "path": "packages/opencode/src/plugin/index.ts",
+          "sha256": "47c62b7cfae891d268e6b239edb0f1c46df5cb35eb11ccfd8bd4186c156024e9"
+        },
+        {
+          "path": "packages/opencode/src/session/message-v2.ts",
+          "sha256": "bfeb41e03e3788c83d3a031cce0aa1cf19a82c024a09e2a6aadbebb7a3d40d53"
         }
-      ]
+      ],
+      "npm_package": "opencode-ai"
     }
   ]
 }

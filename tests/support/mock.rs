@@ -768,6 +768,13 @@ fn safe_tool(body: &Value) -> Option<(String, Option<String>, Value)> {
                     json!({"cmd":"echo EXETROUTER_TOOL_OK","max_output_tokens":1000}),
                 ));
             }
+            if name == "bash" {
+                return Some((
+                    name.into(),
+                    namespace.map(str::to_owned),
+                    json!({"command":"echo EXETROUTER_TOOL_OK","description":"Run synthetic compatibility fixture","timeout":10000}),
+                ));
+            }
             if name == "shell" {
                 return Some((
                     name.into(),

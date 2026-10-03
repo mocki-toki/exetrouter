@@ -81,11 +81,45 @@ def sources(repository, commit, directory):
             path.write_bytes(archive.extractfile(entry).read())
 
 
+def fetch_v1(args):
+    version = metadata("https://registry.npmjs.org/opencode-ai")["dist-tags"]["latest"]
+    if not re.fullmatch(r"1\.\d+\.\d+", version):
+        raise RuntimeError("Expected a stable OpenCode V1 release")
+    revision = commit("anomalyco/opencode", f"v{version}")
+    result = {"version": version, "commit": revision}
+    if args.resolve_only:
+        print(json.dumps(result, indent=2))
+        return
+    os_name = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system())
+    architecture = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "AMD64": "x64"}.get(platform.machine())
+    if not os_name or not architecture:
+        raise RuntimeError("This test downloader supports macOS/Linux on arm64/x64")
+    package = metadata(f"https://registry.npmjs.org/opencode-{os_name}-{architecture}/{version}")
+    if package["version"] != version:
+        raise RuntimeError("Registry returned a different distribution version")
+    raw = fetch(package["dist"]["tarball"])
+    integrity = "sha512-" + base64.b64encode(hashlib.sha512(raw).digest()).decode()
+    if integrity != package["dist"]["integrity"]:
+        raise RuntimeError("OpenCode V1 distribution integrity mismatch")
+    root = Path(__file__).resolve().parent.parent / "target" / "compat"
+    directory = root / f"opencode-v1-{version}"
+    result["binary"] = binary(raw, directory / "bin", "opencode")
+    result["integrity"] = integrity
+    if args.sources:
+        sources("anomalyco/opencode", revision, directory / "source")
+    (root / "current-opencode-v1.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resolve-only", action="store_true")
     parser.add_argument("--sources", action="store_true")
+    parser.add_argument("--opencode-v1", action="store_true", help="Resolve/download the separate opencode-ai V1 client only")
     args = parser.parse_args()
+    if args.opencode_v1:
+        fetch_v1(args)
+        return
     codex = metadata("https://registry.npmjs.org/@openai/codex")["dist-tags"]["latest"]
     opencode = metadata("https://registry.npmjs.org/@opencode/cli")["dist-tags"]["latest"]
     if any(not re.fullmatch(r"\d+\.\d+\.\d+", version) for version in (codex, opencode)):
