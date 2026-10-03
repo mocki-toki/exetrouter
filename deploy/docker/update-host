@@ -44,7 +44,7 @@ mkdir "$work/source"
 tar -xzf "$work/source.tar.gz" --strip-components=1 -C "$work/source"
 # Packaging upgrades must not silently introduce a schema migration.
 # Check the new migration set against the last supported schema before stopping anything.
-if [ "$(find "$work/source/src/migrations" -name '*.sql' | wc -l | tr -d ' ')" != 6 ]; then
+if [ "$(find "$work/source/src/migrations" -name '*.sql' | wc -l | tr -d ' ')" != 7 ]; then
     printf '%s\n' 'This release changes the database schema; review migrations and perform a planned operator upgrade.' >&2
     exit 1
 fi

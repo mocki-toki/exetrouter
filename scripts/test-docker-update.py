@@ -4,7 +4,7 @@ import json, os, subprocess, tarfile, tempfile, unittest
 from pathlib import Path
 SCRIPT=Path(__file__).resolve().parent.parent/'deploy/docker/update-host'
 class Upgrade(unittest.TestCase):
-    def run_upgrade(self, fail=False, migrations=6):
+    def run_upgrade(self, fail=False, migrations=7):
         with tempfile.TemporaryDirectory() as temporary:
             parent=Path(temporary); root=parent/'docker'; root.mkdir(); tools=parent/'tools'; tools.mkdir()
             (root/'.env').write_text('EXETROUTER_IMAGE=exetrouter:0.1.0\nKEEP=value\n')
@@ -51,7 +51,7 @@ if [ "$FIXTURE_FAIL" = 1 ] && [ "$1" = restart ] && [ ! -f "$FIXTURE_FAILED" ]; 
         self.assertEqual(events.count('restart exetrouter.service'),2)
         self.assertFalse(leftovers)
     def test_schema_change_never_stops_working_service(self):
-        r,config,native,events,leftovers=self.run_upgrade(migrations=7)
+        r,config,native,events,leftovers=self.run_upgrade(migrations=8)
         self.assertNotEqual(r.returncode,0); self.assertNotIn('restart',events)
         self.assertIn('exetrouter:0.1.0',config); self.assertFalse(leftovers)
 if __name__=='__main__': unittest.main()
