@@ -14,32 +14,32 @@ Turn your **ChatGPT Plus or Pro subscription into a shared OpenAI-compatible end
 
 Codex CLI already supports ChatGPT subscriptions directly. ExetRouter adds a common endpoint for multiple people and tools, separate access tokens and shared account-pool management. Sign in to upstream accounts once through OAuth; clients receive router tokens instead of your ChatGPT credentials. Supported requests use the subscriptions' available limits rather than a separately billed OpenAI Platform API key.
 
-## What it's for
-
-**Share access without sharing your ChatGPT login.** Host one account or a pool on your server and issue individual tokens to friends and services. Each token belongs to a router user, so usage can be tracked by user and access revoked independently. Codex CLI and OpenCode connect to the same endpoint; restricted SSH provides dashboard access, while applications use the API over HTTPS.
-
-**Connect BYOK clients and scripts to the same endpoint.** Give a compatible editor, agent or app an ExetRouter bearer token and your router's `/v1` URL. Scripts and services can use OpenAI SDKs for supported Responses, SSE or WebSocket streaming, or supported Chat Completions. Clients must support a custom endpoint and the router's API contract; this is not the entire OpenAI API.
-
-**See who uses the pool and how much quota is left.** The dashboard combines per-user usage, model statistics and subscription limits. Each person can manage their own tokens. Commands also provide structured reports for automation: `exr tokens --json`, `exr usage --json` and `exr limits --json`.
-
 ## How it works
 
 - **`exr`** opens the terminal dashboard: accounts, tokens, usage, subscription limits and settings. Choose **Standalone** and add an OAuth account for personal use — no server or SSH setup required.
 - **`exr serve`** keeps the standalone API running without a dashboard.
 - **`exrd`** runs a shared server, with Docker or native deployment. Friends configure `exr` once to connect over restricted SSH; private SSH keys stay on their devices.
 
-Responses, native compaction, streaming, account affinity, bounded automatic quota failover and limited Chat Completions are implemented and tested. Responses forwards image inputs to capable upstream models, including images sent by Codex; Chat Completions translates user image parts into the same input format. Chat image forwarding is covered by offline fixtures; actual vision behavior depends on the upstream model and remains separately unverified. Embeddings, image generation, audio, Assistants and other unsupported endpoints are not provided. Subscription availability and upstream behavior can change; see [compatibility](docs/compatibility.md).
-
 ## Install
 
-Install `exr` for standalone use or connection to an existing server. For source installation, use Rust 1.88 or newer and a C compiler; remote mode also needs OpenSSH:
+Install `exr` to run locally or connect to a shared server.
+
+### Linux
+
+Download and run the binary installer. It selects your architecture and verifies the release checksum; Rust is not required:
 
 ```sh
-cargo install --locked --git https://github.com/mocki-toki/exetrouter --bin exr
-exr
+curl --fail --location --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/mocki-toki/exetrouter/main/scripts/install.sh -o /tmp/exetrouter-install.sh
+sh /tmp/exetrouter-install.sh --role client
+~/.local/bin/exr
 ```
 
-On macOS, install the client without Rust:
+The client is installed in `~/.local/bin`. Add that directory to your `PATH` to launch it as `exr`. See [installation details](docs/installation.md#release-binaries-on-linux-or-macos) for version selection, custom paths and older Linux systems.
+
+### macOS
+
+Install with Homebrew:
 
 ```sh
 brew tap mocki-toki/exetrouter https://github.com/mocki-toki/exetrouter
@@ -47,11 +47,23 @@ brew install mocki-toki/exetrouter/exr
 exr
 ```
 
-On Linux, use the [checksummed binary installer](docs/installation.md#release-binaries-on-linux-or-macos). Shared servers use [versioned Docker images and Compose](deploy/docker/README.md).
+### Build from source
 
-[Full installation guide](docs/installation.md) · [Docker server](deploy/docker/README.md) · [Native server](deploy/README.md) · [GitHub releases](https://github.com/mocki-toki/exetrouter/releases)
+Use Rust 1.88 or newer and a C compiler:
 
-Want an agent to install it? Copy the [client prompt](prompts/install-client.md) or the [server prompt](prompts/install-server.md), fill in the connection/domain fields, and send it to your agent. The instructions include checks and leave OAuth login and secret issuance to the user's interactive terminal.
+```sh
+cargo install --locked --git https://github.com/mocki-toki/exetrouter --bin exr
+exr
+```
+
+## Remote Server
+
+Run `exrd` on a server to share your ChatGPT account pool with friends, tools and services. Each person gets their own access and tokens; OAuth accounts stay on the server. Users install `exr` on their devices and choose **Remote Server** in the first-run wizard. The dashboard connects over restricted SSH, while applications use the shared HTTPS API endpoint.
+
+Choose a server installation:
+
+- [Docker Compose](deploy/docker/README.md) — the recommended setup, using ready-made Linux AMD64/ARM64 images.
+- [Native server](deploy/README.md) — run `exrd` directly with systemd, OpenSSH and a TLS reverse proxy.
 
 ## Usage
 
@@ -102,7 +114,7 @@ Replace both URLs with your router's address. For standalone use, they are `http
 
 Start `codex --profile exetrouter` from the terminal where the token is available. Codex fetches model IDs and metadata from the router; no catalog export or fixed `model` setting is needed. It inherits your existing model preference, or chooses a catalog default if none is configured. Use `/model` to choose another model available in your pool. Keep the provider name `OpenAI` for native compaction. Automatic catalog discovery is an opt-in Codex feature, marked under development in 0.160.0.
 
-**Migrating from the old README:** move ExetRouter settings to `exetrouter.config.toml`, then remove the legacy `[profiles.exetrouter]` table and any top-level `profile = "exetrouter"` from `~/.codex/config.toml`. Remove an old ExetRouter `model_catalog_json` setting to use the live catalog. Preserve unrelated settings and your existing ChatGPT login. See [configuration details and older clients](docs/compatibility.md#codex-cli) and [official Codex profiles](https://developers.openai.com/codex/config-advanced#profiles).
+OpenCode V1 1.18.34 has a separate HTTP/SSE bridge with mock tool/resume and error no-replay checks. See [V1 setup and measured limitations](docs/compatibility.md#opencode-v1-check-2026-10-03) before using it.
 
 ### OpenCode V2
 
