@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Exclude generated Python bytecode from Cargo packages.
+
 ## 0.1.1
 
 - Add usage grouping by API token in the CLI and dashboard, scoped to the authenticated user and preserving revoked-token history and unknown usage.
