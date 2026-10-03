@@ -86,10 +86,10 @@ sudo docker compose exec -T exrd exrd admin user-create owner
 sudo docker compose exec -T exrd exrd admin user-list
 ```
 
-Register the first user's public key without mounting private keys. Copy only the public key into the running container's private temporary directory, then register it:
+Register the first user's public key without mounting private keys. Write only the public key into a service-owned private temporary file, then register it:
 
 ```sh
-sudo docker compose cp /path/to/owner.pub exrd:/tmp/owner.pub
+sudo docker compose exec -T exrd sh -c 'umask 077; cat > /tmp/owner.pub' < /path/to/owner.pub
 sudo docker compose exec -T exrd exrd admin ssh-key-add --user-id 1 --public-key-file /tmp/owner.pub
 sudo docker compose exec -T exrd rm /tmp/owner.pub
 sudo docker compose exec exrd exrd admin oauth add --device
@@ -130,7 +130,7 @@ Only `/v1/` goes through your reviewed TLS ingress. Preserve existing administra
 
 ## 5. Boot management
 
-Docker's `restart: unless-stopped` restarts the application. To recreate the ephemeral runtime keys after reboot, install the optional `exetrouter-compose.service` as `exetrouter.service`, then run `systemctl daemon-reload` and `systemctl enable exetrouter.service`. Its start command is Compose `up -d --wait`; its stop command gracefully stops the stack. Do not enable a competing native API service.
+Docker's `restart: unless-stopped` restarts the application. For unattended boot with ephemeral runtime keys, install the `exetrouter-compose.service` as `exetrouter.service`, then run `systemctl daemon-reload` and `systemctl enable exetrouter.service`. Its start command is Compose `up -d --wait`; its stop command gracefully stops the stack. Do not enable a competing native API service.
 
 For existing installations using `compose.host-network.yaml`, preserve it and include **both** files in every command:
 
