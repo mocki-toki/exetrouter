@@ -5,7 +5,7 @@ description: "Use ExetRouter's exr CLI to use standalone or remote mode, configu
 
 # ExetRouter client
 
-Use the installed `exr` binary. If working in its Rust repository, build with `cargo build --locked --bins` and use `target/debug/exr`. Run `exr --help` and subcommand help to inspect the installed version's contract.
+On macOS, install the ready-made client with `brew tap mocki-toki/exetrouter https://github.com/mocki-toki/exetrouter` followed by `brew install mocki-toki/exetrouter/exr`; no Rust is required. Use the installed `exr` binary. If working in its Rust repository, build with `cargo build --locked --bins` and use `target/debug/exr`. Run `exr --help` and subcommand help to inspect the installed version's contract.
 
 ## Mode and first run
 
@@ -69,4 +69,4 @@ A current subscription window must have ≤5% remaining (≥95% used), with a kn
 
 ## Software updates
 
-Use `exr update --check --json` for a read-only public release check. Install with `exr update` only when the user requests updating software. Config, state and credentials stay in place. exr Settings offers Enter to choose Check updates or Update exr and Enter to confirm installation; reopen the dashboard afterward. Source installations rebuild a locked published tag. Docker server updates run only through the host operator launcher, with private backup and health rollback; never grant the restricted gateway Docker access. Native services require the normal reviewed restart after binary replacement.
+Use `exr update --check --json` for a read-only public release check. Install with `exr update` only when the user requests updating software. Config, state and credentials stay in place. exr Settings offers Enter to choose Check updates or Update exr and Enter to confirm installation; reopen the dashboard afterward. Homebrew installations update with `brew upgrade mocki-toki/exetrouter/exr`; the built-in updater refuses direct replacement of a Homebrew-managed binary. Source installations rebuild a locked published tag. Docker server updates run only through the host operator launcher, with private backup and health rollback; never grant the restricted gateway Docker access. Native services require the normal reviewed restart after binary replacement.

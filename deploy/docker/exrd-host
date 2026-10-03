@@ -12,5 +12,10 @@ done
 if [ "$(id -u)" -ne 0 ]; then exec sudo -- "$0" "$@"; fi
 set -- "$@"
 if [ -t 0 ] && [ -t 1 ]; then tty_flag=-it; else tty_flag=-T; fi
-exec docker compose --project-directory /opt/exetrouter/docker \
-    -f /opt/exetrouter/docker/compose.yaml exec "$tty_flag" exrd /usr/local/bin/exrd "$@"
+root=${EXRD_DEPLOYMENT_ROOT:-/opt/exetrouter/docker}
+if [ -f "$root/compose.host-network.yaml" ]; then
+    exec docker compose --project-directory "$root" -f "$root/compose.yaml" \
+        -f "$root/compose.host-network.yaml" exec "$tty_flag" exrd /usr/local/bin/exrd "$@"
+fi
+exec docker compose --project-directory "$root" -f "$root/compose.yaml" \
+    exec "$tty_flag" exrd /usr/local/bin/exrd "$@"

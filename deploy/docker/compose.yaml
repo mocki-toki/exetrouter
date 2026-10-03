@@ -1,7 +1,7 @@
 name: exetrouter
 services:
   credentials:
-    image: ${EXETROUTER_IMAGE:-exetrouter:local}
+    image: ${EXETROUTER_IMAGE:?Set EXETROUTER_IMAGE to a versioned image or digest}
     user: '0:0'
     entrypoint: ['/bin/sh', '/prepare-credentials.sh']
     environment:
@@ -18,7 +18,7 @@ services:
     secrets: [hmac_key, oauth_key]
     restart: 'no'
   exrd:
-    image: ${EXETROUTER_IMAGE:-exetrouter:local}
+    image: ${EXETROUTER_IMAGE:?Set EXETROUTER_IMAGE to a versioned image or digest}
     user: '${EXETROUTER_UID:-10001}:${EXETROUTER_GID:-10002}'
     depends_on:
       credentials:

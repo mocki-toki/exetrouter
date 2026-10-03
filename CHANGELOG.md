@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+- Add a binary-only macOS Homebrew tap for exr, update its checksums from release artifacts, and preserve Homebrew ownership during client updates.
+
+- Publish versioned Linux AMD64/ARM64 container images alongside native releases.
+- Make Docker Compose the primary installation, administration and update interface; bootstrap directly with the container and document the separate native SSH gateway.
+- Keep the host launcher optional and change its updater to pull images, pin digests, compare the live backup schema and validate binary versions before switching.
+- Preserve legacy host-network overrides and health rollback without building Rust on the operator host.
+
 ## 0.1.3
 
 - Fix Docker updates incorrectly refusing the existing seven-migration schema; future schema changes still require a planned operator upgrade.

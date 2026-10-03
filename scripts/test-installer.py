@@ -72,5 +72,24 @@ case "$url" in */SHA256SUMS) cp "$FIXTURE_ROOT/SHA256SUMS" "$dest" ;; *) cp "$FI
         self.assertNotEqual(self.run_installer('--role','admin').returncode,0)
         self.assertNotEqual(self.run_installer('--version','../../bad').returncode,0)
 
+class HomebrewFormula(unittest.TestCase):
+    def test_formula_uses_release_checksums_and_installs_only_client(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("formula_generator", Path(__file__).with_name("homebrew-formula.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sums = "a" * 64 + "  exetrouter-aarch64-apple-darwin.tar.gz\n" + "b" * 64 + "  exetrouter-x86_64-apple-darwin.tar.gz\n"
+        formula = module.formula("0.2.0", sums)
+        self.assertIn('version "0.2.0"', formula)
+        self.assertIn('sha256 "' + "a" * 64 + '"', formula)
+        self.assertIn('bin.install "exr"', formula)
+        self.assertNotIn('cargo', formula)
+        with self.assertRaises(ValueError):
+            module.formula("../../bad", sums)
+        with self.assertRaises(ValueError):
+            module.formula("0.2.0", sums + sums)
+        with self.assertRaises(KeyError):
+            module.formula("0.2.0", "")
+
 if __name__ == '__main__':
     unittest.main()

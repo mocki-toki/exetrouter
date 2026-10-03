@@ -6,16 +6,30 @@ Choose a role: **client** runs `exr` standalone or connects to an existing route
 
 You need the server's SSH host/port/user, your protected Ed25519 private key, operator key registration and an independently verified host-key fingerprint. The client defaults to localhost, port 2222 and user routercli; it does not select a third-party deployment.
 
-### Release binaries
+### Homebrew on macOS
 
-When a GitHub release is available, clone the repository, review its small installer and run it:
+Install the client from the project's tap. Homebrew downloads the release binary and verifies the formula's SHA-256 checksum; Rust, Cargo and a compiler are not needed:
 
 ```sh
-git clone https://github.com/mocki-toki/exetrouter.git
-cd exetrouter
-less scripts/install.sh
-sh scripts/install.sh --role client
+brew tap mocki-toki/exetrouter https://github.com/mocki-toki/exetrouter
+brew install mocki-toki/exetrouter/exr
+exr
 ```
+
+The formula installs only `exr`, supports Apple Silicon and Intel Macs, and does not modify connection settings, accounts or SSH. Update with `brew upgrade mocki-toki/exetrouter/exr`, then reopen the dashboard. The built-in updater detects Homebrew's receipt and directs you to Homebrew rather than replacing a managed binary.
+
+### Release binaries on Linux or macOS
+
+Without Homebrew, download and review the installer, then run it. The default path downloads a ready-made binary; source compilation is opt-in:
+
+```sh
+curl --fail --location --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/mocki-toki/exetrouter/main/scripts/install.sh -o /tmp/exetrouter-install.sh
+less /tmp/exetrouter-install.sh
+sh /tmp/exetrouter-install.sh --role client
+```
+
+For a fixed reviewed version, replace `main` in the URL with its `vMAJOR.MINOR.PATCH` tag and pass the same tag as `--version`. Only curl, tar and a SHA-256 utility are required for release installation.
 
 Linux release binaries may require a newer glibc than the target system provides. For older systems, use the locked source installation below; the Docker image builds against Debian 12. The installer checks that both selected binaries run before replacing anything.
 
@@ -73,7 +87,7 @@ For scripted configuration: `exr configure --standalone`. Defaults are `~/.local
 
 ## Docker server
 
-Follow [Docker Compose installation](../deploy/docker/README.md). It retains restricted host SSH and puts the API in an unprivileged container, with separate state/config/credential mounts. The host launcher provides `exrd admin user-list` without repeated path flags or aliases. [Server command reference](server-cli.md) explains every operation.
+Follow [Docker Compose installation](../deploy/docker/README.md). It retains restricted host SSH and puts the API in an unprivileged container, with separate state/config/credential mounts. Use `docker compose exec exrd exrd admin ...` for operator commands. The host launcher is an optional compatibility convenience; the native restricted SSH gateway is a separate component. [Server command reference](server-cli.md) explains every operation.
 
 Install the separate server skill by copying `skills/exrd` into your agent's skill directory; `skills/exr` handles standalone/remote client use.
 
@@ -93,8 +107,8 @@ exrd update                 # Server operator: update the installed server
 
 Release installations reuse the checksummed binary installer and the existing prefix. Cargo installations are recognized through Cargo's package receipt and updated from the published tag using a locked source build; Rust and a C compiler are required for that method. Settings, account state, keys and tokens stay in their existing locations. Source builds can take several minutes. `update` never silently installs an older version.
 
-On a Docker host, install the root-owned `deploy/docker/update-host` beside `compose.yaml`. The `exrd` launcher builds the latest published tag, creates/verifies a private backup, updates the application image and native SSH gateway, then restarts and checks the existing service. Failed health validation restores the previous image/gateway. Updates that introduce another database migration are refused for a planned operator upgrade. Docker/Buildx, curl and Python 3 must be available on the host. No Docker access is granted to the restricted SSH gateway.
+On a Docker host, use the [Compose update procedure](../deploy/docker/README.md#updates-with-compose): verify a private snapshot, compare schema versions, select a published GHCR image, update the separate native gateway, and apply it with `docker compose pull` and `docker compose up -d --wait`. Official images starting with 0.2.0 support Linux AMD64/ARM64; the server does not need Rust or an on-host build. An optional root-owned `update-host` helper automates digest pinning, version/schema checks, backup and health rollback through the existing systemd Compose service. Existing `exrd-host` launchers may keep `exrd update` as a convenience. Install the reviewed new helpers once when migrating older source-building helpers. No Docker access is granted to the restricted SSH gateway.
 
-Native `exrd update` atomically replaces a standard `PREFIX/bin/exrd` installation; restart your native service afterward, using the deployment's normal backup/restart procedure. For a binary in a custom managed path, use the same installer/deployment method that placed it there. Package-manager-controlled installations should be upgraded through their package manager.
+Native `exrd update` atomically replaces a standard `PREFIX/bin/exrd` installation; restart your native service afterward, using the deployment's normal backup/restart procedure. For a binary in a custom managed path, use the same installer/deployment method that placed it there. Homebrew installations use `brew upgrade mocki-toki/exetrouter/exr`; the built-in updater preserves that ownership. Other package-manager-controlled installations should be upgraded through their package manager.
 
-Versions before 0.2.0 do not have a built-in update command: run the reviewed installer again with the **same prefix** to upgrade once; later releases support `update` directly. A shared-server client's Settings updates its own `exr`, not the operator's server.
+For an older binary without `update`, run the reviewed installer again with the **same prefix**. A shared-server client's Settings updates its own `exr`, not the operator's server.

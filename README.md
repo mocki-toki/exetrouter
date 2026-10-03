@@ -39,6 +39,16 @@ cargo install --locked --git https://github.com/mocki-toki/exetrouter --bin exr
 exr
 ```
 
+On macOS, install the client without Rust:
+
+```sh
+brew tap mocki-toki/exetrouter https://github.com/mocki-toki/exetrouter
+brew install mocki-toki/exetrouter/exr
+exr
+```
+
+On Linux, use the [checksummed binary installer](docs/installation.md#release-binaries-on-linux-or-macos). Shared servers use [versioned Docker images and Compose](deploy/docker/README.md).
+
 [Full installation guide](docs/installation.md) · [Docker server](deploy/docker/README.md) · [Native server](deploy/README.md) · [GitHub releases](https://github.com/mocki-toki/exetrouter/releases)
 
 Want an agent to install it? Copy the [client prompt](prompts/install-client.md) or the [server prompt](prompts/install-server.md), fill in the connection/domain fields, and send it to your agent. The instructions include checks and leave OAuth login and secret issuance to the user's interactive terminal.

@@ -6,5 +6,7 @@
 !deploy/
 !deploy/docker/
 !deploy/docker/Dockerfile
+!deploy/docker/update-host
+!deploy/docker/exrd-host
 !scripts/
 !scripts/install.sh

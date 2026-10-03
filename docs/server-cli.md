@@ -27,7 +27,7 @@ exrd admin oauth list
 exrd serve
 ```
 
-The command still needs permission to its private state. In native deployment, execute as the service UID (`sudo -u exetrouter exrd admin user-list`). Config cannot grant filesystem access. In Docker deployment the installed host launcher runs `exrd admin user-list` inside the service container, using `sudo` for Docker access if needed. It is an executable, not a shell alias. The SSH gateway never gets Docker privileges.
+The command still needs permission to its private state. In native deployment, execute as the service UID (`sudo -u exetrouter exrd admin user-list`). Config cannot grant filesystem access. In Docker deployment use `docker compose exec -T exrd exrd admin user-list`. An optional host launcher provides the shorter `exrd admin user-list` form and uses `sudo` for Docker access if needed. It is an executable, not a shell alias. The SSH gateway never gets Docker privileges.
 
 Without saved config, local development defaults to files in the working directory. `init` refuses to overwrite existing state. In deployed services, runtime keys are delivered privately by systemd or the Compose credentials helper.
 
@@ -62,4 +62,4 @@ Reports use readable text by default and `--json` for scripts. Secrets and OAuth
 
 ## Update the software
 
-`exrd update --check` reports the latest published version without opening state or contacting OpenAI; add `--json` for automation. `exrd update` upgrades an installed standard binary, or invokes the root-owned Docker host updater through the host launcher. On Docker it snapshots state, rebuilds a published tag and validates/reverts the service switch. A native binary replacement requires the usual service restart afterward. This operator action is unavailable through the restricted user gateway. See [updates](installation.md#updates).
+`exrd update --check` reports the latest published version without opening state or contacting OpenAI; add `--json` for automation. `exrd update` upgrades an installed standard binary, or invokes the root-owned Docker host updater through the host launcher. The optional Docker helper snapshots state, pulls and pins a versioned GHCR image, verifies the live schema and matching gateway, and validates/reverts the service switch. Compose is the primary operator interface. A native binary replacement requires the usual service restart afterward. This operator action is unavailable through the restricted user gateway. See [updates](installation.md#updates).

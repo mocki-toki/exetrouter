@@ -96,9 +96,15 @@ pub async fn install(binary: &str, release: &Report) -> Result<()> {
         return Err("unknown update role".into());
     }
     if Path::new("/.dockerenv").exists() {
-        return Err("container binaries are read-only; run exrd update on the host".into());
+        return Err(
+            "container binaries are read-only; update the image with Docker Compose on the host"
+                .into(),
+        );
     }
     let executable = std::env::current_exe()?;
+    if homebrew_install(&executable) {
+        return Err("this installation is managed by Homebrew; run brew upgrade mocki-toki/exetrouter/exr, then reopen the dashboard".into());
+    }
     let directory = executable
         .parent()
         .ok_or("cannot locate installed binary")?;
@@ -173,6 +179,20 @@ pub async fn install(binary: &str, release: &Report) -> Result<()> {
     }
     Ok(())
 }
+fn homebrew_install(executable: &Path) -> bool {
+    let Some(prefix) = executable.parent().and_then(Path::parent) else {
+        return false;
+    };
+    prefix.join("INSTALL_RECEIPT.json").is_file()
+        && prefix
+            .parent()
+            .is_some_and(|p| p.file_name().is_some_and(|n| n == "exr"))
+        && prefix
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(|p| p.file_name().is_some_and(|n| n == "Cellar"))
+}
+
 fn source_install(prefix: &Path, binary: &str) -> Result<bool> {
     let receipt = prefix.join(".crates2.json");
     if !receipt.is_file() {
@@ -242,6 +262,18 @@ pub async fn command(binary: &str, check_only: bool, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn homebrew_receipt_prevents_direct_binary_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().join("Cellar/exr/0.2.0");
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        let binary = prefix.join("bin/exr");
+        assert!(!homebrew_install(&binary));
+        std::fs::write(prefix.join("INSTALL_RECEIPT.json"), "{}").unwrap();
+        assert!(homebrew_install(&binary));
+        assert!(!homebrew_install(&dir.path().join("bin/exr")));
+    }
+
     #[test]
     fn fallback_accepts_only_this_repository_stable_release() {
         assert_eq!(

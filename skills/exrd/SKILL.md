@@ -9,7 +9,7 @@ Inspect `exrd --help`, `exrd admin --help` and the relevant subcommand help. Reu
 
 Configuration precedence: explicit path flags override `--config PATH`, `EXRD_CONFIG`, `/etc/exetrouter/config.json`, then `$XDG_CONFIG_HOME/exrd/config.json` (default `~/.config/exrd/config.json`). Paths in saved config are absolute; keys are stored separately. Never initialize over existing state or reuse a copied refresh-token pool in two concurrently running servers.
 
-Read the repository's `docs/server-cli.md` for commands/configuration, `deploy/docker/README.md` for Docker Compose, or `deploy/README.md` for native systemd. Docker's host `exrd` launcher executes admin commands inside the unprivileged container; its restricted gateway path uses a root-owned native binary without Docker access. Do not grant the gateway user the Docker group/socket.
+Read the repository's `docs/server-cli.md` for commands/configuration, `deploy/docker/README.md` for Docker Compose, or `deploy/README.md` for native systemd. Docker Compose is the primary operator interface: `docker compose exec -T exrd exrd admin user-list --json`. Use an interactive `exec` for OAuth device login. An optional host `exrd` launcher executes admin commands inside the unprivileged container; its restricted gateway path uses a root-owned native binary without Docker access. Do not grant the gateway user the Docker group/socket.
 
 Common read-only checks:
 
@@ -33,4 +33,4 @@ Privacy: log only fixed events/statuses/timing/IDs; do not add payload/header/er
 
 ## Software updates
 
-Use `exrd update --check --json` for a read-only public release check. Install with `exrd update` only when the user requests updating software. Config, state and credentials stay in place. exr Settings offers Enter to choose Check updates or Update exr and Enter to confirm installation; reopen the dashboard afterward. Source installations rebuild a locked published tag. Docker server updates run only through the host operator launcher, with private backup and health rollback; never grant the restricted gateway Docker access. Native services require the normal reviewed restart after binary replacement.
+Use `exrd update --check --json` for a read-only public release check. Install with `exrd update` only when the user requests updating software. Config, state and credentials stay in place. exr Settings offers Enter to choose Check updates or Update exr and Enter to confirm installation; reopen the dashboard afterward. Source installations rebuild a locked published tag. Docker server updates use the documented Compose procedure with official versioned GHCR images, a verified private backup, schema comparison and a matching native host gateway. The optional operator helper automates this with digest pinning and health rollback; never grant the restricted gateway Docker access. Native services require the normal reviewed restart after binary replacement.

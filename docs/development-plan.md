@@ -63,7 +63,7 @@ Acceptance: operator can onboard a user, register a public key, add/reauthorize 
 
 ## Next: release distribution
 
-Offer ready-to-pull versioned multi-architecture Docker images so server updates do not require an on-host Rust build. Broaden prebuilt Linux portability beyond the current client glibc requirement, and add publisher provenance/signature verification beyond SHA-256 integrity checks. Verify installation and update paths on clean supported systems.
+Release 0.2.0 adds versioned AMD64/ARM64 GHCR images and a Compose-first installation/update guide, with an optional registry updater and a separate restricted native gateway. Broaden prebuilt Linux portability beyond the current client glibc requirement, and add publisher provenance/signature verification beyond SHA-256 integrity checks. Verify installation and update paths on clean supported systems.
 
 ## Optional extensions
 

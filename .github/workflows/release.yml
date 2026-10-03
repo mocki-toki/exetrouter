@@ -47,12 +47,85 @@ jobs:
           name: ${{ matrix.target }}
           path: dist/*.tar.gz
           if-no-files-found: error
+  container-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux/amd64
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build and push native container
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python3 -c 'import os,tomllib; assert tomllib.load(open("Cargo.toml","rb"))["package"]["version"]==os.environ["GITHUB_REF_NAME"][1:]'
+          python3 -c 'from pathlib import Path; assert len(list(Path("src/migrations").glob("*.sql"))) == 7'
+          python3 scripts/check-publication.py
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx create --use
+          docker buildx build --platform "$PLATFORM" --push --provenance=false \
+            --build-arg "EXETROUTER_VERSION=$version" \
+            --build-arg "EXETROUTER_REVISION=$GITHUB_SHA" \
+            --tag "$image:sha-$GITHUB_SHA-$ARCH" -f deploy/docker/Dockerfile .
+          docker pull "$image:sha-$GITHUB_SHA-$ARCH"
+          docker run --rm "$image:sha-$GITHUB_SHA-$ARCH" --version | grep -Fx "exetrouter $version"
+  container-publish:
+    needs: [build, container-build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Publish versioned multi-architecture image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="${GITHUB_REF_NAME#v}"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if docker buildx imagetools inspect "$image:$version" >/dev/null 2>&1; then
+            printf '%s\n' 'Versioned image already exists; refusing to replace it.' >&2
+            exit 1
+          fi
+          docker buildx imagetools create --tag "$image:$version" \
+            "$image:sha-$GITHUB_SHA-amd64" "$image:sha-$GITHUB_SHA-arm64"
+          mkdir dist
+          docker buildx imagetools inspect "$image:$version" --format '{{json .Manifest}}' > dist/container-manifest.json
+          python3 - <<'PYIMAGE'
+          import json, os
+          from pathlib import Path
+          m=json.loads(Path('dist/container-manifest.json').read_text())
+          assert {(x['platform']['os'],x['platform']['architecture']) for x in m['manifests']} == {('linux','amd64'),('linux','arm64')}
+          Path('dist/CONTAINER_IMAGE').write_text('ghcr.io/'+os.environ['GITHUB_REPOSITORY'].lower()+'@'+m['digest']+'\n')
+          PYIMAGE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: container-image
+          path: dist/CONTAINER_IMAGE
+          if-no-files-found: error
   publish:
-    needs: build
+    needs: [build, container-publish]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
@@ -65,4 +138,21 @@ jobs:
         run: |
           test "$(find dist -name '*.tar.gz' | wc -l)" -eq 4
           (cd dist && sha256sum *.tar.gz > SHA256SUMS)
-          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS --verify-tag --generate-notes --title "ExetRouter $RELEASE_TAG"
+          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS dist/CONTAINER_IMAGE --verify-tag --generate-notes --title "ExetRouter $RELEASE_TAG"
+      - name: Update binary Homebrew formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/homebrew-formula.py "$RELEASE_TAG" dist/SHA256SUMS Formula/exr.rb
+          python3 scripts/check-publication.py
+          python3 - <<'PYFORMULA'
+          import base64, json, os, subprocess
+          from pathlib import Path
+          path='Formula/exr.rb'
+          current=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GH_REPO"]}/contents/{path}']))
+          body={'message':'Update Homebrew exr to '+os.environ['RELEASE_TAG'],
+                'sha':current['sha'],'content':base64.b64encode(Path(path).read_bytes()).decode(), 'branch':'main'}
+          subprocess.run(['gh','api','--method','PUT',f'repos/{os.environ["GH_REPO"]}/contents/{path}','--input','-'],input=json.dumps(body).encode(),stdout=subprocess.DEVNULL,check=True)
+          PYFORMULA

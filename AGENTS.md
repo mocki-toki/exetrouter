@@ -72,7 +72,7 @@ Keep real domains, personal paths, emails, databases, keys, secrets, private bac
 
 Version changes must agree between Cargo.toml, Cargo.lock, changelog and immutable `vMAJOR.MINOR.PATCH` release tags. Native releases are built from tagged source on four CI targets and published with SHA-256 checksums. Never rewrite a published tag or claim a release is ready while its workflow is still running.
 
-The updater preserves the installation method and prefix, validates versions/checksums and replaces binaries atomically. An open dashboard must be reopened afterward. Docker host updates build the tagged source, verify a private snapshot, replace image/native gateway and validate health; failure restores the previous deployment. Schema changes need a reviewed migration/rollback plan and are not a routine one-click packaging update.
+The updater preserves the installation method and prefix, validates versions/checksums and replaces binaries atomically. An open dashboard must be reopened afterward. Docker host updates pull a versioned official image (source builds are an explicit alternative), verify a private snapshot and matching schema, replace image/native gateway and validate health; failure restores the previous deployment. Schema changes need a reviewed migration/rollback plan and are not a routine one-click packaging update.
 
 Inspect the actual host configuration before deployment. Preserve operator customizations, SSH boundaries and existing service names. Verify backup/restore and health without sending inference unless authorized. Report what changed, what was checked and any unresolved limits accurately.
 
