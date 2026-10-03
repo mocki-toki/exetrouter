@@ -36,6 +36,7 @@ exr doctor --json
 exr tokens --json
 exr models --json
 exr usage --period week --by model --json
+exr usage --period week --by token --json
 exr limits --json
 ```
 
@@ -56,7 +57,7 @@ exr token revoke tok_ID --yes
 
 Creation/rotation require terminal stdin/stdout and prohibit JSON. Use the user's interactive terminal for issuance; never capture/paste a real bearer secret into agent output, logs, repository files or command arguments. The client copies the secret directly to the local desktop clipboard without printing it; the user pastes it into their secret store. Headless issuance is unavailable. A TUI clipboard failure offers c to retry copying without repeating issuance. Rotation immediately invalidates the old token. Revoke/rotate only the token within the user's requested scope.
 
-SSH has a 45-second deadline. Never automatically repeat a token mutation after a timeout/error: inspect metadata first; an issued secret cannot be retrieved later. SSH registration does not give users access to other users' tokens or upstream credentials. Usage is shared aggregate metadata.
+SSH has a 45-second deadline. Never automatically repeat a token mutation after a timeout/error: inspect metadata first; an issued secret cannot be retrieved later. SSH registration does not give users access to other users' tokens or upstream credentials. Usage by user/model is shared aggregate metadata. Token grouping shows only your own token IDs, including revoked-token history; in the dashboard Usage view, b selects grouping and Up/Down selects a token.
 
 Read [references/connections.md](references/connections.md) when connecting Codex, OpenCode or an SDK, for model metadata and endpoint configuration. Configuration/token installation into another client is a separate user-directed change; the CLI does not do it automatically.
 

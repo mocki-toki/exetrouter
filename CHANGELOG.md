@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- Add usage grouping by API token in the CLI and dashboard, scoped to the authenticated user and preserving revoked-token history and unknown usage.
+
 ## 0.1.0
 
 - Initialize the consolidated ExetRouter source history.

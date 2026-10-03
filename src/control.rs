@@ -1,6 +1,4 @@
-use crate::{
-    create_token, list_tokens, revoke_token, rotate_token, token_info, usage_report, Result,
-};
+use crate::{create_token, list_tokens, revoke_token, rotate_token, token_info, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -68,12 +66,13 @@ pub fn control(
                 period,
                 by,
                 timezone,
-            } => serde_json::to_value(match timezone {
-                Some(timezone) => {
-                    crate::usage::usage_report_in_timezone(conn, &period, by.as_deref(), &timezone)?
-                }
-                None => usage_report(conn, &period, by.as_deref())?,
-            })?,
+            } => serde_json::to_value(crate::usage::usage_report_for_user(
+                conn,
+                user_id,
+                &period,
+                by.as_deref(),
+                timezone.as_deref(),
+            )?)?,
             ControlRequest::AccountSet {
                 account,
                 enabled,

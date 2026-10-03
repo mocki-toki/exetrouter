@@ -87,7 +87,7 @@ enum CommandLine {
     Usage {
         #[arg(long, default_value = "day", value_parser = ["day", "24h", "week", "month"])]
         period: String,
-        #[arg(long, value_parser = ["user", "model"])]
+        #[arg(long, value_parser = ["user", "model", "token"])]
         by: Option<String>,
     },
     /// List models, or export client metadata with --json.

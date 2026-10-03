@@ -156,7 +156,7 @@ pub fn record_usage(conn: &Connection, event: UsageEvent<'_>) -> Result<()> {
 }
 
 pub fn usage_report(conn: &Connection, period: &str, by: Option<&str>) -> Result<UsageReport> {
-    report_in_zone(conn, period, by, Utc::now(), Moscow)
+    report_in_zone(conn, period, by, Utc::now(), Moscow, None)
 }
 
 pub fn usage_report_in_timezone(
@@ -166,7 +166,29 @@ pub fn usage_report_in_timezone(
     timezone: &str,
 ) -> Result<UsageReport> {
     let zone: Tz = timezone.parse().map_err(|_| "invalid usage timezone")?;
-    report_in_zone(conn, period, by, Utc::now(), zone)
+    report_in_zone(conn, period, by, Utc::now(), zone, None)
+}
+
+/// Token grouping is private to the authenticated user; other groups remain shared.
+pub fn usage_report_for_user(
+    conn: &Connection,
+    user_id: i64,
+    period: &str,
+    by: Option<&str>,
+    timezone: Option<&str>,
+) -> Result<UsageReport> {
+    if by != Some("token") {
+        return match timezone {
+            Some(zone) => usage_report_in_timezone(conn, period, by, zone),
+            None => usage_report(conn, period, by),
+        };
+    }
+    let zone = match timezone {
+        Some(value) => value.parse().map_err(|_| "invalid usage timezone")?,
+        None => Moscow,
+    };
+    let scope = (by == Some("token")).then_some(user_id);
+    report_in_zone(conn, period, by, Utc::now(), zone, scope)
 }
 
 #[cfg(test)]
@@ -176,7 +198,7 @@ fn report_at(
     by: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<UsageReport> {
-    report_in_zone(conn, period, by, now, Moscow)
+    report_in_zone(conn, period, by, now, Moscow, None)
 }
 
 fn report_in_zone(
@@ -185,6 +207,7 @@ fn report_in_zone(
     by: Option<&str>,
     now: DateTime<Utc>,
     zone: Tz,
+    user_id: Option<i64>,
 ) -> Result<UsageReport> {
     let now = now.with_timezone(&zone);
     let (from, to) = if period == "24h" {
@@ -226,10 +249,11 @@ fn report_in_zone(
     let group = match by {
         Some("user") => "u.name",
         Some("model") => "e.model",
+        Some("token") => "e.token_id",
         None => "'all'",
-        _ => return Err("by must be user or model".into()),
+        _ => return Err("by must be user, model or token".into()),
     };
-    let rows = aggregate(conn, group, from, to)?;
+    let rows = aggregate(conn, group, from, to, user_id)?;
     let mut timeline = Vec::new();
     let mut cursor = from;
     while cursor < to {
@@ -250,7 +274,7 @@ fn report_in_zone(
         timeline.push(UsageBucket {
             from_utc: cursor,
             to_utc: next,
-            rows: aggregate(conn, group, cursor, next)?,
+            rows: aggregate(conn, group, cursor, next, user_id)?,
         });
         cursor = next;
     }
@@ -264,17 +288,23 @@ fn report_in_zone(
     })
 }
 
-fn aggregate(conn: &Connection, group: &str, from: i64, to: i64) -> Result<Vec<UsageRow>> {
+fn aggregate(
+    conn: &Connection,
+    group: &str,
+    from: i64,
+    to: i64,
+    user_id: Option<i64>,
+) -> Result<Vec<UsageRow>> {
     let sql = format!("SELECT {group},COUNT(*),
         SUM(CASE WHEN e.input_tokens IS NULL OR e.output_tokens IS NULL THEN 1 ELSE 0 END),
         SUM(e.input_tokens),SUM(e.output_tokens),SUM(e.cached_input_tokens),SUM(e.reasoning_output_tokens),
         SUM(CASE WHEN e.input_tokens IS NOT NULL AND e.output_tokens IS NOT NULL THEN 1 ELSE 0 END),
         SUM(CASE WHEN (e.input_tokens IS NULL) != (e.output_tokens IS NULL) THEN 1 ELSE 0 END)
         FROM usage_events e JOIN users u ON u.id=e.user_id
-        WHERE e.at_utc>=?1 AND e.at_utc<?2 GROUP BY {group} ORDER BY {group}");
+        WHERE e.at_utc>=?1 AND e.at_utc<?2 AND (?3 IS NULL OR e.user_id=?3) GROUP BY {group} ORDER BY {group}");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(params![from, to], |r| {
+        .query_map(params![from, to, user_id], |r| {
             let input: Option<i64> = r.get(3)?;
             let output: Option<i64> = r.get(4)?;
             let total = input
@@ -302,6 +332,62 @@ fn aggregate(conn: &Connection, group: &str, from: i64, to: i64) -> Result<Vec<U
 mod tests {
     use super::*;
     use crate::{create_token, create_user, init};
+
+    #[test]
+    fn token_grouping_is_private_and_retains_revoked_history() {
+        let db = Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let alice = create_user(&db, "alice").unwrap();
+        let bob = create_user(&db, "bob").unwrap();
+        let first = create_token(&db, &[1; 32], alice, "first", 1).unwrap();
+        let second = create_token(&db, &[1; 32], alice, "second", 1).unwrap();
+        let foreign = create_token(&db, &[1; 32], bob, "foreign", 1).unwrap();
+        for (user, token, input) in [
+            (alice, &first.token.id, Some(10)),
+            (alice, &second.token.id, None),
+            (bob, &foreign.token.id, Some(100)),
+        ] {
+            record_usage(
+                &db,
+                UsageEvent {
+                    user_id: user,
+                    token_id: token,
+                    surface: "responses",
+                    model: "test",
+                    status: "done",
+                    input,
+                    output: input,
+                    cached_input: None,
+                    reasoning_output: None,
+                },
+            )
+            .unwrap();
+        }
+        crate::revoke_token(&db, alice, &first.token.id).unwrap();
+        let report = usage_report_for_user(&db, alice, "day", Some("token"), Some("UTC")).unwrap();
+        assert_eq!(report.rows.len(), 2);
+        assert!(report.rows.iter().all(|r| r.name != foreign.token.id));
+        let known = report
+            .rows
+            .iter()
+            .find(|r| r.name == first.token.id)
+            .unwrap();
+        assert_eq!(known.total_tokens, Some(20));
+        let unknown = report
+            .rows
+            .iter()
+            .find(|r| r.name == second.token.id)
+            .unwrap();
+        assert_eq!(unknown.total_tokens, None);
+        assert_eq!(unknown.unknown_usage, 1);
+        assert!(report
+            .timeline
+            .iter()
+            .flat_map(|b| &b.rows)
+            .all(|r| r.name != foreign.token.id));
+        let shared = usage_report_for_user(&db, alice, "day", Some("user"), Some("UTC")).unwrap();
+        assert_eq!(shared.rows.len(), 2);
+    }
 
     #[test]
     fn recovery_marks_pending_requests_unknown_and_finalization_is_unique() {
@@ -389,7 +475,7 @@ mod tests {
             ] {
                 db.execute("INSERT INTO usage_events(at_utc,user_id,token_id,api_surface,model,status,input_tokens,output_tokens) VALUES(?1,?2,?3,'responses','model-a','failed',10,NULL)", params![at,user,token.token.id]).unwrap();
             }
-            let report = report_in_zone(&db, "24h", Some("model"), now, zone).unwrap();
+            let report = report_in_zone(&db, "24h", Some("model"), now, zone, None).unwrap();
             assert_eq!(report.from_utc, from);
             assert_eq!(report.to_utc, now.timestamp());
             assert_eq!(report.timeline.len(), 24);
@@ -409,7 +495,7 @@ mod tests {
                     .sum::<i64>(),
                 3
             );
-            let day = report_in_zone(&db, "day", None, now, zone).unwrap();
+            let day = report_in_zone(&db, "day", None, now, zone, None).unwrap();
             assert_ne!(day.from_utc, from);
         }
     }
@@ -422,16 +508,16 @@ mod tests {
         let token = create_token(&db, &[1; 32], user, "fixture", 1).unwrap();
         let zone: Tz = "America/New_York".parse().unwrap();
         for (now, hours) in [("2026-03-08T12:00:00Z", 23), ("2026-11-01T12:00:00Z", 25)] {
-            let report = report_in_zone(&db, "day", None, timestamp(now), zone).unwrap();
+            let report = report_in_zone(&db, "day", None, timestamp(now), zone, None).unwrap();
             assert_eq!(report.timeline.len(), hours);
             assert_eq!(report.to_utc - report.from_utc, hours as i64 * 3600);
         }
         let now = timestamp("2026-03-08T12:00:00Z");
-        let day = report_in_zone(&db, "day", Some("model"), now, zone).unwrap();
+        let day = report_in_zone(&db, "day", Some("model"), now, zone, None).unwrap();
         for at in [day.from_utc, day.from_utc + 3600, day.to_utc - 1] {
             db.execute("INSERT INTO usage_events(at_utc,user_id,token_id,api_surface,model,status,input_tokens,output_tokens) VALUES(?1,?2,?3,'responses','model-a','failed',10,NULL)",params![at,user,token.token.id]).unwrap();
         }
-        let report = report_in_zone(&db, "day", Some("model"), now, zone).unwrap();
+        let report = report_in_zone(&db, "day", Some("model"), now, zone, None).unwrap();
         assert_eq!(report.timezone, "America/New_York");
         assert_eq!(
             report
@@ -445,7 +531,7 @@ mod tests {
         assert_eq!(report.timeline[0].rows[0].name, "model-a");
         assert_eq!(report.timeline[0].rows[0].total_tokens, None);
         assert_eq!(report.timeline[0].rows[0].unknown_usage, 1);
-        let week = report_in_zone(&db, "week", None, now, zone).unwrap();
+        let week = report_in_zone(&db, "week", None, now, zone, None).unwrap();
         assert_eq!(week.timeline.len(), 7);
         assert_eq!(
             week.timeline.last().unwrap().to_utc - week.timeline.last().unwrap().from_utc,

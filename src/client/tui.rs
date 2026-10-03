@@ -48,6 +48,7 @@ struct State {
     scroll: u16,
     period: usize,
     group: usize,
+    usage_token: usize,
     token_metric: bool,
     statuses: [String; 5],
     notices: [Option<String>; 5],
@@ -154,7 +155,7 @@ fn request(state: &State) -> ControlRequest {
         MODELS => ControlRequest::Models,
         USAGE => ControlRequest::Usage {
             period: USAGE_PERIODS[state.period].0.into(),
-            by: [None, Some("user"), Some("model")][state.group].map(str::to_owned),
+            by: [None, Some("user"), Some("model"), Some("token")][state.group].map(str::to_owned),
             timezone: Some(render::system_timezone()),
         },
         _ => ControlRequest::Limits,
@@ -828,6 +829,12 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
             ("Enter", "account actions"),
             ("PgUp / PgDn", "page"),
         ]),
+        USAGE if state.group == 3 => keys(&[
+            ("p", "period"),
+            ("b", "group"),
+            ("m", "requests / tokens"),
+            ("↑/↓", "token"),
+        ]),
         USAGE => keys(&[("p", "period"), ("b", "group"), ("m", "requests / tokens")]),
         MODELS => keys(&[
             ("↑ / ↓", "select"),
@@ -856,7 +863,7 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
             Modal::ClipboardRetry { .. } => ("Clipboard unavailable", "The token was issued, but copying failed.\nThe secret stays hidden. No token request will be repeated.\n\nc: retry copying   Esc: discard and rotate the token later".into()),
             Modal::ResetConfirm(value) => ("Use reset credit?",format!("{}\n\ny: use one credit   Esc / n: cancel",render::reset_confirmation(value))),
             Modal::Help => ("Keyboard help", "←/→: switch views\n↑/↓: select accounts, tokens, models or settings accounts
-PgUp/PgDn: page\nr: refresh the active view\nTokens: n creates, o rotates, x revokes (confirmation required)\nUsage: p changes period, b changes grouping, m changes metric\nOverview: c checks a reset credit for the selected account (≤5% remaining)
+PgUp/PgDn: page\nr: refresh the active view\nTokens: n creates, o rotates, x revokes (confirmation required)\nUsage: p changes period, b changes grouping, m changes metric; ↑/↓ selects a token in by-token grouping\nOverview: c checks a reset credit for the selected account (≤5% remaining)
 Models: Enter copies the selected model ID\nEsc cancels a dialog; q or Ctrl-C quits\n\nLimits are upstream subscription windows, not local request quotas.\nOnly reported durations appear; stale values are historical.\nOverview refreshes live limits every 30 seconds.\nNo inference polling, no automatic retries of mutations.\n\nEnter/Esc: close help".into()),
         };
         let area = popup(frame.area());
@@ -1200,6 +1207,11 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
     ])
     .split(inner);
     let rows = value["rows"].as_array().cloned().unwrap_or_default();
+    let rows = if state.group == 3 && !rows.is_empty() {
+        vec![rows[state.usage_token % rows.len()].clone()]
+    } else {
+        rows
+    };
     let requests: i64 = rows.iter().filter_map(|r| r["requests"].as_i64()).sum();
     let tokens: i64 = rows
         .iter()
@@ -1334,7 +1346,7 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
         "Requests"
     };
     let period = USAGE_PERIODS[state.period].1;
-    let grouping = ["total", "by user", "by model"][state.group];
+    let grouping = ["total", "by user", "by model", "by token"][state.group];
     frame.render_widget(
         Chart::new(datasets)
             .block(panel(&format!("{metric} · {period} · {grouping}")))
@@ -1896,6 +1908,16 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                         });
                     }
                 }
+                KeyCode::Down | KeyCode::Up if state.tab == USAGE && state.group == 3 => {
+                    let count = state.values[USAGE].as_ref().and_then(|v| v["rows"].as_array()).map_or(0, Vec::len);
+                    if count > 0 {
+                        state.usage_token = if key.code == KeyCode::Down {
+                            (state.usage_token + 1) % count
+                        } else {
+                            (state.usage_token + count - 1) % count
+                        };
+                    }
+                }
                 KeyCode::Down => state.scroll = state.scroll.saturating_add(1),
                 KeyCode::Up => state.scroll = state.scroll.saturating_sub(1),
                 KeyCode::PageDown | KeyCode::PageUp if state.tab == MODELS => {
@@ -1918,7 +1940,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     pending = Some(start(&args.connection, request(&state), state.tab, false));
                 }
                 KeyCode::Char('b') if state.tab == USAGE => {
-                    state.group = (state.group + 1) % 3;
+                    state.group = (state.group + 1) % 4;
                     state.values[USAGE] = None;
                     pending = Some(start(&args.connection, request(&state), state.tab, false));
                 }
@@ -2206,6 +2228,51 @@ fn reset_screen(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    #[test]
+    fn token_usage_view_shows_only_selected_token() {
+        let now = chrono::Utc::now().timestamp();
+        let rows = serde_json::json!([
+            {"name":"tok_first","requests":3,"input_tokens":10,"output_tokens":20,"unknown_usage":0},
+            {"name":"tok_second","requests":7,"input_tokens":null,"output_tokens":null,"unknown_usage":7}
+        ]);
+        let value = serde_json::json!({"rows":rows,"from_utc":now-3600,"to_utc":now,
+            "timeline":[{"from_utc":now-3600,"rows":rows}]});
+        for selected in 0..2 {
+            let mut state = State {
+                tab: USAGE,
+                group: 3,
+                usage_token: selected,
+                ..Default::default()
+            };
+            state.values[USAGE] = Some(value.clone());
+            assert!(
+                matches!(request(&state), ControlRequest::Usage { by, .. } if by.as_deref() == Some("token"))
+            );
+            let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
+            terminal
+                .draw(|frame| render(frame, &state, &Connection::default(), false))
+                .unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            if selected == 0 {
+                assert!(text.contains("3 requests"));
+                assert!(text.contains("30 reported tokens"));
+                assert!(text.contains("tok_first"));
+                assert!(!text.contains("tok_second"));
+            } else {
+                assert!(text.contains("7 requests"));
+                assert!(text.contains("7 requests have incomplete counts"));
+                assert!(text.contains("tok_second"));
+                assert!(!text.contains("tok_first"));
+            }
+        }
+    }
+
     #[test]
     fn overview_pairs_windows_on_wide_screens_and_stacks_them_when_narrow() {
         let now = chrono::Utc::now().timestamp();

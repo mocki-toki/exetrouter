@@ -33,6 +33,7 @@ exr models --json --format opencode-jsonc > /absolute/path/models.jsonc
 exr usage --period day
 exr usage --period 24h
 exr usage --period week --by user
+exr usage --period week --by token
 exr usage --period month --by model --json
 exr account set 1 --priority 1 # Prefer an account for your user
 exr account set 1 --enabled false # Reversible deactivation for your user
@@ -49,7 +50,7 @@ exr token revoke tok_... --yes
 
 `tokens` is an alias for `token`; omitting its subcommand lists tokens. `quota` is an alias for `limits`. Expiration is 1–365 days, default 90. Creation and rotation require terminal stdin/stdout and reject `--json`. Rotation immediately revokes the old token; update the consuming service with the new secret. JSON/model exports contain no secrets. `--format` requires `--json`.
 
-Token metadata and mutations are scoped to the authenticated user. Usage is shared aggregate metadata, grouped by user or model; users cannot list another user's tokens, inspect OAuth identities or read request contents. User creation, OAuth login and backups remain local `exrd admin` operations. Operator reports also default to readable text; add `--json` for scripts. OAuth login is interactive and rejects JSON. The SSH gateway wire protocol and raw authorized_keys export retain their dedicated machine formats.
+Token metadata and mutations are scoped to the authenticated user. Usage is shared aggregate metadata, grouped by user or model. Token grouping (`--by token`) shows only the authenticated user’s token IDs, including revoked tokens with recorded usage; users cannot list another user's tokens, inspect OAuth identities or read request contents. User creation, OAuth login and backups remain local `exrd admin` operations. Operator reports also default to readable text; add `--json` for scripts. OAuth login is interactive and rejects JSON. The SSH gateway wire protocol and raw authorized_keys export retain their dedicated machine formats.
 
 SSH exchanges have a 45-second deadline and a 1 MiB reply cap. Failed child processes are killed and reaped. Failure or timeout does not prove a mutation was cancelled: inspect the token list before retrying creation/rotation/revocation. The client never automatically retries these operations.
 
@@ -60,7 +61,7 @@ Start `exr` in an interactive terminal after configuration (minimum 72 columns �
 | View | Content and actions |
 | --- | --- |
 | Overview | Server connection, routing readiness, OAuth/catalog state, resource concurrency and per-account subscription limits. A stale catalog is labeled as cached and refreshed on the next model request. |
-| Usage | Hourly/daily activity chart for Today, Last 24 hours, This week or This month, grouped by user or model. Switch between requests and reported tokens. |
+| Usage | Hourly/daily activity chart for Today, Last 24 hours, This week or This month, grouped by user, model or your own token IDs. Switch between requests and reported tokens; in token grouping, use Up/Down to select one token’s graph and totals. |
 | Tokens | Select a token, inspect its metadata, create, rotate or revoke. Revoked tokens are hidden. |
 | Models | Account-visible catalog in reverse display order and reported context/output limits. JSON/client exports preserve the catalog contract. |
 | Settings | Mode/connection editor; standalone account add, reauthorization and disable. |
