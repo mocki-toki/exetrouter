@@ -18,7 +18,7 @@ Codex CLI already supports ChatGPT subscriptions directly. ExetRouter adds a com
 
 - **`exr`** opens the terminal dashboard: accounts, tokens, usage, subscription limits and settings. Choose **Standalone** and add an OAuth account for personal use — no server or SSH setup required.
 - **`exr serve`** keeps the standalone API running without a dashboard.
-- **`exrd`** runs a shared server, with Docker or native deployment. Friends configure `exr` once to connect over restricted SSH; private SSH keys stay on their devices.
+- **`exrd`** (optional) runs a shared server, with Docker or native deployment. Friends configure `exr` once to connect over restricted SSH; private SSH keys stay on their devices.
 
 ## Install
 
