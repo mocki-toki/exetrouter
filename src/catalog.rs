@@ -339,7 +339,7 @@ fn opencode_projection(models: &[Model], v1: bool) -> Result<Value> {
         json!({"provider":{"exetrouter":{
             "npm":"@ai-sdk/openai","name":"ExetRouter","env":["EXETROUTER_TOKEN"],
             "options":{"apiKey":"{env:EXETROUTER_TOKEN}"},
-            "whitelist":entries.keys().collect::<Vec<_>>(),"models":entries
+            "models":entries
         }}})
     } else {
         // A separate provider without canonical inheritance keeps model IDs and
@@ -368,10 +368,7 @@ mod tests {
         let two = &v2["providers"]["exetrouter"]["models"]["gpt-test"];
         assert_eq!(v1["provider"]["exetrouter"]["npm"], "@ai-sdk/openai");
         assert_eq!(v1["provider"]["exetrouter"]["name"], "ExetRouter");
-        assert_eq!(
-            v1["provider"]["exetrouter"]["whitelist"],
-            json!(["gpt-test"])
-        );
+        assert!(v1["provider"]["exetrouter"].get("whitelist").is_none());
         assert_eq!(v2["providers"]["exetrouter"]["name"], "ExetRouter");
         assert!(v2["providers"]["exetrouter"].get("canonical").is_none());
         assert!(v1["provider"].get("openai").is_none());
@@ -396,6 +393,30 @@ mod tests {
         assert_eq!(two["capabilities"]["input"], one["modalities"]["input"]);
         assert!(v2.get("provider").is_none());
         assert!(two.get("options").is_none());
+    }
+    #[test]
+    fn opencode_exports_preserve_all_reported_reasoning_levels() {
+        let levels = ["low", "medium", "high", "xhigh", "max", "ultra"];
+        let model = Model::parse(&json!({
+            "slug":"gpt-test", "context_window":100000, "input_modalities":["text"],
+            "supported_reasoning_levels": levels.iter().map(|effort| json!({"effort":effort})).collect::<Vec<_>>()
+        })).unwrap();
+        let v1 = opencode_v1(std::slice::from_ref(&model)).unwrap();
+        let v2 = opencode_v2(&[model]).unwrap();
+        let variants = &v1["provider"]["exetrouter"]["models"]["gpt-test"]["variants"];
+        for effort in levels {
+            assert_eq!(variants[effort]["reasoningEffort"], effort);
+            assert!(variants[effort].get("disabled").is_none());
+        }
+        assert_eq!(
+            v2["providers"]["exetrouter"]["models"]["gpt-test"]["variants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|variant| variant["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            levels
+        );
     }
     #[test]
     fn projections_keep_real_limits_and_never_invent_an_output_cap() {

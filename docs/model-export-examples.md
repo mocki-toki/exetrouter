@@ -2,7 +2,11 @@
 
 `exr models --json --format FORMAT` prints JSON to stdout. It reads the account-pool extractor; no inference or API-token creation is involved. Without `--format`, JSON uses `openai-json`.
 
-These complete outputs use **one synthetic catalog entry** with ID `gpt-5.6-sol`. All limits, capabilities and reasoning levels below are illustrative, not claims about that model's current upstream settings. Real exports use your pool's reported metadata and include every visible model. Neither the API bearer nor SSH key material appears in the output.
+These complete outputs use **one synthetic catalog entry** with ID `gpt-5.6-sol`. Limits and capabilities below are illustrative, not claims about that model's current upstream settings.
+
+The reasoning levels match the account-visible catalog observed on 2026-10-04: `low`, `medium`, `high`, `xhigh`, `max`, `ultra`. Each real export uses the levels reported by its own pool. V1 marks only absent built-in presets (`none` and `minimal` in this example) as disabled, so OpenCode does not add them automatically; this does not reject API requests at the router.
+
+Real exports use your pool's reported metadata and include every visible model. Neither the API bearer nor SSH key material appears in the output.
 
 | Format | Root and purpose |
 | --- | --- |
@@ -49,8 +53,24 @@ exr models --json --format openai-json
             "effort": "low"
           },
           {
+            "description": "Medium",
+            "effort": "medium"
+          },
+          {
             "description": "High",
             "effort": "high"
+          },
+          {
+            "description": "Xhigh",
+            "effort": "xhigh"
+          },
+          {
+            "description": "Max",
+            "effort": "max"
+          },
+          {
+            "description": "Ultra",
+            "effort": "ultra"
           }
         ],
         "truncation_policy": {
@@ -102,8 +122,24 @@ exr models --json --format codex-json
           "effort": "low"
         },
         {
+          "description": "Medium",
+          "effort": "medium"
+        },
+        {
           "description": "High",
           "effort": "high"
+        },
+        {
+          "description": "Xhigh",
+          "effort": "xhigh"
+        },
+        {
+          "description": "Max",
+          "effort": "max"
+        },
+        {
+          "description": "Ultra",
+          "effort": "ultra"
         }
       ],
       "truncation_policy": {
@@ -162,8 +198,11 @@ exr models --json --format opencode-v1-json --model exetrouter/gpt-5.6-sol
             "low": {
               "reasoningEffort": "low"
             },
+            "max": {
+              "reasoningEffort": "max"
+            },
             "medium": {
-              "disabled": true
+              "reasoningEffort": "medium"
             },
             "minimal": {
               "disabled": true
@@ -171,8 +210,11 @@ exr models --json --format opencode-v1-json --model exetrouter/gpt-5.6-sol
             "none": {
               "disabled": true
             },
+            "ultra": {
+              "reasoningEffort": "ultra"
+            },
             "xhigh": {
-              "disabled": true
+              "reasoningEffort": "xhigh"
             }
           }
         }
@@ -182,10 +224,7 @@ exr models --json --format opencode-v1-json --model exetrouter/gpt-5.6-sol
       "options": {
         "apiKey": "{env:EXETROUTER_TOKEN}",
         "baseURL": "https://api.example.com/v1"
-      },
-      "whitelist": [
-        "gpt-5.6-sol"
-      ]
+      }
     }
   }
 }
@@ -239,9 +278,33 @@ exr models --json --format opencode-v2-json --model exetrouter/gpt-5.6-sol
               }
             },
             {
+              "id": "medium",
+              "settings": {
+                "reasoningEffort": "medium"
+              }
+            },
+            {
               "id": "high",
               "settings": {
                 "reasoningEffort": "high"
+              }
+            },
+            {
+              "id": "xhigh",
+              "settings": {
+                "reasoningEffort": "xhigh"
+              }
+            },
+            {
+              "id": "max",
+              "settings": {
+                "reasoningEffort": "max"
+              }
+            },
+            {
+              "id": "ultra",
+              "settings": {
+                "reasoningEffort": "ultra"
               }
             }
           ]

@@ -965,10 +965,7 @@ fn model_exports_select_native_opencode_v1_and_v2_formats() {
     assert_eq!(one["options"]["baseURL"], "https://api.example.com/v1");
     assert_eq!(two["settings"]["baseURL"], one["options"]["baseURL"]);
     assert_eq!(one["options"]["apiKey"], "{env:EXETROUTER_TOKEN}");
-    assert_eq!(
-        one["whitelist"],
-        serde_json::json!(["gpt-other", "gpt-test"])
-    );
+    assert!(one.get("whitelist").is_none());
     assert!(two.get("canonical").is_none());
     assert_eq!(one["models"].as_object().unwrap().len(), 2);
     assert_eq!(two["models"].as_object().unwrap().len(), 2);

@@ -145,7 +145,7 @@ exr models --json --format opencode-v1-json > exetrouter-v1.json &&
   OPENCODE_CONFIG="$PWD/exetrouter-v1.json" opencode --model exetrouter/gpt-5.6-sol
 ```
 
-The export defines `provider.exetrouter` with `"npm": "@ai-sdk/openai"`, `"name": "ExetRouter"`, connection options and models extracted from your account pool. Its whitelist contains exactly those model IDs. Model limits, modalities, options and reasoning variants use V1's native configuration format.
+The export defines `provider.exetrouter` with `"npm": "@ai-sdk/openai"`, `"name": "ExetRouter"`, connection options and models extracted from your account pool. Model limits, modalities, options and reasoning variants use V1's native configuration format.
 
 #### V2 (@opencode/cli)
 
