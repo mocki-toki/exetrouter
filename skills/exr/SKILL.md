@@ -37,14 +37,13 @@ exr tokens --json
 exr models --json
 exr usage --period week --by model --json
 exr usage --period week --by token --json
-exr limits --json
 ```
 
 Configuration is `$XDG_CONFIG_HOME/exr/config.json`, default `~/.config/exr/config.json`. `--config PATH` overrides `EXR_CONFIG`; command-line host/port/ssh-user/identity override saved settings. Defaults: `localhost:2222`, user `routercli`. Key registration is an operator action. The interactive connection wizard checks SSH before saving and lets OpenSSH ask for first-time host-key confirmation in the same terminal; a human must verify the fingerprint with the operator before accepting. Normal requests still require a verified known_hosts entry. Load a protected key into ssh-agent for normal dashboard use. Never disable host-key verification.
 
 Use `--json` for parsing. Default outputs are readable text without character-art charts; `exr` without a command opens the English TUI and requires a terminal. `tokens` aliases `token`, defaulting to list; `quota` aliases `limits`.
 
-Doctor is a read-only snapshot, not a TLS/upstream/inference probe. Nonzero exit may still include a valid diagnostic JSON report. Limits fetch live usage and reset-credit availability and label accounts by email. A fresh 100%-remaining weekly window with a reset exactly seven days ahead at minute precision may trigger one minimal gpt-5.6-sol request on that enabled account. Attempts are durably limited to once per seven days and never replayed; Doctor, catalog and update checks remain read-only. Window labels: 480-minute windows are 8-hour, 10080-minute windows weekly. Do not infer duration from primary/secondary, sum percentages across subscriptions or treat stale/reset-elapsed values as current availability. Unknown usage is not zero usage; cached/reasoning counters are subsets of input/output.
+Doctor is a read-only snapshot, not a TLS/upstream/inference probe. Nonzero exit may still include a valid diagnostic JSON report. `exr limits --json` fetches live usage/reset-credit availability and labels accounts by email; run it only within authorized inference scope because of the weekly-activation exception below. A fresh 100%-remaining weekly window with a reset exactly seven days ahead at minute precision may trigger one minimal gpt-5.6-sol request on that enabled account. Attempts are durably limited to once per seven days and never replayed; Doctor, catalog and update checks remain read-only. Window labels: 480-minute windows are 8-hour, 10080-minute windows weekly. Do not infer duration from primary/secondary, sum percentages across subscriptions or treat stale/reset-elapsed values as current availability. Unknown usage is not zero usage; cached/reasoning counters are subsets of input/output.
 
 ## Tokens
 
@@ -63,10 +62,10 @@ Read [references/connections.md](references/connections.md) when connecting Code
 
 ## Reset credits
 
-`exr limits --json` inspects availability without consuming a credit. `exr limits reset <email>` requires an interactive terminal and mandatory human confirmation; there is no `--yes` or JSON bypass. In Overview, use ↑/↓ to highlight an account; `c` checks that account’s live eligibility and `y` confirms. In Models, ↑/↓ selects a model and Enter copies its ID to the desktop clipboard. Never drive confirmation or consume a real credit without the user's explicit approval for that account and credit.
+`exr limits --json` inspects availability without consuming a credit. `exr limits reset <email>` requires an interactive terminal and mandatory human confirmation; there is no `--yes` or JSON bypass. In Overview, select an account with ↑/↓, press Enter and choose Review reset credit (or use `c`); `y` confirms. Never drive confirmation or consume a real credit without the user's explicit approval for that account and credit.
 
 A current subscription window must have ≤5% remaining (≥95% used), with a known future reset. If the free reset is less than three days away, advise waiting as the confirmation does. The server selects the earliest-expiring available supported credit and rechecks usage before consumption. Confirmations expire after two minutes, are user-bound and single-use. Never retry an uncertain reset mutation automatically; read limits first and report the outcome.
 
 ## Software updates
 
-Use `exr update --check --json` for a read-only public release check. Install with `exr update` only when the user requests updating software. Config, state and credentials stay in place. exr Settings offers Enter to choose Check updates or Update exr and Enter to confirm installation; reopen the dashboard afterward. Homebrew installations update with `brew upgrade mocki-toki/exetrouter/exr`; the built-in updater refuses direct replacement of a Homebrew-managed binary. Source installations rebuild a locked published tag. Docker server updates run only through the host operator launcher, with private backup and health rollback; never grant the restricted gateway Docker access. Native services require the normal reviewed restart after binary replacement.
+Use `exr update --check --json` for a read-only release check. Install only within the user's requested update scope. Built-in update preserves config/state/credentials; reopen the dashboard afterward. Homebrew uses `brew upgrade mocki-toki/exetrouter/exr`; source installs rebuild a locked published tag. Settings offers Check updates and Update exr. Server updates belong to the operator and the separate `exrd` skill.

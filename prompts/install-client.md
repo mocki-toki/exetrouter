@@ -1,6 +1,6 @@
 # Prompt: install the client
 
-Replace the three connection fields, then give this prompt to your coding agent:
+Replace the connection fields, then give this prompt to your coding agent:
 
 ```text
 Install the ExetRouter exr client from https://github.com/mocki-toki/exetrouter on this computer.
@@ -9,11 +9,11 @@ SSH port: 2222
 SSH username: routercli
 Private key path: ~/.ssh/exetrouter_ed25519
 
-Read README.md, docs/installation.md, docs/cli.md and skills/exr/SKILL.md from the repository. Detect the OS/architecture and reuse existing Rust/tooling and connection settings. Install only exr, using an official checksummed release if available or cargo install --locked --git https://github.com/mocki-toki/exetrouter --bin exr. Put it on PATH without a shell alias. Preserve unrelated shell/client settings.
+Read README.md, docs/installation.md, docs/cli.md and skills/exr/SKILL.md from the repository. Detect the OS/architecture and reuse existing Rust/tooling and connection settings. Install only exr, using an official checksummed release if available or cargo install --locked --git https://github.com/mocki-toki/exetrouter --bin exr. Put it on PATH. Preserve unrelated shell/client settings.
 
 Configure the supplied connection once. Use only an existing protected private key; if no key/registration/verified server fingerprint is available, ask for that missing information. Never disable SSH host-key verification or send a private key anywhere. Ask the operator to register the public key if needed.
 
-Run exr --version, exr doctor --json, exr models --json and exr limits --json. Doctor is a local snapshot; a stale catalog is refreshed by model discovery. Do not generate inference, issue/revoke/rotate tokens or consume reset credits just to test installation. Report what worked and any connection blocker. Install the bundled exr agent skill into the appropriate skills directory if this agent supports local skills. Explain how to open exr and create a token in my own interactive terminal, where its secret goes directly to the clipboard.
+Run exr --version, exr doctor --json, exr models --json. Doctor is a local snapshot; model discovery refreshes stale catalogs. Do not run Limits or open Overview during automated checks: live limits may submit a weekly-activation request. Do not generate inference, issue/revoke/rotate tokens or consume reset credits just to test installation. Report what worked and any connection blocker. Install the bundled exr agent skill into the appropriate skills directory if this agent supports local skills. Explain how to open exr and create a token in my own interactive terminal, where its secret goes directly to the clipboard.
 ```
 
 For standalone installation, use this instead:

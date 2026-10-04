@@ -1,80 +1,20 @@
-# Client and SDK compatibility
+# Client setup and compatibility
 
-The broader protocol/SDK inference matrix was checked 2026-10-01: Codex CLI 0.159.3 and OpenCode V2 2.0.21, then latest stable versions resolved from npm. The current native HTTP/WS tool and two-compaction/restart matrix was checked 2026-10-02 with Codex CLI 0.160.0 and OpenCode V2 2.0.22. OpenCode uses @opencode/cli; OpenCode V1/opencode-ai and Codex Desktop are outside that full execution matrix. A separate V1 mock check is recorded below.
+Supply your router endpoint, bearer token and an account-visible model. The setup below covers Codex CLI, OpenCode V1/V2 and OpenAI SDKs; the router's exact request contract is in [openai-api.md](openai-api.md).
 
-On 2026-10-02, Codex CLI 0.160.0 was resolved from npm latest and its exact source reviewed at commit `a956835d020762cb2b570053af06f643a11c0ecc`. The configuration below uses its new remote catalog option. Profile loading and authenticated catalog discovery were checked separately against synthetic local metadata, without inference; the broader October 1 protocol/SDK matrix retains its recorded versions.
+## Verified versions and scope
 
-Latest offline native matrix checked 2026-10-02: Codex 0.160.0 and OpenCode V2 2.0.22 (`527f0b931d1f9b3ebd34e106c51b31ce5db5b075`) passed all four HTTP/WS tool cycles and the Codex HTTP 503 submission check against mock upstream on macOS arm64. Expected test versions now come from the reviewed [source manifest](protocol-sources.json). The [protocol audit](native-protocol-audit.md) compares both clients and OpenCode V1 and records remaining gaps. The Codex fixture also checks native WS interruptions (early close, partial output, no terminal) without replay. OpenCode retains its own retry policy. A completed tool item can execute before the response terminal; these tests do not promise that interruption cancels local tool work. The full live/compaction matrix remains separate. Both reviewed clients also passed all four HTTP/WS quota-switch tool continuations against synthetic pre-generation refusals; see [quota failover evidence](live-testing.md#cross-account-continuity-and-synthetic-quota-failover-2026-10-02).
+| Checked | Clients | Evidence |
+| --- | --- | --- |
+| October 1, 2026 | Codex 0.159.3, OpenCode V2 2.0.21; Python openai 3.22.1, JavaScript openai 7.25.0 | Broader protocol/SDK matrix; SDK runs use mock upstream. |
+| October 2, 2026 | Codex 0.160.0, OpenCode V2 2.0.22 | Mock and real HTTP/WS tool cycles; public-ingress two-compaction/reopen/restart matrix. |
+| October 4, 2026 | OpenCode V1 1.18.34, V2 2.0.22 | Exported-provider model lists and mock tool cycles; V1 HTTP/SSE plus resume, V2 HTTP/SSE and WS. |
 
-Additional authorized Linux aarch64 Codex 0.160.0 diagnostics on 2026-10-02 passed native custom-tool cycles through the router after adding the server-owned upstream `thread-id`: a 100-line `apply_patch` over HTTP at about 35k and 120k input tokens, and a Code Mode command over WS at about 120k. All three executed the local tool and reached `response.completed` within 60 seconds. These isolated synthetic tests used loopback ingress, temporary private profiles and disabled retries; they do not establish multi-hour or public-ingress reliability.
+The [source manifest](protocol-sources.json) pins reviewed revisions. The [protocol audit](native-protocol-audit.md) records source-level contracts; [live-testing.md](live-testing.md) records measured runs, failed probes and request counts. Later versions need source review and new fixtures.
 
-After the audit fixes, authorized Linux aarch64 runs also passed current Codex and OpenCode tool cycles over both transports, plus one explicit `zstd` HTTP request. An initial OpenCode WS run exposed a router ordering error: handshake `response.metadata` preceded `response.created`. Sending that notification after creation passed both actual mock clients and a new independent real OpenCode WS cycle (three completed requests, 14 seconds, no HTTP fallback). Codex WS retained an original canary across five process invocations, fresh reference text and a server restart at measured 49–86k input tokens. Two compaction thresholds were lowered during that continuity probe, but actual compaction request counts were not captured; it does not replace the stronger four-scenario compaction harness. See [measured results](live-testing.md#measured-follow-up-2026-10-02).
+Codex WS interruption fixtures counted one generation for early close, partial output and missing terminal. Both current clients passed synthetic quota-switch continuations. OpenCode keeps its own retries; the router never replays an accepted or ambiguous generation. A completed tool item may run before the response terminal, and a lost connection may prevent delivery of a terminal error.
 
-Both actual binaries passed tool call → local command → tool result → final response over HTTP/SSE and WS against mock and actual ChatGPT upstream. OpenCode uses its standard client retry policy. The router itself never replays an accepted or ambiguous generation.
-
-The stronger October 2 deployment matrix used current clients on macOS arm64 through public HTTPS/WS to a Linux aarch64 router. All four cases passed five process invocations, two separately observed compaction cycles, local tool recall of a canary and verified server restart. Each case retained one owning account; all 13/18/12/12 requests had completed known usage. A separate Codex WS case reached 217,156 observed input tokens and completed compaction/tool continuation with six known requests. Public inference is verified for these bounded scenarios. Full advertised windows, multi-hour sessions, saturation and actual upstream authentication/quota outages remain unverified; see [measured deployment results](live-testing.md#measured-deployment-continuity-2026-10-02). Later versions require exact-source review and rerun, not merely download.
-
-## OpenCode V1 verification
-
-OpenCode V1 1.18.34 passed a synthetic HTTP/SSE Responses tool cycle and continuation after process reopening with the built-in `openai` provider. V1 has an experimental WebSocket transport; its ExetRouter integration, live upstream, compaction and long-context behavior remain unverified. OpenCode manages its own retries; the router does not replay accepted or ambiguous requests.
-
-Reproduce the HTTP fixture with synthetic upstream only:
-
-```sh
-python3 scripts/fetch-test-clients.py --opencode-v1 --sources
-export EXETROUTER_OPENCODE_V1_BIN="$(python3 -c 'import json; print(json.load(open("target/compat/current-opencode-v1.json"))["binary"])')"
-cargo test --locked --test responses opencode_v1_http_compatibility_probe -- --ignored --nocapture
-```
-
-## Resolve and run native fixtures
-
-```sh
-python3 scripts/check-protocol-sources.py --fetch --check-current
-python3 scripts/fetch-test-clients.py --resolve-only
-python3 scripts/fetch-test-clients.py --sources
-```
-
-The loader verifies official npm SHA-512 registry integrity, resolves exact release-tag commits and stores binaries/source/manifests in ignored target/compat. Codex's full runtime, including codex-code-mode-host, is retained. Global installations and normal auth/config are unchanged. Download targets support macOS/Linux arm64/x64; Linux aarch64 native execution is verified against mock upstream; real-upstream Linux testing is separate.
-
-```sh
-python3 - <<'PY'
-import json, os, subprocess
-from pathlib import Path
-clients = json.loads(Path("target/compat/current-clients.json").read_text())
-env = dict(os.environ)
-env["EXETROUTER_CODEX_BIN"] = clients["codex"]["binary"]
-env["EXETROUTER_OPENCODE_BIN"] = clients["opencode"]["binary"]
-subprocess.run(["cargo", "test", "--locked", "--test", "responses",
-    "current_clients_complete_tool_cycles", "--", "--ignored", "--nocapture"],
-    env=env, check=True)
-PY
-```
-
-Four isolated profiles exercise Codex/OpenCode HTTP/WS with two mock accounts. Assertions verify tool execution/result, terminal completion, submissions, usage and primary transport. Codex WS warmup and OpenCode's auxiliary HTTP title are accounted separately. Mock HTTP 503 verifies one main submission; not all client recovery paths are covered.
-
-## SDK fixtures
-
-Verified stable SDKs: Python openai 3.22.1 and JavaScript openai 7.25.0. Both passed models, Responses JSON/SSE, Chat JSON/SSE, function cycles, unsupported-parameter 400 and stream APIError against mock upstream.
-
-```sh
-python3 -m venv target/compat/openai-python
-target/compat/openai-python/bin/python -m pip --isolated install openai==3.22.1
-npm install --prefix target/compat/openai-js \
-  --registry https://registry.npmjs.org --userconfig /dev/null \
-  --globalconfig "$PWD/target/compat/npm-global.config" \
-  --cache target/compat/npm-cache --ignore-scripts --no-audit --no-fund openai@7.25.0
-EXETROUTER_PYTHON_BIN="$PWD/target/compat/openai-python/bin/python" \
-EXETROUTER_NODE_BIN="$(command -v node)" \
-EXETROUTER_OPENAI_JS_MODULE="$PWD/target/compat/openai-js/node_modules/openai/index.mjs" \
-cargo test --locked --test responses openai_sdks_complete_json_stream_and_tool_cycles \
-  -- --ignored --nocapture
-```
-
-Node 22+ is required; the temporary npm globalconfig must be absent/empty. Fixture credentials are synthetic. Real tests are separate.
-
-## Image forwarding fixtures
-
-Offline Rust unit tests cover Chat user text/image translation, preserving multiple-image order and detail. Validation tests reject invalid image roles/forms. Image-specific JSON/SSE integration, inputs larger than 1 MiB and rejection before upstream submission still need verification. This is adapter evidence, separate from the SDK/native tool-cycle matrix above. Live image understanding, model-specific detail support and native multimodal tool results remain unverified.
+Full advertised context windows, multi-hour sessions, saturation and actual upstream authentication/quota outages remain unverified. OpenCode V1's experimental WS transport, live upstream, compaction and long context, and Codex Desktop are outside the verified execution matrix.
 
 ## Configure your client
 
@@ -115,40 +55,114 @@ For older clients without `model_catalog_url`, an optional snapshot remains avai
 
 Use ExetRouter as your OpenAI endpoint. No additional plugin is needed.
 
-Run `opencode --version` and use the export format for your installed major version. Set `EXETROUTER_TOKEN` to your router token in the launching environment. The generated configuration keeps an environment reference, never the token itself. Standalone exports use the running/configured local API address automatically. For a remote connection, save the operator’s public HTTP API URL once (it may differ from the SSH host):
+Check `opencode --version` and export the format for your installed major version. Supply `EXETROUTER_TOKEN` in the launching environment; the generated file contains an environment reference, never the secret.
+
+Exports use the API URL saved in the first-run wizard or Settings. Standalone derives its local address automatically; keep `exr` or `exr serve` running. If you skipped the optional remote HTTP API URL during setup, add it in Settings or run:
 
 ```sh
 exr configure --api-url https://api.example.com/v1
 ```
 
-Exports reuse this setting; `--base-url URL` is an optional override for a single export. In standalone mode keep `exr` or `exr serve` running while OpenCode uses its API.
+The API URL may differ from the SSH host. `--base-url URL` overrides it for one export.
 
 ### V1 (opencode-ai)
 
+Create the configuration:
+
 ```sh
-exr models --json --format opencode-v1-json > exetrouter-v1.json &&
-  OPENCODE_CONFIG="$PWD/exetrouter-v1.json" opencode --model exetrouter/gpt-5.6-sol
+exr models --json --format opencode-v1-json > exetrouter-v1.json
 ```
 
-The export defines `provider.exetrouter` with `"npm": "@ai-sdk/openai"`, `"name": "ExetRouter"`, connection options and models extracted from your account pool. Model limits, modalities, options and reasoning variants use V1's native configuration format.
+Then start OpenCode:
+
+```sh
+OPENCODE_CONFIG="$PWD/exetrouter-v1.json" opencode --model exetrouter/gpt-5.6-sol
+```
 
 ### V2 (@opencode/cli)
 
+Create the configuration:
+
 ```sh
-exr models --json --format opencode-v2-json --model exetrouter/gpt-5.6-sol > exetrouter-v2.json &&
-  OPENCODE_CONFIG="$PWD/exetrouter-v2.json" opencode --standalone
+exr models --json --format opencode-v2-json --model exetrouter/gpt-5.6-sol > exetrouter-v2.json
 ```
 
-The export defines `providers.exetrouter` with `"name": "ExetRouter"`, package `@opencode/ai/providers/openai/responses`, the token environment variable, connection settings and models extracted from your account pool. It uses WebSocket transport, `store=false` and native compaction. `--standalone` starts a private OpenCode server with the fresh configuration instead of reusing an existing background server. For HTTP/SSE, change `providers.exetrouter.settings.transport` to `http`. Model capabilities, settings and reasoning variants use V2's native format.
+Then start OpenCode:
 
-Both commands query ExetRouter before launching OpenCode and import the generated file through OpenCode's native `OPENCODE_CONFIG` setting. `exetrouter/gpt-5.6-sol` means provider `exetrouter`, model ID `gpt-5.6-sol`. The examples select this model: V1 through the launch flag, V2 through the exported configuration. It must be available in `exr models`; exporting with `--model` rejects an unavailable ID. Choose a different imported model through `/models`.
+```sh
+OPENCODE_CONFIG="$PWD/exetrouter-v2.json" opencode --standalone
+```
 
-Without a model override, OpenCode keeps its own selection rules. V1 uses a configured model, then an available recent model, then its default ranking. V2 uses a configured/default model, otherwise an available catalog model; the interactive client applies its own selection preferences. Neither mode guarantees ExetRouter will be selected if other providers are available. Omitting the exporter’s `--model` leaves the exported config’s `model` unset. V2 also accepts `opencode run --standalone --model exetrouter/gpt-5.6-sol` for a noninteractive run.
+Run from the configuration file’s directory, or use its absolute path in `OPENCODE_CONFIG`.
 
-The dedicated `exetrouter` provider gets its model list and metadata from the extractor, without inheriting OpenCode's bundled OpenAI catalog. Other providers and unrelated settings can stay in your regular OpenCode configuration; keep the `exetrouter` definition in the generated file so older local model entries do not merge into it. Run the matching export again before each launch to refresh pool/catalog changes. No conversion script or plugin is required. OpenCode retains its standard retry policy. See [example output for every format](model-export-examples.md).
+Both exports create a dedicated provider named **ExetRouter**, with models and metadata from your account pool. V1 uses `@ai-sdk/openai`; V2 uses `@opencode/ai/providers/openai/responses`, WebSocket, `store=false` and native compaction. For V2 HTTP/SSE, set `providers.exetrouter.settings.transport` to `http`. `--standalone` starts a private OpenCode server that reads the fresh configuration.
+
+`exetrouter/gpt-5.6-sol` means provider/model. The model must appear in `exr models`; `--model` rejects unavailable IDs. Choose another imported model through `/models`. Without a model override, OpenCode follows its configured/recent/default preferences and may select another provider. Omitting the exporter's `--model` leaves the top-level `model` unset. V2 also supports `opencode run --standalone --model exetrouter/gpt-5.6-sol`.
+
+Regenerate the configuration after account-pool or model changes. Keep the `exetrouter` provider definition in the generated file so old entries do not merge into it; unrelated providers and settings can stay in your regular configuration. The export does not inherit OpenCode's bundled OpenAI catalog. OpenCode retains its standard retry policy. See [complete output examples](model-export-examples.md).
 
 ### OpenCode model import
 
 Export shapes were checked against V1 1.18.34 and V2 2.0.22 configuration sources on 2026-10-04. Offline CLI/API tests check the extracted metadata and connection configuration; isolated native model-list checks, after catalog initialization, verify both versions load the generated files and expose only the exported IDs under `exetrouter`. Native mock tool-cycle checks also passed with these exported providers: V1 HTTP/SSE and process resume, and V2 HTTP/SSE and WebSocket. These use a synthetic loopback backend; they do not renew the real upstream inference matrix above. Unknown output limits remain zero under OpenCode's convention.
 
 Authenticated HTTP clients can obtain model/provider fragments at `/v1/models/opencode-v1` and `/v1/models/opencode-v2`. Those fragments omit `baseURL`; the CLI adds the saved/standalone API URL to produce a configuration ready for file import. `baseURL` alone changes the request destination and does not fetch models from the router.
+
+## OpenCode V1 verification
+
+To reproduce the synthetic HTTP/SSE tool and process-resume fixture:
+
+```sh
+python3 scripts/fetch-test-clients.py --opencode-v1 --sources
+export EXETROUTER_OPENCODE_V1_BIN="$(python3 -c 'import json; print(json.load(open("target/compat/current-opencode-v1.json"))["binary"])')"
+cargo test --locked --test responses opencode_v1_http_compatibility_probe -- --ignored --nocapture
+```
+
+## Resolve and run native fixtures
+
+```sh
+python3 scripts/check-protocol-sources.py --fetch --check-current
+python3 scripts/fetch-test-clients.py --resolve-only
+python3 scripts/fetch-test-clients.py --sources
+```
+
+The loader verifies official npm SHA-512 registry integrity, resolves exact release-tag commits and stores binaries/source/manifests in ignored target/compat. Codex's full runtime, including codex-code-mode-host, is retained. Global installations and normal auth/config are unchanged. Download targets support macOS/Linux arm64/x64; Linux aarch64 native execution is verified against mock upstream; real-upstream Linux testing is separate.
+
+```sh
+python3 - <<'PY'
+import json, os, subprocess
+from pathlib import Path
+clients = json.loads(Path("target/compat/current-clients.json").read_text())
+env = dict(os.environ)
+env["EXETROUTER_CODEX_BIN"] = clients["codex"]["binary"]
+env["EXETROUTER_OPENCODE_BIN"] = clients["opencode"]["binary"]
+subprocess.run(["cargo", "test", "--locked", "--test", "responses",
+    "current_clients_complete_tool_cycles", "--", "--ignored", "--nocapture"],
+    env=env, check=True)
+PY
+```
+
+Four isolated profiles exercise Codex/OpenCode HTTP/WS with two mock accounts. Assertions verify tool execution/result, terminal completion, submissions, usage and primary transport. Codex WS warmup and OpenCode's auxiliary HTTP title are accounted separately. Mock HTTP 503 verifies one main submission; not all client recovery paths are covered.
+
+## SDK fixtures
+
+SDKs checked on October 1, 2026: Python openai 3.22.1 and JavaScript openai 7.25.0. Both passed models, Responses JSON/SSE, Chat JSON/SSE, function cycles, unsupported-parameter 400 and stream APIError against mock upstream.
+
+```sh
+python3 -m venv target/compat/openai-python
+target/compat/openai-python/bin/python -m pip --isolated install openai==3.22.1
+npm install --prefix target/compat/openai-js \
+  --registry https://registry.npmjs.org --userconfig /dev/null \
+  --globalconfig "$PWD/target/compat/npm-global.config" \
+  --cache target/compat/npm-cache --ignore-scripts --no-audit --no-fund openai@7.25.0
+EXETROUTER_PYTHON_BIN="$PWD/target/compat/openai-python/bin/python" \
+EXETROUTER_NODE_BIN="$(command -v node)" \
+EXETROUTER_OPENAI_JS_MODULE="$PWD/target/compat/openai-js/node_modules/openai/index.mjs" \
+cargo test --locked --test responses openai_sdks_complete_json_stream_and_tool_cycles \
+  -- --ignored --nocapture
+```
+
+Node 22+ is required; the temporary npm globalconfig must be absent/empty. Fixture credentials are synthetic. Real tests are separate.
+
+## Image forwarding fixtures
+
+Offline unit and integration fixtures cover ordered Chat text/image translation, optional detail, inputs larger than 1 MiB, JSON/SSE over HTTP/WS upstream transports, rejection before submission/accounting and payload privacy. Native Responses image/opaque-item ordering also has fixtures. This verifies forwarding; live image understanding, model-specific detail support and native multimodal tool results remain unverified.

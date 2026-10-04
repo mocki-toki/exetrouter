@@ -2,11 +2,9 @@
 
 `exr models --json --format FORMAT` prints JSON to stdout. It reads the account-pool extractor; no inference or API-token creation is involved. Without `--format`, JSON uses `openai-json`.
 
-These complete outputs use **one synthetic catalog entry** with ID `gpt-5.6-sol`. Limits and capabilities below are illustrative, not claims about that model's current upstream settings.
+The complete examples use one synthetic `gpt-5.6-sol` entry. Limits/capabilities are illustrative; real exports include all visible pool models and no bearer or SSH secrets.
 
-The reasoning levels match the account-visible catalog observed on 2026-10-04: `low`, `medium`, `high`, `xhigh`, `max`, `ultra`. Each real export uses the levels reported by its own pool. V1 marks only absent built-in presets (`none` and `minimal` in this example) as disabled, so OpenCode does not add them automatically; this does not reject API requests at the router.
-
-Real exports use your pool's reported metadata and include every visible model. Neither the API bearer nor SSH key material appears in the output.
+Reasoning levels reflect the catalog observed on October 4, 2026; each export uses its own pool's levels. V1 disables absent built-in presets (`none`/`minimal` here) to prevent OpenCode from adding them. This does not reject API requests at the router.
 
 | Format | Root and purpose |
 | --- | --- |
@@ -15,7 +13,7 @@ Real exports use your pool's reported metadata and include every visible model. 
 | `opencode-v1-json` | Singular `provider`, V1 options and variant objects. |
 | `opencode-v2-json` | Plural `providers`, V2 settings/capabilities and variant arrays. |
 
-For the OpenCode examples the remote HTTP URL has already been saved once with `exr configure --api-url https://api.example.com/v1`. Standalone instead derives its local API address automatically. `--base-url` only overrides one export. The optional `--model exetrouter/gpt-5.6-sol` selects an imported catalog model in the configuration; it does not reduce the model list. Without that flag, neither OpenCode format emits a top-level `model`, leaving selection to OpenCode's configured/recent/default preferences, which may choose another provider.
+The OpenCode examples use `https://api.example.com/v1` saved during setup. Standalone instead derives its local API address automatically. `--base-url` only overrides one export. The optional `--model exetrouter/gpt-5.6-sol` selects an imported catalog model in the configuration; it does not reduce the model list. Without that flag, neither OpenCode format emits a top-level `model`, leaving selection to OpenCode's configured/recent/default preferences, which may choose another provider.
 
 ## openai-json
 

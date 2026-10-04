@@ -1,6 +1,6 @@
 # Model catalog and cache affinity
 
-The inference verification matrix is recorded in [compatibility.md](compatibility.md). Separate model export shapes were checked against OpenCode V1 `1.18.34` and V2 `2.0.22` configuration sources on 2026-10-04; their exact revisions and files are recorded in [protocol-sources.json](protocol-sources.json). Model IDs and capabilities come from the account-visible upstream catalog, never from assumed Platform API pricing/limits.
+Models and capabilities come from the account-visible upstream catalog. Export verification is recorded in [compatibility](compatibility.md#opencode-model-import); reviewed revisions are pinned in [protocol-sources.json](protocol-sources.json).
 
 ## Metadata
 
@@ -24,7 +24,7 @@ exr models --json --format opencode-v1-json > /absolute/path/exetrouter-v1.json
 exr models --json --format opencode-v2-json > /absolute/path/exetrouter-v2.json
 ```
 
-Codex 0.160.0 can fetch `/v1/models/codex` directly through its provider's `model_catalog_url` with `features.api_key_model_discovery=true`; no file export is required. Keep provider name `OpenAI` for native compaction V2. Older clients can use an absolute `model_catalog_json` path as an optional snapshot. OpenCode V1/V2 import the generated configuration through `OPENCODE_CONFIG`. Both exports create a dedicated `exetrouter` provider named `ExetRouter`, with the model list and metadata from the account-pool extractor; the OpenCode OpenAI catalog is not inherited. V2 enables native compaction; no plugin is needed. CLI exports reuse the standalone API address or the remote URL saved with `exr configure --api-url`; `--base-url` is only an override. [Example output for each format](model-export-examples.md) shows the generated JSON. Catalog files are snapshots: regenerate after pool/catalog changes. See [client configuration and verification scope](compatibility.md).
+Codex 0.160.0 supports live catalog discovery; older clients can use an exported snapshot. OpenCode imports the generated configuration with `OPENCODE_CONFIG`, using the standalone API address or saved remote URL (`--base-url` overrides one export). Regenerate snapshots after pool/catalog changes. See [client setup](compatibility.md#configure-your-client) and [output examples](model-export-examples.md).
 
 ## Cache keys
 
