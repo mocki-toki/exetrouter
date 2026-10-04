@@ -18,6 +18,69 @@ use std::collections::HashSet;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 
+// Never retain an error payload or a WebSocket close reason in diagnostics.
+#[derive(Debug)]
+struct WsInterruption {
+    reason: &'static str,
+    stage: &'static str,
+    transport_error_kind: Option<&'static str>,
+    close_code: Option<u16>,
+}
+
+impl WsInterruption {
+    fn new(reason: &'static str) -> Self {
+        Self {
+            reason,
+            stage: "receive",
+            transport_error_kind: None,
+            close_code: None,
+        }
+    }
+
+    fn at(mut self, stage: &'static str) -> Self {
+        self.stage = stage;
+        self
+    }
+
+    fn transport(reason: &'static str, error: &tokio_tungstenite::tungstenite::Error) -> Self {
+        use std::io::ErrorKind;
+        use tokio_tungstenite::tungstenite::{error::ProtocolError, Error};
+        let kind = match error {
+            Error::ConnectionClosed => "connection_closed",
+            Error::AlreadyClosed => "already_closed",
+            Error::Io(error) => match error.kind() {
+                ErrorKind::ConnectionReset => "connection_reset",
+                ErrorKind::ConnectionAborted => "connection_aborted",
+                ErrorKind::BrokenPipe => "broken_pipe",
+                ErrorKind::TimedOut => "timed_out",
+                ErrorKind::UnexpectedEof => "unexpected_eof",
+                _ => "io_other",
+            },
+            Error::Tls(_) => "tls",
+            Error::Capacity(_) => "capacity",
+            Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+                "reset_without_close_handshake"
+            }
+            Error::Protocol(_) => "protocol",
+            Error::WriteBufferFull(_) => "write_buffer_full",
+            Error::Utf8(_) => "utf8",
+            _ => "other",
+        };
+        Self {
+            transport_error_kind: Some(kind),
+            ..Self::new(reason)
+        }
+    }
+}
+
+impl std::fmt::Display for WsInterruption {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.reason)
+    }
+}
+
+impl std::error::Error for WsInterruption {}
+
 // Fixed event names only: unknown upstream types may contain private content.
 #[derive(Default)]
 struct LastUpstreamEvent {
@@ -313,12 +376,23 @@ impl RequestLog {
             events_seen=self.events_seen,output_seen=self.output_seen,
             last_event_kind,last_event_at_ms,last_event_age_ms,reason);
     }
+    fn ws_interrupted(&self, failure: &WsInterruption) {
+        let (last_event_kind, last_event_at_ms, last_event_age_ms) =
+            self.last_event.fields(Instant::now());
+        tracing::info!(event="upstream_stream_interrupted",request_id=%self.id,
+            upstream_transport=self.transport,response_created=self.created,
+            events_seen=self.events_seen,output_seen=self.output_seen,
+            duration_ms=self.start.elapsed().as_millis() as u64,
+            last_event_kind,last_event_at_ms,last_event_age_ms,
+            reason=failure.reason,stage=failure.stage,
+            transport_error_kind=failure.transport_error_kind,close_code=failure.close_code);
+    }
     async fn observe(&mut self, event: &Value) -> Result<bool> {
         let received = chrono::Utc::now();
         let kind = event
             .get("type")
             .and_then(Value::as_str)
-            .ok_or("upstream event type missing")?;
+            .ok_or_else(|| WsInterruption::new("upstream_event_type_missing"))?;
         self.last_event
             .observe(kind, received.timestamp_millis(), Instant::now());
         let now = received.timestamp();
@@ -359,11 +433,11 @@ impl RequestLog {
         }
         if kind == "response.created" {
             if self.created {
-                return Err("duplicate response.created".into());
+                return Err(WsInterruption::new("upstream_duplicate_response_created").into());
             }
             self.created = true;
         } else if kind.starts_with("response.") && kind != "response.metadata" && !self.created {
-            return Err("response event preceded response.created".into());
+            return Err(WsInterruption::new("upstream_event_before_response_created").into());
         }
         if matches!(
             kind,
@@ -373,14 +447,14 @@ impl RequestLog {
             .and_then(Value::as_str)
             .is_none()
         {
-            return Err("upstream response ID missing".into());
+            return Err(WsInterruption::new("upstream_response_id_missing").into());
         }
         if let Some(id) = event.pointer("/response/id").and_then(Value::as_str) {
             if id.len() > 256 || id.chars().any(char::is_control) {
-                return Err("invalid upstream response ID".into());
+                return Err(WsInterruption::new("upstream_response_id_invalid").into());
             }
             if self.response_id.as_ref().is_some_and(|old| old != id) {
-                return Err("upstream response ID changed".into());
+                return Err(WsInterruption::new("upstream_response_id_changed").into());
             }
             self.response_id = Some(id.into());
         }
@@ -963,10 +1037,11 @@ pub(super) async fn http(
             .expect("validated payload")
             .remove("stream");
         let sent = tokio::select! {
-            _=wait_for_stop(stopped.clone())=>Err("service stopping".into()),
+            _=wait_for_stop(stopped.clone())=>Err(WsInterruption::new("service_stopping")),
             sent=send_upstream(&mut socket,UpstreamMessage::Text(payload.to_string().into()))=>sent,
         };
-        if sent.is_err() {
+        if let Err(failure) = sent {
+            log.ws_interrupted(&failure.at("request_write"));
             if !*stopped.borrow() {
                 let _ = log
                     .health(Some(crate::health::Rejection::Temporary), "transport")
@@ -1498,22 +1573,31 @@ pub(super) async fn websocket(
         })
 }
 
-async fn send_client(client: &mut WebSocket, value: String) -> Result<()> {
+async fn send_client(
+    client: &mut WebSocket,
+    value: String,
+) -> std::result::Result<(), WsInterruption> {
     send_client_message(client, Message::Text(value.into())).await
 }
 
-async fn send_client_message(client: &mut WebSocket, message: Message) -> Result<()> {
+async fn send_client_message(
+    client: &mut WebSocket,
+    message: Message,
+) -> std::result::Result<(), WsInterruption> {
     tokio::time::timeout(Duration::from_secs(10), client.send(message))
         .await
-        .map_err(|_| "client too slow")?
-        .map_err(|_| "client disconnected".into())
+        .map_err(|_| WsInterruption::new("client_write_timeout"))?
+        .map_err(|_| WsInterruption::new("client_write_error"))
 }
 
-async fn send_upstream(socket: &mut UpstreamSocket, message: UpstreamMessage) -> Result<()> {
+async fn send_upstream(
+    socket: &mut UpstreamSocket,
+    message: UpstreamMessage,
+) -> std::result::Result<(), WsInterruption> {
     tokio::time::timeout(Duration::from_secs(10), socket.send(message))
         .await
-        .map_err(|_| "upstream write timed out")?
-        .map_err(|_| "upstream write failed".into())
+        .map_err(|_| WsInterruption::new("upstream_write_timeout"))?
+        .map_err(|error| WsInterruption::transport("upstream_write_error", &error))
 }
 
 struct WsSession {
@@ -2164,63 +2248,145 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             let mut safe_to_switch = true;
             let mut recovered = None;
             let mut recovery_output = Some(super::output::CompletionOutput::default());
-            let result:Result<()>=async {
-            let mut handshake_metadata = None;
-            if let Some(headers) = metadata.take() {
-                let mut safe = response_metadata(&headers);
-                if let Some(value) = headers.get("x-codex-turn-state") {
-                    log.remember_turn(value.to_str().map_err(|_| "invalid upstream turn state")?).await?;
-                    safe.insert("x-codex-turn-state", value.clone());
-                }
-                if !safe.is_empty() {
-                    let headers = safe.iter().map(|(name,value)| (name.as_str().to_owned(), json!(value.to_str().expect("validated metadata")))).collect::<serde_json::Map<_,_>>();
-                    handshake_metadata = Some(json!({"type":"response.metadata","headers":headers}).to_string());
-                }
-            }
-            log.sent().await?;
-            if send_upstream(socket, UpstreamMessage::Text(payload.to_string().into())).await.is_err() {let _=log.health(Some(crate::health::Rejection::Temporary),"transport").await;return Err("upstream write failed; outcome unknown".into());}
-            let mut upstream_deadline = tokio::time::Instant::now() + crate::upstream::INFERENCE_IDLE_TIMEOUT;
-            let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
-            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            heartbeat.tick().await;
-            loop {
-                let message=tokio::select! {
-                    _ = heartbeat.tick() => { send_client(&mut client, json!({"type":"ping"}).to_string()).await?; continue; },
-                    _=wait_for_stop(stopped.clone())=>return Err("service stopping".into()),
-                    message=tokio::time::timeout_at(upstream_deadline, socket.next())=>match message {
-                        Ok(Some(Ok(message)))=> { upstream_deadline = tokio::time::Instant::now() + crate::upstream::INFERENCE_IDLE_TIMEOUT; message },
-                        result=> {log.interrupted(match result { Err(_) => "read_timeout", Ok(None) => "upstream_eof", _ => "transport_or_protocol" });let _=log.health(Some(crate::health::Rejection::Temporary),"transport").await;return Err("upstream closed before terminal event".into());}
-                    },
-                    incoming=client.next()=>match incoming {
-                        Some(Ok(Message::Ping(bytes)))=> { send_client_message(&mut client, Message::Pong(bytes)).await?;continue; },
-                        Some(Ok(Message::Pong(_)))=>continue,
-                        _=>return Err("client disconnected or sent concurrent request".into()),
-                    },
-                };
-                let text=match message { UpstreamMessage::Text(text)=>text,UpstreamMessage::Ping(bytes)=> { send_upstream(socket, UpstreamMessage::Pong(bytes)).await?;continue; },UpstreamMessage::Pong(_)=>continue,_=> {let _=log.health(Some(crate::health::Rejection::Temporary),"transport").await;return Err("upstream closed or sent invalid frame".into());} };
-                let mut event:Value=match serde_json::from_str(&text) {Ok(event)=>event,Err(_)=> {let _=log.health(Some(crate::health::Rejection::Temporary),"protocol").await;return Err("invalid upstream frame".into());} };
-                let pre_generation_quota = safe_to_switch && payload["conversation"].is_null() && !log.created && quota_refusal(&event);
-                safe_to_switch &= matches!(event["type"].as_str(), Some("ping" | "codex.rate_limits" | "codex.response.metadata" | "response.metadata" | "responsesapi.websocket_timing"));
-                let terminal=log.observe(&event).await?;
-                if pre_generation_quota && terminal { rejected_quota = Some(text.to_string()); return Ok(()); }
-                send_client(&mut client,if log.authentication_rejected {ws_error("upstream_authentication_error","upstream credentials rejected; reconnect with full context using a separate new request")} else {text.to_string()}).await?;
-                // OpenCode's sequential driver rejects response.* notifications
-                // before response.created; Codex also accepts metadata here.
-                if event["type"] == "response.created" {
-                    if let Some(metadata) = handshake_metadata.take() { send_client(&mut client, metadata).await?; }
-                }
-                if let Some(output) = &mut recovery_output {
-                    if output.observe(&mut event).is_err() { recovery_output = None; }
-                }
-                if terminal {
-                    if event["type"] == "response.completed" && recovery_output.is_some() {
-                        recovered = event.get_mut("response").map(Value::take);
+            let result: std::result::Result<(), WsInterruption> = async {
+                let mut handshake_metadata = None;
+                if let Some(headers) = metadata.take() {
+                    let mut safe = response_metadata(&headers);
+                    if let Some(value) = headers.get("x-codex-turn-state") {
+                        let turn = value.to_str().map_err(|_| {
+                            WsInterruption::new("invalid_turn_state").at("handshake_metadata")
+                        })?;
+                        log.remember_turn(turn).await.map_err(|_| {
+                            WsInterruption::new("turn_binding_failed").at("handshake_metadata")
+                        })?;
+                        safe.insert("x-codex-turn-state", value.clone());
                     }
-                    return Ok(());
+                    if !safe.is_empty() {
+                        let headers = safe.iter().map(|(name, value)| {
+                            (name.as_str().to_owned(), json!(value.to_str().expect("validated metadata")))
+                        }).collect::<serde_json::Map<_, _>>();
+                        handshake_metadata = Some(json!({"type":"response.metadata","headers":headers}).to_string());
+                    }
                 }
-            }
-        }.await;
-            if result.is_err() {
+                log.sent().await.map_err(|_| WsInterruption::new("request_storage_failed").at("before_submission"))?;
+                if let Err(failure) = send_upstream(socket, UpstreamMessage::Text(payload.to_string().into())).await {
+                    let _ = log.health(Some(crate::health::Rejection::Temporary), "transport").await;
+                    return Err(failure.at("request_write"));
+                }
+                let mut upstream_deadline = tokio::time::Instant::now() + crate::upstream::INFERENCE_IDLE_TIMEOUT;
+                let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+                heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                heartbeat.tick().await;
+                loop {
+                    let message = tokio::select! {
+                        _ = heartbeat.tick() => {
+                            send_client(&mut client, json!({"type":"ping"}).to_string()).await
+                                .map_err(|failure| failure.at("heartbeat_write"))?;
+                            continue;
+                        },
+                        _ = wait_for_stop(stopped.clone()) => return Err(WsInterruption::new("service_stopping")),
+                        message = tokio::time::timeout_at(upstream_deadline, socket.next()) => match message {
+                            Ok(Some(Ok(message))) => {
+                                upstream_deadline = tokio::time::Instant::now() + crate::upstream::INFERENCE_IDLE_TIMEOUT;
+                                message
+                            },
+                            result => {
+                                let failure = match result {
+                                    Err(_) => WsInterruption::new("read_timeout"),
+                                    Ok(None) => WsInterruption::new("upstream_eof"),
+                                    Ok(Some(Err(error))) => WsInterruption::transport("upstream_read_error", &error),
+                                    Ok(Some(Ok(_))) => unreachable!(),
+                                };
+                                let _ = log.health(Some(crate::health::Rejection::Temporary), "transport").await;
+                                return Err(failure);
+                            }
+                        },
+                        incoming = client.next() => match incoming {
+                            Some(Ok(Message::Ping(bytes))) => {
+                                send_client_message(&mut client, Message::Pong(bytes)).await
+                                    .map_err(|failure| failure.at("client_pong_write"))?;
+                                continue;
+                            },
+                            Some(Ok(Message::Pong(_))) => continue,
+                            Some(Ok(Message::Close(frame))) => {
+                                return Err(WsInterruption {
+                                    close_code: frame.map(|frame| frame.code),
+                                    ..WsInterruption::new("client_close")
+                                });
+                            },
+                            None => return Err(WsInterruption::new("client_eof")),
+                            Some(Err(_)) => return Err(WsInterruption::new("client_read_error")),
+                            Some(Ok(Message::Text(_))) => return Err(WsInterruption::new("client_concurrent_request")),
+                            Some(Ok(Message::Binary(_))) => return Err(WsInterruption::new("client_invalid_frame")),
+                        },
+                    };
+                    let text = match message {
+                        UpstreamMessage::Text(text) => text,
+                        UpstreamMessage::Ping(bytes) => {
+                            send_upstream(socket, UpstreamMessage::Pong(bytes)).await
+                                .map_err(|failure| failure.at("upstream_pong_write"))?;
+                            continue;
+                        },
+                        UpstreamMessage::Pong(_) => continue,
+                        message => {
+                            let failure = match message {
+                                UpstreamMessage::Close(frame) => WsInterruption {
+                                    close_code: frame.map(|frame| u16::from(frame.code)),
+                                    ..WsInterruption::new("upstream_close")
+                                },
+                                _ => WsInterruption::new("upstream_invalid_frame"),
+                            };
+                            let _ = log.health(Some(crate::health::Rejection::Temporary), "transport").await;
+                            return Err(failure);
+                        },
+                    };
+                    let mut event: Value = match serde_json::from_str(&text) {
+                        Ok(event) => event,
+                        Err(_) => {
+                            let _ = log.health(Some(crate::health::Rejection::Temporary), "protocol").await;
+                            return Err(WsInterruption::new("upstream_invalid_json"));
+                        }
+                    };
+                    let pre_generation_quota = safe_to_switch && payload["conversation"].is_null() && !log.created && quota_refusal(&event);
+                    safe_to_switch &= matches!(event["type"].as_str(), Some("ping" | "codex.rate_limits" | "codex.response.metadata" | "response.metadata" | "responsesapi.websocket_timing"));
+                    let terminal = log.observe(&event).await
+                        .map_err(|error| {
+                            error.downcast::<WsInterruption>()
+                                .map(|failure| failure.at("event_observation"))
+                                .unwrap_or_else(|_| WsInterruption::new("event_observation_failed").at("event_observation"))
+                        })?;
+                    if pre_generation_quota && terminal {
+                        rejected_quota = Some(text.to_string());
+                        return Ok(());
+                    }
+                    send_client(&mut client, if log.authentication_rejected {
+                        ws_error("upstream_authentication_error", "upstream credentials rejected; reconnect with full context using a separate new request")
+                    } else {
+                        text.to_string()
+                    }).await.map_err(|failure| failure.at("event_write"))?;
+                    // OpenCode's sequential driver rejects response.* notifications
+                    // before response.created; Codex also accepts metadata here.
+                    if event["type"] == "response.created" {
+                        if let Some(metadata) = handshake_metadata.take() {
+                            send_client(&mut client, metadata).await
+                                .map_err(|failure| failure.at("metadata_write"))?;
+                        }
+                    }
+                    if let Some(output) = &mut recovery_output {
+                        if output.observe(&mut event).is_err() {
+                            recovery_output = None;
+                        }
+                    }
+                    if terminal {
+                        if event["type"] == "response.completed" && recovery_output.is_some() {
+                            recovered = event.get_mut("response").map(Value::take);
+                        }
+                        return Ok(());
+                    }
+                }
+            }.await;
+            if let Err(failure) = result {
+                log.ws_interrupted(&failure);
                 let _ = log.finish("interrupted", Counters::default()).await;
                 let _ = send_client(
                     &mut client,
@@ -2354,6 +2520,35 @@ async fn next_sse_chunk(receive: &mut mpsc::Receiver<Bytes>, interval: Duration)
 #[cfg(test)]
 mod heartbeat_tests {
     use super::*;
+
+    #[test]
+    fn websocket_transport_diagnostics_discard_error_payloads() {
+        use tokio_tungstenite::tungstenite::{error::ProtocolError, Error};
+        let private = "synthetic-private-error-content";
+        for (error, expected) in [
+            (
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    private,
+                )),
+                "connection_reset",
+            ),
+            (Error::Utf8(private.into()), "utf8"),
+            (
+                Error::WriteBufferFull(Box::new(UpstreamMessage::Text(private.into()))),
+                "write_buffer_full",
+            ),
+            (
+                Error::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+                "reset_without_close_handshake",
+            ),
+        ] {
+            let diagnostic = WsInterruption::transport("upstream_read_error", &error);
+            assert_eq!(diagnostic.transport_error_kind, Some(expected));
+            assert!(!format!("{diagnostic:?}").contains(private));
+            assert_eq!(diagnostic.to_string(), "upstream_read_error");
+        }
+    }
 
     #[test]
     fn last_event_uses_fixed_names_and_monotonic_age() {
