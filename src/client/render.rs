@@ -268,6 +268,16 @@ pub(super) fn limits(v: &Value) -> String {
     }
     for account in &accounts {
         text.push_str(&format!("{}\n", field(account, "label")));
+        if account["preference"].is_object() {
+            text.push_str(&format!(
+                "  Priority {}\n  {}\n",
+                field(&account["preference"], "priority"),
+                crate::account_preferences::describe(&account["preference"]).replace('\n', "\n  ")
+            ));
+            if account["threshold_reached"] == true {
+                text.push_str("  Threshold reached; alternatives preferred (soft rule)\n");
+            }
+        }
         let q = &account["quota"];
         let windows = visible_windows(q);
         if windows.is_empty() {

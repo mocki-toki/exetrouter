@@ -1885,7 +1885,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                             let preference=&row["preference"];
                             mutation=Some(ControlRequest::AccountSet{account,
                                 enabled: (key.code==KeyCode::Char('D')).then(|| !preference["enabled"].as_bool().unwrap_or(true)),
-                                priority: (key.code==KeyCode::Char('P')).then(|| if preference["priority"].as_i64().unwrap_or(0)>0 {0}else{1})});
+                                routing: None, priority: (key.code==KeyCode::Char('P')).then(|| if preference["priority"].as_i64().unwrap_or(0)>0 {0}else{1})});
                         }
                     }
                 }

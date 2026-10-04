@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct ServerReport {
+    #[serde(default)]
+    pub capabilities: serde_json::Value,
     pub schema_version: u8,
     pub version: String,
     pub checked_at: i64,
@@ -34,6 +36,10 @@ pub struct AccountQuota {
     pub refresh_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weekly_activation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preference: Option<crate::account_preferences::Preference>,
+    #[serde(default)]
+    pub threshold_reached: bool,
     pub quota: crate::quota::Summary,
 }
 
@@ -166,6 +172,8 @@ pub(crate) fn snapshot(
         quota_accounts.push(AccountQuota {
             id,
             label: "Email unavailable".into(),
+            preference: None,
+            threshold_reached: false,
             reset_credits: None,
             refresh_error: None,
             weekly_activation: conn.query_row("SELECT CASE WHEN status='pending' AND attempted_at<=?3 THEN 'unknown' ELSE status END FROM quota_activation_attempts WHERE account_id=?1 AND attempted_at>?2 ORDER BY attempted_at DESC,id DESC LIMIT 1", rusqlite::params![id,now-604800,now-60], |row| row.get(0)).optional()?,
@@ -210,6 +218,7 @@ pub(crate) fn snapshot(
     };
     let ready = pool.configured_accounts > 0;
     Ok(ServerReport {
+        capabilities: serde_json::Value::Null,
         schema_version: 1,
         version: env!("CARGO_PKG_VERSION").into(),
         checked_at: now,

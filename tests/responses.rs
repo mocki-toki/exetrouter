@@ -4788,6 +4788,7 @@ async fn account_preferences_route_by_user_and_operator_deactivation_blocks_boun
                     account: second,
                     enabled: Some(true),
                     priority: Some(10),
+                    routing: None,
                 },
             )?;
             Ok(())
@@ -4862,7 +4863,8 @@ async fn account_preferences_route_by_user_and_operator_deactivation_blocks_boun
                 exetrouter::ControlRequest::AccountSet {
                     account: second,
                     enabled: Some(true),
-                    priority: None
+                    priority: None,
+                    routing: None
                 }
             )
             .is_err());

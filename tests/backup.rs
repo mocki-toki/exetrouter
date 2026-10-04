@@ -40,7 +40,7 @@ fn state() -> State {
     write(&paths.key, &[1; 32]);
     write(&paths.oauth_key, &[2; 32]);
     write(&paths.db, &[]);
-    let conn = Connection::open(&paths.db).unwrap();
+    let mut conn = Connection::open(&paths.db).unwrap();
     init(&conn).unwrap();
     conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -74,6 +74,19 @@ fn state() -> State {
     conn.execute(
         "INSERT INTO oauth_health VALUES(?1,'responses',0,1,9999999999,'transport',1)",
         [account],
+    )
+    .unwrap();
+    exetrouter::account_preferences::set_user_rules(
+        &mut conn,
+        user,
+        account,
+        None,
+        None,
+        &exetrouter::account_preferences::RoutingArgs {
+            priority: Some(exetrouter::account_preferences::Setting::Number(255)),
+            switch_at: Some(exetrouter::account_preferences::Setting::Number(20)),
+            ..Default::default()
+        },
     )
     .unwrap();
     State {
@@ -194,6 +207,9 @@ fn cli_snapshot_includes_live_wal_keys_and_restores_a_restartable_state() {
     let account = oauth::load(&conn, &oauth::Vault::new([2; 32]), 1).unwrap();
     assert!(account.credentials.access_token == "fixture-access");
     assert!(account.credentials.refresh_token == "fixture-refresh");
+    let preferences = exetrouter::account_preferences::effective(&conn, Some(1), 1).unwrap();
+    assert_eq!(preferences.priority, 255);
+    assert_eq!(preferences.rules.switch_at, Some(20));
     for table in ["context_bindings", "oauth_quota_windows", "oauth_health"] {
         assert_eq!(
             conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r

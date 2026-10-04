@@ -121,8 +121,8 @@ enum AccountCommand {
         id: i64,
         #[arg(long,action=clap::ArgAction::Set)]
         enabled: Option<bool>,
-        #[arg(long)]
-        priority: Option<i32>,
+        #[command(flatten)]
+        routing: crate::account_preferences::RoutingArgs,
     },
     /// Reactivate an account for your user without signing in again.
     Enable { id: i64 },
@@ -262,8 +262,19 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
             AccountCommand::Set {
                 id,
                 enabled,
-                priority,
-            } => Some((*id, *enabled, *priority)),
+                routing,
+            } => {
+                routing.validate()?;
+                Some((
+                    *id,
+                    *enabled,
+                    (routing.priority.is_some()
+                        || routing.switch_at.is_some()
+                        || routing.switch_at_short.is_some()
+                        || routing.switch_at_weekly.is_some())
+                    .then(|| routing.clone()),
+                ))
+            }
             AccountCommand::Enable { id } => Some((*id, Some(true), None)),
             AccountCommand::Disable { id, yes } => {
                 if !yes {
@@ -273,13 +284,22 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
             }
             _ => None,
         };
-        if let Some((id, enabled, priority)) = preference {
+        if let Some((id, enabled, routing)) = preference {
+            if routing.is_some() && args.connection.local.is_none() {
+                let report = ssh_request(args, ControlRequest::Doctor).await?;
+                if report["capabilities"]["account_routing_rules"] != 1 {
+                    return Err(
+                        "Account routing rules require an updated server and SSH gateway".into(),
+                    );
+                }
+            }
             let value = ssh_request(
                 args,
                 ControlRequest::AccountSet {
                     account: id,
                     enabled,
-                    priority,
+                    priority: None,
+                    routing,
                 },
             )
             .await?;
@@ -287,8 +307,11 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
                 println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
                 println!(
-                    "Account preferences\n\nEnabled   {}\nPriority  {}\nLocked    {}",
-                    value["enabled"], value["priority"], value["locked"]
+                    "Account preferences\n\nEnabled   {}\nPriority  {}\nLocked    {}\n{}",
+                    value["enabled"],
+                    value["priority"],
+                    value["locked"],
+                    crate::account_preferences::describe(&value)
                 );
             }
             return Ok(());

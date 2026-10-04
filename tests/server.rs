@@ -1101,3 +1101,52 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
     }
     mock.abort();
 }
+
+#[test]
+fn new_routing_rules_cross_restricted_control_gateway_and_obey_operator_policy() {
+    let server = Server::start();
+    let conn = rusqlite::Connection::open(server.dir.path().join("state.sqlite")).unwrap();
+    let now = chrono::Utc::now().timestamp();
+    conn.execute("INSERT INTO oauth_accounts(account_id,state,encrypted_credentials,expires_at,created_at) VALUES('synthetic-routing','active',X'00',?1,?2)",rusqlite::params![now+3600,now]).unwrap();
+    let reply=server.control(json!({"action":"account_set","account":1,"enabled":null,"priority":null,"routing":{"priority":-255,"switch_at":20,"switch_at_weekly":15,"switch_at_short":"off"}}));
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["result"]["priority"], -255);
+    assert_eq!(reply["result"]["rules"]["switch_at_short"], -1);
+    let report = server.control(json!({"action":"doctor"}));
+    assert_eq!(report["result"]["capabilities"]["account_routing_rules"], 1);
+    assert_eq!(
+        report["result"]["quota_accounts"][0]["preference"]["rules"]["switch_at"],
+        20
+    );
+    let output = Server::command(&server.dir)
+        .args([
+            "admin",
+            "oauth",
+            "policy",
+            "1",
+            "--priority",
+            "255",
+            "--switch-at",
+            "25",
+            "--locked",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reply=server.control(json!({"action":"account_set","account":1,"priority":null,"enabled":null,"routing":{"priority":"default","switch_at":"off"}}));
+    assert_eq!(reply["ok"], false);
+    let report = server.control(json!({"action":"doctor"}));
+    assert_eq!(
+        report["result"]["quota_accounts"][0]["preference"]["priority"],
+        255
+    );
+    assert_eq!(
+        report["result"]["quota_accounts"][0]["preference"]["rules"]["switch_at"],
+        25
+    );
+}

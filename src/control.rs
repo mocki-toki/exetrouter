@@ -29,6 +29,8 @@ pub enum ControlRequest {
         account: i64,
         enabled: Option<bool>,
         priority: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        routing: Option<crate::account_preferences::RoutingArgs>,
     },
     Models,
     Doctor,
@@ -77,8 +79,14 @@ pub fn control(
                 account,
                 enabled,
                 priority,
-            } => serde_json::to_value(crate::account_preferences::set_user(
-                conn, user_id, account, enabled, priority,
+                routing,
+            } => serde_json::to_value(crate::account_preferences::set_user_rules(
+                conn,
+                user_id,
+                account,
+                enabled,
+                priority,
+                &routing.unwrap_or_default(),
             )?)?,
             ControlRequest::Models => serde_json::json!({"data":[],"object":"list"}),
             ControlRequest::Doctor

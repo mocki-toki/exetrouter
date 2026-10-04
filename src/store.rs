@@ -12,6 +12,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/006_model_metadata.sql"),
     include_str!("migrations/007_account_preferences.sql"),
     include_str!("migrations/008_quota_activation.sql"),
+    include_str!("migrations/009_account_routing.sql"),
 ];
 pub const SCHEMA_VERSION: usize = MIGRATIONS.len();
 const QUEUE_CAPACITY: usize = 32;
@@ -118,6 +119,73 @@ mod tests {
     use super::*;
     use crate::{authenticate, create_token, create_user};
 
+    #[test]
+    fn routing_migration_preserves_saved_numbers_credentials_and_preferences() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        for migration in &MIGRATIONS[..8] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 8).unwrap();
+        conn.execute(
+            "INSERT INTO users(id,name,created_at) VALUES(1,'fixture',0)",
+            [],
+        )
+        .unwrap();
+        for id in 1..=3 {
+            conn.execute("INSERT INTO oauth_accounts(id,account_id,state,encrypted_credentials,expires_at,generation,created_at) VALUES(?1,?2,'active',X'1234',2000000000,7,0)",rusqlite::params![id,format!("synthetic-{id}")]).unwrap();
+        }
+        conn.execute("INSERT INTO account_policy VALUES(1,1,0,0),(2,1,10,1)", [])
+            .unwrap();
+        conn.execute("INSERT INTO account_preferences VALUES(1,1,0,-100)", [])
+            .unwrap();
+        init(&conn).unwrap();
+        let preference = crate::account_preferences::effective(&conn, Some(1), 1).unwrap();
+        assert_eq!(preference.priority, -100);
+        assert!(!preference.enabled);
+        assert_eq!(
+            crate::account_preferences::effective(&conn, None, 1)
+                .unwrap()
+                .priority,
+            0
+        );
+        assert_eq!(
+            crate::account_preferences::effective(&conn, Some(1), 2)
+                .unwrap()
+                .priority,
+            10
+        );
+        assert_eq!(
+            crate::account_preferences::effective(&conn, Some(1), 3)
+                .unwrap()
+                .priority,
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT hex(encrypted_credentials) FROM oauth_accounts WHERE id=1",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "1234"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT generation FROM oauth_accounts WHERE id=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            7
+        );
+        init(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, usize>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+    }
     #[test]
     fn migration_adopts_legacy_database_without_losing_tokens() {
         let conn = Connection::open_in_memory().unwrap();

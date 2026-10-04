@@ -21,7 +21,8 @@ printf '%s\n' "$request" >> "$EXETROUTER_TEST_REQUESTS"
 case "$request" in
   *'"action":"token_list"'*) printf '%s' '{"ok":true,"result":[{"id":"tok_test","name":"Laptop","expires_at":2000000000,"revoked_at":null,"last_used_at":null}]}' ;;
   *'"action":"models"'*) printf '%s' '{"ok":true,"result":{"data":[{"id":"gpt-test","object":"model","owned_by":"openai","display_name":"Test model","exetrouter":{"context_window":100000,"input_modalities":["text","image"],"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low"}},{"id":"gpt-other","object":"model","owned_by":"openai","display_name":"Other model","exetrouter":{"context_window":200000,"input_modalities":["text"],"supported_reasoning_levels":[{"effort":"high"}]}}]}}' ;;
-  *'"action":"doctor"'*|*'"action":"limits"'*) printf '%s' '{"ok":true,"result":{"quota_accounts":[{"id":1,"label":"test@example.com","reset_credits":{"available_count":2,"credits":[]},"quota":{"status":"current","windows":[{"kind":"primary","window_minutes":480,"used_percent":20,"remaining_percent":80,"status":"current"},{"kind":"secondary","window_minutes":10080,"used_percent":30,"remaining_percent":70,"status":"stale"}]}}]}}' ;;
+  *'"action":"doctor"'*|*'"action":"limits"'*) printf '%s' '{"ok":true,"result":{"capabilities":{"account_routing_rules":1},"quota_accounts":[{"id":1,"label":"test@example.com","preference":{"enabled":true,"priority":1,"locked":false,"rules":{"switch_at":null,"switch_at_short":null,"switch_at_weekly":null},"settings":{}},"reset_credits":{"available_count":2,"credits":[]},"quota":{"status":"current","windows":[{"kind":"primary","window_minutes":480,"used_percent":20,"remaining_percent":80,"status":"current"},{"kind":"secondary","window_minutes":10080,"used_percent":30,"remaining_percent":70,"status":"stale"}]}}]}}' ;;
+  *'"action":"account_set"'*) printf '%s' '{"ok":true,"result":{"enabled":true,"priority":-255,"locked":false,"rules":{"switch_at":20,"switch_at_short":-1,"switch_at_weekly":15},"settings":{"priority":-255,"switch_at":20,"switch_at_short":"off","switch_at_weekly":15}}}' ;;
   *'"action":"reset_prepare"'*) printf '%s' '{"ok":true,"result":{"confirmation":"synthetic-confirmation","email":"test@example.com","remaining_percent":5,"available_count":2,"credit_title":"Full reset","free_reset_at":2000000000,"recommend_wait":true,"credit_expires_at":null}}' ;;
   *'"action":"reset_confirm"'*) printf '%s' '{"ok":true,"result":{"code":"reset","windows_reset":2}}' ;;
   *'"action":"usage"'*) printf '%s' '{"ok":true,"result":{"period":"day","timezone":"Europe/Moscow","rows":[]}}' ;;
@@ -1079,4 +1080,54 @@ fn opencode_exports_reuse_saved_api_url_and_select_only_catalog_models() {
         serde_json::from_slice(&fs::read(client.dir.path().join("config.json")).unwrap()).unwrap();
     assert_eq!(saved["host"], "localhost");
     assert_eq!(saved["api_url"], "https://api.example.com/v1");
+}
+
+#[test]
+fn account_cli_serializes_numeric_rules_and_rejects_invalid_values_before_mutation() {
+    let client = Client::configured();
+    let output = client.run(&[
+        "account",
+        "set",
+        "1",
+        "--priority",
+        "-255",
+        "--switch-at",
+        "20",
+        "--switch-at-short",
+        "off",
+        "--switch-at-weekly",
+        "15",
+        "--json",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    let mutation: serde_json::Value = serde_json::from_str(
+        requests
+            .lines()
+            .find(|line| line.contains("account_set"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(mutation["routing"]["priority"], -255);
+    assert_eq!(mutation["routing"]["switch_at"], 20);
+    assert_eq!(mutation["routing"]["switch_at_short"], "off");
+    assert_eq!(mutation["routing"]["switch_at_weekly"], 15);
+    for (flag, value) in [
+        ("--priority", "256"),
+        ("--switch-at", "101"),
+        ("--priority", "off"),
+    ] {
+        assert!(!client
+            .run(&["account", "set", "1", flag, value])
+            .status
+            .success());
+    }
+    assert_eq!(
+        fs::read_to_string(client.dir.path().join("requests.log")).unwrap(),
+        requests
+    );
 }

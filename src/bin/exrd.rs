@@ -157,8 +157,8 @@ enum OauthCommand {
         id: i64,
         #[arg(long, action=clap::ArgAction::Set)]
         enabled: Option<bool>,
-        #[arg(long)]
-        priority: Option<i32>,
+        #[command(flatten)]
+        routing: exetrouter::account_preferences::RoutingArgs,
         #[arg(long, action=clap::ArgAction::Set)]
         locked: Option<bool>,
     },
@@ -453,14 +453,14 @@ async fn run() -> Result<()> {
             OauthCommand::Policy {
                 id,
                 enabled,
-                priority,
+                routing,
                 locked,
             } => print_report(
                 "Account routing policy",
                 &db.call(move |conn| {
                     Ok(serde_json::to_value(
-                        exetrouter::account_preferences::set_policy(
-                            conn, id, enabled, priority, locked,
+                        exetrouter::account_preferences::set_policy_rules(
+                            conn, id, enabled, None, locked, &routing,
                         )?,
                     )?)
                 })
@@ -700,7 +700,17 @@ fn print_report(title: &str, value: &impl serde::Serialize, machine: bool) -> Re
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("{title}\n");
-        print_value(&value, 0);
+        if title == "Account routing policy" {
+            println!(
+                "Enabled   {}\nPriority  {}\nLocked    {}\n{}",
+                value["enabled"],
+                value["priority"],
+                value["locked"],
+                exetrouter::account_preferences::describe(&value)
+            );
+        } else {
+            print_value(&value, 0);
+        }
     }
     Ok(())
 }
