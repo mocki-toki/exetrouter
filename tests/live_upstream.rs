@@ -87,10 +87,10 @@ async fn live_catalog() {
     assert!(!models.is_empty(), "test account has no visible models");
     let codex = exetrouter::catalog::codex(&models).expect("real catalog lacks Codex metadata");
     let opencode =
-        exetrouter::catalog::opencode(&models).expect("real catalog lacks OpenCode metadata");
+        exetrouter::catalog::opencode_v2(&models).expect("real catalog lacks OpenCode metadata");
     assert_eq!(codex["models"].as_array().unwrap().len(), models.len());
     assert_eq!(
-        opencode["providers"]["openai"]["models"]
+        opencode["providers"]["exetrouter"]["models"]
             .as_object()
             .unwrap()
             .len(),

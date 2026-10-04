@@ -4375,7 +4375,7 @@ async fn cache_account_preference_is_stable_but_never_overrides_checkpoint_or_he
 async fn model_metadata_is_authenticated_persistent_and_conservative_across_accounts() {
     let mut fixture = Fixture::start(false).await;
     let client = reqwest::Client::new();
-    for path in ["codex", "opencode"] {
+    for path in ["codex", "opencode-v1", "opencode-v2"] {
         assert_eq!(
             client
                 .get(format!("{}/v1/models/{path}", fixture.url))
@@ -4449,12 +4449,12 @@ async fn model_metadata_is_authenticated_persistent_and_conservative_across_acco
     );
     assert!(!merged.to_string().contains("do-not-expose"));
     let open = get(
-        format!("{}/v1/models/opencode", fixture.url),
+        format!("{}/v1/models/opencode-v2", fixture.url),
         fixture.secret.clone(),
     )
     .await;
     assert_eq!(
-        open["providers"]["openai"]["models"]["gpt-test"]["limit"],
+        open["providers"]["exetrouter"]["models"]["gpt-test"]["limit"],
         json!({"context":32000,"input":30400,"output":0})
     );
     let v1 = get(
@@ -4462,17 +4462,11 @@ async fn model_metadata_is_authenticated_persistent_and_conservative_across_acco
         fixture.secret.clone(),
     )
     .await;
-    let v2 = get(
-        format!("{}/v1/models/opencode-v2", fixture.url),
-        fixture.secret.clone(),
-    )
-    .await;
-    assert_eq!(v2, open);
     assert_eq!(
-        v1["provider"]["openai"]["models"]["gpt-test"]["limit"],
-        open["providers"]["openai"]["models"]["gpt-test"]["limit"]
+        v1["provider"]["exetrouter"]["models"]["gpt-test"]["limit"],
+        open["providers"]["exetrouter"]["models"]["gpt-test"]["limit"]
     );
-    assert!(v1["provider"]["openai"]["models"]["gpt-test"]["variants"].is_object());
+    assert!(v1["provider"]["exetrouter"]["models"]["gpt-test"]["variants"].is_object());
     row["shell_type"] = json!("shell_command");
     fixture
         .mock

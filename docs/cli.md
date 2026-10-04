@@ -29,8 +29,8 @@ exr doctor --json           # Stable local/server diagnostic object
 exr models                  # Human-readable table
 exr models --json           # OpenAI-style catalog
 exr models --json --format codex-json > /absolute/path/models.json
-exr models --json --format opencode-v1-json > /absolute/path/models-v1.json
-exr models --json --format opencode-v2-json > /absolute/path/models-v2.json
+exr models --json --format opencode-v1-json --base-url https://api.example.com/v1 > /absolute/path/exetrouter-v1.json
+exr models --json --format opencode-v2-json --base-url https://api.example.com/v1 > /absolute/path/exetrouter-v2.json
 exr usage --period day
 exr usage --period 24h
 exr usage --period week --by user
@@ -49,7 +49,7 @@ exr token revoke tok_...     # Interactive confirmation
 exr token revoke tok_... --yes
 ```
 
-`tokens` is an alias for `token`; omitting its subcommand lists tokens. `quota` is an alias for `limits`. Expiration is 1–365 days, default 90. Creation and rotation require terminal stdin/stdout and reject `--json`. Rotation immediately revokes the old token; update the consuming service with the new secret. JSON/model exports contain no secrets. `--format` requires `--json`.
+`tokens` is an alias for `token`; omitting its subcommand lists tokens. `quota` is an alias for `limits`. Expiration is 1–365 days, default 90. Creation and rotation require terminal stdin/stdout and reject `--json`. Rotation immediately revokes the old token; update the consuming service with the new secret. JSON/model exports contain no secrets. `--format` requires `--json`. OpenCode formats also require `--base-url`, an HTTP(S) API URL ending in `/v1` without credentials, query or fragment. Import the generated file with `OPENCODE_CONFIG=/absolute/path/exetrouter-v1.json opencode` (for V2 use the V2 file and `opencode --standalone`); models appear under `exetrouter/MODEL_ID` as **ExetRouter**. Regenerate before launching to refresh the extracted catalog.
 
 Token metadata and mutations are scoped to the authenticated user. Usage is shared aggregate metadata, grouped by user or model. Token grouping (`--by token`) shows only the authenticated user’s token IDs, including revoked tokens with recorded usage; users cannot list another user's tokens, inspect OAuth identities or read request contents. User creation, OAuth login and backups remain local `exrd admin` operations. Operator reports also default to readable text; add `--json` for scripts. OAuth login is interactive and rejects JSON. The SSH gateway wire protocol and raw authorized_keys export retain their dedicated machine formats.
 

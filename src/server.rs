@@ -505,9 +505,8 @@ fn router(state: Arc<AppState>) -> Router {
     let models = Router::new()
         .route("/v1/models", get(models))
         .route("/v1/models/codex", get(codex_models))
-        .route("/v1/models/opencode", get(opencode_models))
         .route("/v1/models/opencode-v1", get(opencode_v1_models))
-        .route("/v1/models/opencode-v2", get(opencode_models))
+        .route("/v1/models/opencode-v2", get(opencode_v2_models))
         .route("/v1/responses", get(transport::websocket).post(responses))
         .route("/v1/responses/compact", post(compact))
         .route("/v1/chat/completions", post(chat_completions))
@@ -681,7 +680,7 @@ async fn codex_models(State(state): State<Arc<AppState>>) -> Response {
 async fn opencode_v1_models(State(state): State<Arc<AppState>>) -> Response {
     client_models(state, "opencode-v1").await
 }
-async fn opencode_models(State(state): State<Arc<AppState>>) -> Response {
+async fn opencode_v2_models(State(state): State<Arc<AppState>>) -> Response {
     client_models(state, "opencode-v2").await
 }
 

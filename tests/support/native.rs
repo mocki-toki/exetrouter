@@ -73,8 +73,10 @@ impl Run<'_> {
             self.url,
             if self.client == "codex" {
                 "codex"
+            } else if self.client == "opencode-v1" {
+                "opencode-v1"
             } else {
-                "opencode"
+                "opencode-v2"
             }
         );
         let catalog: Value = reqwest::Client::builder()
@@ -144,9 +146,14 @@ impl Run<'_> {
                 if self.websocket {
                     return Err("OpenCode V1 fixture only supports HTTP".into());
                 }
-                let provider = "openai";
+                let provider = "exetrouter";
                 let model = format!("{provider}/{}", self.model);
-                let options = json!({"model":model,"enabled_providers":[provider],"provider":{provider:{"npm":"@ai-sdk/openai","env":["EXETROUTER_TOKEN"],"options":{"baseURL":format!("{}/v1",self.url)},"models":{self.model:{"name":"Synthetic fixture","limit":{"context":128000,"output":8192},"options":{"store":false}}}}},"permission":{"*":"allow"}});
+                let mut options = catalog.clone();
+                options["model"] = json!(model);
+                options["enabled_providers"] = json!([provider]);
+                options["provider"][provider]["options"]["baseURL"] =
+                    json!(format!("{}/v1", self.url));
+                options["permission"] = json!({"*":"allow"});
                 command
                     .env("XDG_CONFIG_HOME", &config)
                     .env("XDG_DATA_HOME", self.directory.join("data"))
@@ -173,13 +180,18 @@ impl Run<'_> {
                 command.arg(self.prompt);
             }
             "opencode" => {
-                let model = format!("openai/{}", self.model);
-                if !catalog["providers"]["openai"]["models"].is_object() {
+                let model = format!("exetrouter/{}", self.model);
+                if !catalog["providers"]["exetrouter"]["models"].is_object() {
                     return Err("invalid OpenCode model catalog".into());
                 }
-                let mut options = json!({"model":model,"providers":{"openai":{"name":"ExetRouter","canonical":"openai","package":"@opencode/ai/providers/openai/responses","env":["EXETROUTER_TOKEN"],"settings":{"baseURL":format!("{}/v1",self.url),"transport":if self.websocket {"websocket"} else {"http"},"store":false,"compaction":{"type":"native"}},"models":catalog["providers"]["openai"]["models"]}}});
+                let mut options = catalog.clone();
+                options["model"] = json!(model);
+                options["providers"]["exetrouter"]["settings"]["baseURL"] =
+                    json!(format!("{}/v1", self.url));
+                options["providers"]["exetrouter"]["settings"]["transport"] =
+                    json!(if self.websocket { "websocket" } else { "http" });
                 if let Some(policy) = policy {
-                    let window = options["providers"]["openai"]["models"][self.model]["limit"]
+                    let window = options["providers"]["exetrouter"]["models"][self.model]["limit"]
                         ["input"]
                         .as_u64()
                         .ok_or("OpenCode input limit unavailable")?;

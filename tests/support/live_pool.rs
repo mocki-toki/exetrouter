@@ -218,7 +218,7 @@ async fn checks(
 ) -> Result<Value> {
     let models = session.upstream.models().await?;
     exetrouter::catalog::codex(&models)?;
-    exetrouter::catalog::opencode(&models)?;
+    exetrouter::catalog::opencode_v2(&models)?;
     let requested = model.to_owned();
     let ids = session.db.call(move |conn| {
         let mut stmt = conn.prepare("SELECT a.id FROM oauth_accounts a JOIN oauth_models m ON m.account_id=a.id WHERE a.state='active' AND m.model=?1 ORDER BY a.id")?;

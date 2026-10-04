@@ -10,22 +10,21 @@ Schema 6 saves an allowlist of Codex ModelInfo fields: context/compaction limits
 | --- | --- |
 | GET /v1/models | OpenAI list; each model's `exetrouter` field contains allowed metadata. |
 | GET /v1/models/codex | `models` with Codex ModelInfo descriptors. |
-| GET /v1/models/opencode-v1 | V1 `provider.openai.models` configuration fragment. |
-| GET /v1/models/opencode-v2 | V2 `providers.openai.models` configuration fragment. |
-| GET /v1/models/opencode | Existing V2 projection. |
+| GET /v1/models/opencode-v1 | V1 `provider.exetrouter.models` configuration fragment. |
+| GET /v1/models/opencode-v2 | V2 `providers.exetrouter.models` configuration fragment. |
 
 Duplicate IDs use minimum numeric limits, intersected reasoning/modalities and positive capabilities enabled only when all accounts support them. Missing/false supports_experimental_context disables that shared capability. Incompatible instructions/tool modes or request-shaping fields reject client export with model_metadata_unavailable; the ordinary ID list remains accessible.
 
-OpenCode receives reported context/input headroom, reasoning variants and modalities. Unreported output limits export as `output: 0`, its unknown-limit convention. Its output reserve is a heuristic; the built-in OpenAI adapter omits output caps rejected by this backend. Public API prices are not inferred.
+OpenCode receives reported context/input headroom, reasoning variants and modalities. Unreported output limits export as `output: 0`, its unknown-limit convention. Its output reserve is a heuristic; backend support for requested output caps is validated upstream. Public API prices are not inferred.
 
 ```sh
 exr models
 exr models --json --format codex-json > /absolute/path/models.json
-exr models --json --format opencode-v1-json > /absolute/path/models-v1.json
-exr models --json --format opencode-v2-json > /absolute/path/models-v2.json
+exr models --json --format opencode-v1-json --base-url https://api.example.com/v1 > /absolute/path/exetrouter-v1.json
+exr models --json --format opencode-v2-json --base-url https://api.example.com/v1 > /absolute/path/exetrouter-v2.json
 ```
 
-Codex 0.160.0 can fetch `/v1/models/codex` directly through its provider's `model_catalog_url` with `features.api_key_model_discovery=true`; no file export is required. Keep provider name `OpenAI` for native compaction V2. Older clients can use an absolute `model_catalog_json` path as an optional snapshot. OpenCode V2 merges the exported models into its built-in `openai` provider and enables native compaction; no custom plugin is needed. Catalog files are snapshots: regenerate after pool/catalog changes. See [client configuration and verification scope](compatibility.md#codex-cli).
+Codex 0.160.0 can fetch `/v1/models/codex` directly through its provider's `model_catalog_url` with `features.api_key_model_discovery=true`; no file export is required. Keep provider name `OpenAI` for native compaction V2. Older clients can use an absolute `model_catalog_json` path as an optional snapshot. OpenCode V1/V2 import the generated configuration through `OPENCODE_CONFIG`. Both exports create a dedicated `exetrouter` provider named `ExetRouter`, with the model list and metadata from the account-pool extractor; the OpenCode OpenAI catalog is not inherited. V2 enables native compaction; no plugin is needed. Catalog files are snapshots: regenerate after pool/catalog changes. See [client configuration and verification scope](compatibility.md).
 
 ## Cache keys
 

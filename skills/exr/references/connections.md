@@ -10,23 +10,26 @@ Check the installed Codex version. For 0.160.0+, use `~/.codex/exetrouter.config
 
 Migrate legacy `[profiles.exetrouter]`/top-level `profile="exetrouter"` from the main config into the separate profile file, preserving unrelated settings. Remove an ExetRouter `model_catalog_json` override when using live discovery. Older clients without `model_catalog_url` can optionally use `exr models --json --format codex-json` exported to a user-selected absolute path and top-level `model_catalog_json` instead; regenerate snapshots after pool changes. Do not copy the user's Codex OAuth/auth.json into router state or overwrite unrelated config. Confirm the installed client's profile format rather than creating legacy profile tables.
 
-## OpenCode V2
+## OpenCode V1 and V2
 
-Use the built-in provider ID `openai`, package `@opencode/ai/providers/openai/responses`, env `EXETROUTER_TOKEN`, settings `baseURL`, `transport="websocket"`, `store=false`, and `compaction={type:"native"}`. No plugin is required. Use `transport="http"` for HTTP/SSE.
+Resolve the installed version with `opencode --version`. Set the router token in `EXETROUTER_TOKEN`; never put it in the exported file. Export the account-visible catalog using the matching native format and the operator's API URL:
 
-For optional pool-specific model metadata, export `exr models --json --format opencode-v1-json` for V1 (`provider.openai.models`) or `exr models --json --format opencode-v2-json` for V2 (`providers.openai.models`), and merge the matching fragment into your configuration. Select `openai/MODEL_ID`. OpenCode retains its standard retry policy.
+```sh
+exr models --json --format opencode-v1-json --base-url https://api.example.com/v1 > exetrouter-v1.json &&
+  OPENCODE_CONFIG="$PWD/exetrouter-v1.json" opencode --model exetrouter/MODEL_ID
+```
 
-## OpenCode V1
+For V2 use `opencode-v2-json` and `exetrouter-v2.json`, then launch `OPENCODE_CONFIG="$PWD/exetrouter-v2.json" opencode --standalone` so a private OpenCode server reads the fresh configuration. Both exports create a dedicated `exetrouter` provider named `ExetRouter` with models and metadata from our extractor, without inheriting OpenCode's bundled OpenAI catalog. V1 uses `provider`, `npm="@ai-sdk/openai"`, options and a variant object. V2 uses `providers`, package `@opencode/ai/providers/openai/responses`, settings and a variant array; defaults are WebSocket, `store=false` and native compaction. For HTTP/SSE change V2 `providers.exetrouter.settings.transport` to `http`.
 
-Use singular `provider`, provider ID `openai`, `npm="@ai-sdk/openai"`, options `baseURL` and `apiKey="{env:EXETROUTER_TOKEN}"`. No plugin is required. The adapter defaults to `store=false`; no per-model override is needed. Start with bundled model metadata; optional router metadata export/conversion is documented in `docs/compatibility.md#opencode-model-metadata`. Select the model with `/models` or `opencode --model openai/MODEL_ID`, using an ID from `exr models`.
+Use an ID from `exr models`, or choose **ExetRouter** in `/models`. Generate the file before each launch to refresh the catalog, and keep this provider's definition out of other configuration files so old model entries do not merge into it. Other settings/providers stay in the regular configuration. No conversion script or plugin is required. OpenCode retains its standard retry policy. See `docs/compatibility.md#opencode-model-import` for verification scope.
 
-The checked 1.18.34 client passed synthetic HTTP/SSE tools and process resume. V1 has experimental WS, but that transport, live upstream, compaction and long context remain unverified with ExetRouter.
+V1's experimental WebSocket transport, live upstream, compaction and long context remain unverified with ExetRouter.
 
 ## SDKs and service APIs
 
 Python: `OpenAI(base_url=URL, api_key=os.environ["EXETROUTER_TOKEN"], max_retries=0)`. JavaScript: `new OpenAI({baseURL: URL, apiKey: process.env.EXETROUTER_TOKEN, maxRetries: 0})`.
 
-Supported surfaces: models, Responses JSON/SSE/WS/compact, limited Chat Completions with function tools. Responses forwards `input_image` content to image-capable upstream models; Chat translates ordered user text/`image_url` parts to Responses input. Chat image forwarding has offline fixture coverage, not live vision verification. Use full history, `store=false`; HTTP previous_response_id and output caps are unsupported. Opaque context/open WS stay on their original upstream account. Embeddings/image-generation/audio/files/batches endpoints and upstream API-key support are absent. Check repository `docs/openai-api.md` for exact fields before integrating a new call.
+Supported surfaces: models, Responses JSON/SSE/WS/compact, limited Chat Completions with function tools. Responses forwards `input_image` content to image-capable upstream models; Chat translates ordered user text/`image_url` parts to Responses input. Chat image forwarding has offline fixture coverage, not live vision verification. Use full history, `store=false`; HTTP previous_response_id is unsupported; the backend validates requested output caps and other model options. Opaque context/open WS stay on their original upstream account. Embeddings/image-generation/audio/files/batches endpoints and upstream API-key support are absent. Check repository `docs/openai-api.md` for exact fields before integrating a new call.
 
 ## Local operator only
 

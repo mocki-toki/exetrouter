@@ -65,6 +65,22 @@
         {
           "path": "packages/core/src/config/plugin/provider.ts",
           "sha256": "c4b9cf9e174509f048bf65eebf23b13a38b334d4fcce5aee575911da724d6240"
+        },
+        {
+          "path": "packages/core/src/config.ts",
+          "sha256": "1f93b47731ed177dced40d71aaa3c586a10ddf41ad6714ae2fe165c7f09ba253"
+        },
+        {
+          "path": "packages/core/src/provider.ts",
+          "sha256": "45cc3fab026fb626197af59c83a0bdfba7e04ffe3b5d3819bfcf3def585f16f4"
+        },
+        {
+          "path": "packages/core/src/config/discovery.ts",
+          "sha256": "40cf849f5585c01dc6fc6698e9e2fc9586647dccb40f168bf0ed432279a52c99"
+        },
+        {
+          "path": "packages/cli/src/server-process.ts",
+          "sha256": "4d6cfc459c379010eef4e6d01ac819a3db22333f0e13487aabe42fc7d436f017"
         }
       ],
       "npm_package": "@opencode/cli"
@@ -115,6 +131,10 @@
         {
           "path": "packages/core/src/v1/config/provider.ts",
           "sha256": "c496dea619e8e9d2d09b7a2353f2e62bff6a2276471c161c3988059a1b6ac303"
+        },
+        {
+          "path": "packages/opencode/src/provider/transform.ts",
+          "sha256": "ddfea009d85f61172d056216addeeabd920cd368d4d27b2f652629f7e3bcb0d2"
         }
       ],
       "npm_package": "opencode-ai"

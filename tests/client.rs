@@ -922,7 +922,14 @@ fn server_config_allows_short_admin_commands_and_cli_flags_override_it() {
 #[test]
 fn model_exports_select_native_opencode_v1_and_v2_formats() {
     let client = Client::configured();
-    let v1 = client.run(&["models", "--json", "--format", "opencode-v1-json"]);
+    let v1 = client.run(&[
+        "models",
+        "--json",
+        "--format",
+        "opencode-v1-json",
+        "--base-url",
+        "https://api.example.com/v1/",
+    ]);
     assert!(
         v1.status.success(),
         "{}",
@@ -930,16 +937,78 @@ fn model_exports_select_native_opencode_v1_and_v2_formats() {
     );
     let v1: serde_json::Value = serde_json::from_slice(&v1.stdout).unwrap();
     assert_eq!(
-        v1["provider"]["openai"]["models"]["gpt-test"]["options"]["reasoningEffort"],
+        v1["provider"]["exetrouter"]["models"]["gpt-test"]["options"]["reasoningEffort"],
         "low"
     );
-    let v2 = client.run(&["models", "--json", "--format", "opencode-v2-json"]);
+    let v2 = client.run(&[
+        "models",
+        "--json",
+        "--format",
+        "opencode-v2-json",
+        "--base-url",
+        "https://api.example.com/v1",
+    ]);
     assert!(v2.status.success());
     let v2: serde_json::Value = serde_json::from_slice(&v2.stdout).unwrap();
     assert_eq!(
-        v2["providers"]["openai"]["models"]["gpt-test"]["variants"][0]["id"],
+        v2["providers"]["exetrouter"]["models"]["gpt-test"]["variants"][0]["id"],
         "low"
     );
     assert!(v1.get("providers").is_none());
     assert!(v2.get("provider").is_none());
+    let one = &v1["provider"]["exetrouter"];
+    let two = &v2["providers"]["exetrouter"];
+    assert_eq!(one["name"], "ExetRouter");
+    assert_eq!(two["name"], "ExetRouter");
+    assert_eq!(one["options"]["baseURL"], "https://api.example.com/v1");
+    assert_eq!(two["settings"]["baseURL"], one["options"]["baseURL"]);
+    assert_eq!(one["options"]["apiKey"], "{env:EXETROUTER_TOKEN}");
+    assert_eq!(
+        one["whitelist"],
+        serde_json::json!(["gpt-other", "gpt-test"])
+    );
+    assert!(two.get("canonical").is_none());
+    assert_eq!(one["models"].as_object().unwrap().len(), 2);
+    assert_eq!(two["models"].as_object().unwrap().len(), 2);
+    assert!(v1["provider"].get("openai").is_none());
+    assert!(v2["providers"].get("openai").is_none());
+}
+
+#[test]
+fn opencode_connection_validation_precedes_catalog_requests() {
+    let client = Client::configured();
+    assert!(!client
+        .run(&["models", "--json", "--format", "opencode-v1-json"])
+        .status
+        .success());
+    for url in [
+        "ftp://api.example.com/v1",
+        "https://user:SYNTHETIC_SECRET@api.example.com/v1",
+        "https://api.example.com/v1?token=SYNTHETIC_SECRET",
+        "https://api.example.com/v1#fragment",
+        "https://api.example.com",
+    ] {
+        let result = client.run(&[
+            "models",
+            "--json",
+            "--format",
+            "opencode-v2-json",
+            "--base-url",
+            url,
+        ]);
+        assert!(!result.status.success());
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("SYNTHETIC_SECRET"));
+    }
+    assert!(!client
+        .run(&[
+            "models",
+            "--json",
+            "--format",
+            "codex-json",
+            "--base-url",
+            "https://api.example.com/v1"
+        ])
+        .status
+        .success());
+    assert!(!client.dir.path().join("requests.log").exists());
 }

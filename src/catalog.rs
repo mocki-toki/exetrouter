@@ -254,11 +254,6 @@ pub fn codex(models: &[Model]) -> Result<Value> {
     Ok(json!({"models":metadata}))
 }
 
-/// Existing HTTP projection remains V2 for compatibility.
-pub fn opencode(models: &[Model]) -> Result<Value> {
-    opencode_v2(models)
-}
-
 pub fn opencode_v1(models: &[Model]) -> Result<Value> {
     opencode_projection(models, true)
 }
@@ -307,11 +302,18 @@ fn opencode_projection(models: &[Model], v1: bool) -> Result<Value> {
             }
         }
         if v1 {
-            let variants = levels
+            let mut variants = levels
                 .iter()
                 .filter_map(|level| level["effort"].as_str())
                 .map(|effort| (effort.to_owned(), json!({"reasoningEffort":effort})))
                 .collect::<Map<String, Value>>();
+            // V1 merges its generated OpenAI effort presets into explicit variants.
+            // Disable presets absent from the account-visible reasoning levels.
+            for effort in ["none", "minimal", "low", "medium", "high", "xhigh"] {
+                variants
+                    .entry(effort.to_owned())
+                    .or_insert_with(|| json!({"disabled":true}));
+            }
             let reasoning = levels
                 .iter()
                 .filter_map(|level| level["effort"].as_str())
@@ -334,9 +336,20 @@ fn opencode_projection(models: &[Model], v1: bool) -> Result<Value> {
         }));
     }
     Ok(if v1 {
-        json!({"provider":{"openai":{"models":entries}}})
+        json!({"provider":{"exetrouter":{
+            "npm":"@ai-sdk/openai","name":"ExetRouter","env":["EXETROUTER_TOKEN"],
+            "options":{"apiKey":"{env:EXETROUTER_TOKEN}"},
+            "whitelist":entries.keys().collect::<Vec<_>>(),"models":entries
+        }}})
     } else {
-        json!({"providers":{"openai":{"models":entries}}})
+        // A separate provider without canonical inheritance keeps model IDs and
+        // metadata entirely sourced from the router's account-visible catalog.
+        json!({"providers":{"exetrouter":{
+            "name":"ExetRouter","package":"@opencode/ai/providers/openai/responses",
+            "env":["EXETROUTER_TOKEN"],
+            "settings":{"transport":"websocket","store":false,"compaction":{"type":"native"}},
+            "models":entries
+        }}})
     })
 }
 
@@ -351,8 +364,18 @@ mod tests {
             "support_verbosity":true,"default_verbosity":"low"})).unwrap();
         let v1 = opencode_v1(std::slice::from_ref(&model)).unwrap();
         let v2 = opencode_v2(std::slice::from_ref(&model)).unwrap();
-        let one = &v1["provider"]["openai"]["models"]["gpt-test"];
-        let two = &v2["providers"]["openai"]["models"]["gpt-test"];
+        let one = &v1["provider"]["exetrouter"]["models"]["gpt-test"];
+        let two = &v2["providers"]["exetrouter"]["models"]["gpt-test"];
+        assert_eq!(v1["provider"]["exetrouter"]["npm"], "@ai-sdk/openai");
+        assert_eq!(v1["provider"]["exetrouter"]["name"], "ExetRouter");
+        assert_eq!(
+            v1["provider"]["exetrouter"]["whitelist"],
+            json!(["gpt-test"])
+        );
+        assert_eq!(v2["providers"]["exetrouter"]["name"], "ExetRouter");
+        assert!(v2["providers"]["exetrouter"].get("canonical").is_none());
+        assert!(v1["provider"].get("openai").is_none());
+        assert!(v2["providers"].get("openai").is_none());
         assert_eq!(
             one["limit"],
             json!({"context":100000,"input":85000,"output":0})
@@ -363,6 +386,9 @@ mod tests {
         assert_eq!(one["options"]["reasoningEffort"], "low");
         assert_eq!(one["options"]["textVerbosity"], "low");
         assert_eq!(one["variants"]["high"]["reasoningEffort"], "high");
+        assert_eq!(one["variants"]["medium"]["disabled"], true);
+        assert_eq!(one["variants"]["xhigh"]["disabled"], true);
+        assert!(one["variants"]["none"].get("disabled").is_none());
         assert_eq!(one["reasoning"], true);
         assert!(v1.get("providers").is_none());
         assert!(one.get("capabilities").is_none());
@@ -370,7 +396,6 @@ mod tests {
         assert_eq!(two["capabilities"]["input"], one["modalities"]["input"]);
         assert!(v2.get("provider").is_none());
         assert!(two.get("options").is_none());
-        assert_eq!(opencode(&[model]).unwrap(), v2);
     }
     #[test]
     fn projections_keep_real_limits_and_never_invent_an_output_cap() {
@@ -383,8 +408,8 @@ mod tests {
             .get("private_account")
             .is_none());
         assert!(codex(std::slice::from_ref(&model)).is_err());
-        let profile = opencode(&[model]).unwrap();
-        let value = &profile["providers"]["openai"]["models"]["a"];
+        let profile = opencode_v2(&[model]).unwrap();
+        let value = &profile["providers"]["exetrouter"]["models"]["a"];
         assert_eq!(
             value["limit"],
             json!({"context":100000,"input":95000,"output":0})
@@ -433,8 +458,8 @@ mod tests {
                 );
                 assert_eq!(catalog["models"][0]["context_window"], 100000);
                 assert_eq!(
-                    opencode(&[model]).unwrap()["providers"]["openai"]["models"]["a"]["limit"]
-                        ["context"],
+                    opencode_v2(&[model]).unwrap()["providers"]["exetrouter"]["models"]["a"]
+                        ["limit"]["context"],
                     100000
                 );
             }
