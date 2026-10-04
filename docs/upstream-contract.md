@@ -34,7 +34,7 @@ Only the general Codex meter is implemented. Separate model meters/credits need 
 
 HTTP/handshake/wrapped WS 429 or recognized explicit limit errors create cooldown. Expiry uses the latest valid `Retry-After` and corresponding exhausted-window/error reset; without either, use a marked local 60-second backoff. Inspect bounded errors for reset information without persisting or exposing their contents.
 
-Owned continuations may transfer at a quota boundary only with complete current context. Explicit pre-generation quota refusal permits bounded fallback; accepted/ambiguous generations and transport failures never permit replay. Without an eligible alternative, retain the original quota error. See [selection and recovery bounds](account-pool.md#failure-behavior).
+Owned continuations may transfer at a quota boundary or a configured soft threshold only with complete current context. A soft threshold prefers eligible alternatives but preserves a healthy original session when none can safely take over. Explicit pre-generation quota refusal permits bounded fallback; accepted/ambiguous generations and transport failures never permit replay. Without an eligible alternative, retain the original quota error. See [selection and recovery bounds](account-pool.md#failure-behavior).
 
 Observation order and credential generation reject old updates; parallel success does not erase cooldown. A quota-storage failure is logged separately from usage, and unavailable preflight storage rejects new operations. Durable pauses depend on a healthy database.
 

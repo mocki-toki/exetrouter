@@ -18,13 +18,14 @@ exr account add
 exr account reauth ID
 exr account disable ID --yes
 exr account enable ID
-exr account set ID --priority 1
+exr account set ID --priority 10 --switch-at 20
+exr account set ID --switch-at-short off --switch-at-weekly 15
 exr serve
 ```
 
 Standalone data defaults to `$XDG_DATA_HOME/exr` (`~/.local/share/exr`), private mode 0700. `--state-dir PATH` and `--listen 127.0.0.1:PORT` override it. The API runs while the TUI or foreground `exr serve` remains open. Issue a local bearer in Tokens, then use the local `/v1` endpoint in your client. No user/SSH administration is exposed in standalone; the internal owner scope keeps token/usage/affinity semantics consistent.
 
-OAuth add/reauth requires the owner's interactive terminal or TUI Settings browser flow. Never capture real tokens. Enter opens Overview account actions (reset-credit review, prioritize, deactivate/reactivate for the current user), Tokens actions and Settings actions. Account preferences work in remote and standalone modes; operator locks are enforced remotely and cannot be bypassed by CLI or TUI. Deactivation retains OAuth data and can be reversed without login. Higher priority applies only to independent requests, preserving opaque-context and WebSocket ownership. Settings supports account selection, add and reauthorize; real reset credits still require separate confirmation. Operator/server tasks belong to the separate `$exrd` skill.
+OAuth add/reauth requires the owner's interactive terminal or TUI Settings browser flow. Never capture real tokens. Enter opens Overview account actions (reset-credit review, numeric priority, switching rules, deactivate/reactivate for the current user), Tokens actions and Settings actions. Account preferences work in remote and standalone modes; operator locks are enforced remotely and cannot be bypassed by CLI or TUI. Deactivation retains OAuth data and can be reversed without login. Priority is -255…255 (default 1), with larger numbers preferred within a threshold tier; existing saved numbers are retained. Thresholds are whole percentages 0…100, `off` or `default` to inherit operator settings. In Overview, P edits priority and S edits all routing rules; Enter saves, Esc cancels. Soft thresholds move owned sessions only with recoverable full context and a suitable alternative; otherwise the healthy original account continues. Inspect effective settings and threshold status in Overview/limits. New rules require matching updated server and SSH gateway support; schema 8 to 9 needs the reviewed migration in `docs/account-routing-migration.md`. Settings supports account selection, add and reauthorize; real reset credits still require separate confirmation. Operator/server tasks belong to the separate `$exrd` skill.
 
 ## Connection and inspection
 

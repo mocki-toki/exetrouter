@@ -47,7 +47,7 @@ Without saved config, local development defaults to files in the working directo
 | `admin oauth reauth ID --device` | Reauthorize the same upstream account |
 | `admin oauth list` | Show account email and state without tokens (`email` is null when unavailable in the saved credentials) |
 | `admin oauth policy ID --enabled false --locked true` | Reversibly deactivate routing for all users and prevent client changes |
-| `admin oauth policy ID --enabled true --priority 1 --locked true` | Activate routing and enforce priority for everyone (OAuth must remain healthy) |
+| `admin oauth policy ID --enabled true --priority 10 --switch-at 20 --locked true` | Activate routing and enforce priority for everyone (OAuth must remain healthy) |
 | `admin oauth policy ID --locked false` | Unlock personal preference changes, preserving existing preferences |
 | `admin oauth disable ID` | Reversibly deactivate routing for everyone and lock client changes; retain OAuth state |
 | `admin oauth enable ID` | Reactivate routing while preserving the operator lock |
@@ -59,6 +59,8 @@ Without saved config, local development defaults to files in the working directo
 Reports use readable text by default and `--json` for scripts. Secrets and OAuth login are excluded from JSON. Exporting `authorized_keys` is intentionally machine-readable text. User API-token creation belongs to interactive `exr`; secrets go directly to the clipboard.
 
 `serve --gateway-uid` is required unless saved in config. Service/gateway UIDs must differ; same-UID mode is only for local tests. Wildcard listening is rejected unless `--allow-container-listen` is explicitly selected for an isolated container with loopback-published ingress. Never expose it directly to the Internet.
+
+Account policy also accepts `--switch-at-short` and `--switch-at-weekly`; thresholds are whole percentages 0…100, `off` or `default`. Priority accepts -255…255 or `default` (1). Locks cover all settings. Thresholds prefer alternatives without interrupting accepted generations and fall back to eligible capacity when every account reaches its threshold. Read [routing rules](account-pool.md#soft-switching-thresholds) and the explicit [schema 8 to 9 migration](account-routing-migration.md) before deployment. Old saved priorities remain unchanged.
 
 ## Update the software
 

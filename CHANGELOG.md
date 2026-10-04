@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Configure soft per-account switching thresholds for all, short and weekly quota windows through exr, exrd and the dashboard. Prefer alternatives at or below the remaining-percentage threshold, with fallback to healthy capacity and safe context transfer before submission.
+- Replace the dashboard priority toggle with numeric priority -255…255 (default 1), inheritance and operator locks. Preserve stored priorities and credentials through the explicit schema-8-to-9 migration.
+
 ## 0.3.0
 
 - Export dedicated OpenCode V1/V2 providers with pool models, native metadata and connection settings; reuse the standalone or saved remote API URL. Matching authenticated model routes expose provider fragments.

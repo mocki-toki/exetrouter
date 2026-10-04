@@ -42,7 +42,10 @@ exr usage --period 24h
 exr usage --period week --by user
 exr usage --period week --by token
 exr usage --period month --by model --json
-exr account set 1 --priority 1 # Prefer an account for your user
+exr account set 1 --priority 10 --switch-at 20 # Prefer until ≤20% remains
+exr account set 1 --switch-at-short off --switch-at-weekly 15
+exr account set 1 --priority -255 # Lowest numeric priority
+exr account set 1 --priority default --switch-at default # Inherit operator values
 exr account set 1 --enabled false # Reversible deactivation for your user
 exr limits                  # Per-account upstream subscription windows
 exr limits --json            # Array of live account limits and reset credits, labeled by email
@@ -69,13 +72,15 @@ Use an interactive terminal at least 72 columns × 20 rows. Press `?` for help o
 
 | View | What you can do |
 | --- | --- |
-| Overview | Inspect routing/account health and subscription limits. Enter opens account actions: reset-credit review, priority and activation. Operator locks apply. |
+| Overview | Inspect routing/account health and subscription limits. Enter opens account actions: reset-credit review, numeric priority, switching rules and activation. Operator locks apply. |
 | Usage | View Today, Last 24 hours, This week or This month, grouped by total, user, model or your API tokens. |
 | Tokens | Create, rotate or revoke tokens. Revoked tokens are hidden. Enter opens actions. |
 | Models | Browse account-visible models and reported limits. Enter copies the selected model ID. |
 | Settings | Change mode/connection, check/install client updates, and add or reauthorize standalone accounts. Enter opens actions. |
 
 ←/→ changes tabs; ↑/↓ selects items; PageUp/PageDown scrolls; `r` refreshes; `q` or Ctrl-C exits. In Usage, `p` changes the period, `b` changes grouping and `m` switches between reported tokens and requests. Select a group with ↑/↓ to see its chart and totals. User groups combine all that user's tokens; token groups show only your own IDs.
+
+Overview: `P` opens numeric priority; `S` opens Switching rules (also accessible through Enter). The form accepts priority -255…255, thresholds 0…100, `off` and `default`. Tab/Up/Down selects a field, Enter saves all edits, Esc cancels, and invalid values remain editable without sending a mutation. Locked rules can be inspected but not changed. Controls shows contextual hints. Overview shows effective priority, thresholds and whether a threshold is reached. Thresholds are soft: without a suitable alternative, a healthy original account continues. See [selection and inheritance](account-pool.md#soft-switching-thresholds).
 
 Connection fields support Left/Right, Home/End (Ctrl-A/Ctrl-E), Backspace/Delete and Ctrl-U to clear. Up/Down selects a field. Esc cancels edits; Ctrl-C exits without saving. Remote settings are saved after a successful SSH check.
 

@@ -98,7 +98,7 @@ Compact appends `compaction_trigger` to one Responses SSE request and projects `
 - `previous_response_id` is supported only for responses owned by the current WS. HTTP/new-socket previous IDs are unsupported. Bearer validity is checked on every `response.create`.
 - `encrypted_content` and native `encrypted_function_args` pass unchanged; empty argument arrays are valid. User-scoped domain-separated digests bind output to its account for 24 hours. Unknown/foreign/expired input returns `context_not_found`; conflicting untransferred owners return `context_account_mismatch`.
 - Saved conversation IDs must have been issued to the same router user. Digests pin them to the owning account for 24 hours. Unknown/foreign/expired IDs fail before inference. Saved conversations cannot migrate because backend-owned history is unavailable to the router.
-- Quota-only transfer requires complete current context and preserves authorization across concurrent forks. Accepted or ambiguous requests are never replayed. See [account-pool recovery](account-pool.md#failure-behavior) for bounds.
+- Quota or configured soft-threshold transfer requires complete current context and preserves authorization across concurrent forks. Accepted or ambiguous requests are never replayed. See [account-pool recovery](account-pool.md#failure-behavior) for bounds.
 
 ## Request sizes and compression
 
@@ -131,7 +131,7 @@ HTTP returns bounded upstream `x-codex-turn-state`. WS sends handshake `response
 
 WS accepts issued state in `client_metadata["x-codex-turn-state"]` or the upgrade header, projecting accepted header state into frame metadata. Both transports validate ownership/account. Only state issued to the same user is accepted; its digest pins the account for 24 hours in the bounded context registry. Unknown/foreign/expired state and conflicting untransferred opaque context fail before inference.
 
-Quota transfer drops old account-specific state and returns the replacement connection's metadata. Raw values stay transient. An HTTP header that cannot be bound is omitted while the accepted response is drained/accounted; an unbindable metadata event interrupts forwarding.
+Quota or configured soft-threshold transfer drops old account-specific state and returns the replacement connection's metadata. Raw values stay transient. An HTTP header that cannot be bound is omitted while the accepted response is drained/accounted; an unbindable metadata event interrupts forwarding.
 
 Additional metadata is limited to bounded `openai-model`, `x-openai-model`, `x-models-etag`, boolean `x-reasoning-included`, and validated numeric `x-codex-primary/secondary-used-percent`, `window-minutes` and `reset-at`. Quota headers report the selected account's observations for native HTTP `/status`; missing values/credits are not fabricated. Credentials and arbitrary headers are excluded.
 
