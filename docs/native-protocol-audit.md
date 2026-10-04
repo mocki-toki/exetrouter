@@ -8,7 +8,7 @@ This audit compares released client source with ExetRouter. It is a versioned en
 | --- | --- | --- |
 | [Codex](https://github.com/openai/codex/tree/a956835d020762cb2b570053af06f643a11c0ecc) | 0.160.0 | Native request construction, Lite, identity, compression and recovery. |
 | [OpenCode V2](https://github.com/anomalyco/opencode/tree/527f0b931d1f9b3ebd34e106c51b31ce5db5b075) | 2.0.22 | Responses lowering, continuation, compaction and ChatGPT adapters. |
-| [OpenCode V1](https://github.com/anomalyco/opencode/blob/aec0b9a6d8898f68f923aaf08b7306d931fd9d76/packages/opencode/src/plugin/openai/codex.ts) | 1.18.34 | Separate OAuth/transport implementation; October 3 mock HTTP tool/resume passed. Uses the built-in OpenAI provider and standard client retry policy. See [V1 setup](compatibility.md#opencode-v1). |
+| [OpenCode V1](https://github.com/anomalyco/opencode/blob/aec0b9a6d8898f68f923aaf08b7306d931fd9d76/packages/opencode/src/plugin/openai/codex.ts) | 1.18.34 | Separate OAuth/transport implementation; October 3 mock HTTP tool/resume passed. Uses the built-in OpenAI provider and standard client retry policy. See [V1 setup](compatibility.md#v1-opencode-ai). |
 
 Exact commits, selected file hashes and reviewed native test versions live in [protocol-sources.json](protocol-sources.json). Versions were resolved against npm stable tags or GitHub latest releases; release tags were resolved to commits. Development branches are not substituted for releases.
 
@@ -42,9 +42,9 @@ Native identity construction is explicit in Codex [requests/headers.rs](https://
 
 | Surface | Required handling for the supported contract |
 | --- | --- |
-| Model and generation options | Preserve the selected catalog model and supported reasoning/text/schema/service-tier options. Never guess context/output limits or silently substitute a model. Reject unsupported output caps. |
+| Model and generation options | Preserve the selected catalog model and forward backend options for upstream validation, including output caps. Never infer limits or silently substitute a model. Adapter structures still require validation. |
 | HTTP framing | Decode supported content coding before JSON parsing. Keep wire and decoded-size bounds, decompression CPU/concurrency and error redaction independent of token windows. Authenticated identity/zstd decoding is implemented with wire/output, history-window, slot and cooperative CPU bounds; malformed/truncated/expansion fixtures pass. |
-| HTTP Responses | Normalize string input to a user item and message `system` to `developer`; preserve item order/content. Force upstream `store=false`, `stream=true`; project JSON only when requested downstream. |
+| HTTP Responses | Normalize string input to a user item and message `system` to `developer`; preserve item order/content. Default `store=false` without overriding an explicit value; request upstream SSE with `stream=true`; project JSON only when requested downstream. |
 | Native standard Responses | Preserve tools, tool choice, parallel-tool flag, include, reasoning and text controls. Preserve unknown native item extensions transiently rather than rebuilding them as Chat messages. |
 | Responses Lite | Preserve `additional_tools` and its ordered developer prefix, namespaced/custom tools and rebuilt instruction items. Do not flatten this into classic function tools. |
 | Tool cycle | Preserve `call_id`, name/namespace, function `arguments`, custom tool `input`, matching outputs and ordering. `custom_tool_call` is not an empty-JSON `function_call`. Never invent successful tool results to repair a history. |
@@ -62,26 +62,13 @@ The additional pinned [responses_metadata.rs](https://github.com/openai/codex/bl
 
 Codex [responses_retry.rs](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/core/src/responses_retry.rs) contains a WS-to-HTTP fallback after the configured stream retry budget is exhausted, conditional on a retryable error and transport eligibility. Thus `stream_max_retries=0` is not proof that every native client recovery path submits only once. Our six current native post-submission WS fixtures now count one generation for early/partial/missing-terminal failures. The router emits a wrapped terminal 400 recognized by Codex. A lost downstream connection can still prevent delivery of that error; the router cannot control every client recovery path.
 
-## Prioritized gaps and acceptance
+## Acceptance status
 
-All implementation rows below are complete except the sustained-session acceptance row. Both reviewed clients passed two individually observed compact/resume cycles over public HTTP/WS ingress, with five native process invocations and a verified router restart per case. A separate Codex WS case reached 217,156 observed input tokens and retained its canary after compaction. Full advertised windows, multi-hour sessions and saturation remain pending.
-
-| Priority | Work | Acceptance evidence |
-| --- | --- | --- |
-| P1 | Bounded `zstd` request decoding; explicit unsupported-coding errors. | Valid compressed requests reach upstream once; corrupt/truncated/oversized/bomb inputs fail before inference, without payload logs. Native compression no longer needs disabling. |
-| P1 | Separate scoped thread identity from cache affinity. | Root, child and shared-cache threads retain native distinctions; user isolation, token rotation, HTTP/WS and restart remain stable. No raw identity retention. |
-| P1 | Test client recovery after a submitted WS interruption and cross-transport turn ownership. | Count actual downstream/upstream submissions; injected early/late close, idle timeout and absent terminal never produce hidden replay or account migration. Resolve any client recovery limitation explicitly. |
-| P1 | Sustained current-client sessions and compaction. | Both clients passed two observed cycles, reopen/restart and external ingress. Codex WS also passed a 217k-token case. Full advertised context, large tool outputs, multi-hour sessions and saturation remain separate acceptance work. |
-| P2 | Explicit capability errors for unsupported public WS/state features and header negotiation. | Named lanes/steering/HTTP saved-response chaining are either implemented and tested or rejected before submission. Lite and native response metadata have dedicated fixtures. |
-| P2 | Broaden current native fixtures. | Custom/freeform/namespace tools, child agents, phase, encrypted function arguments, multimodal forwarding and interleaved reasoning each have meaningful fixtures. Model understanding remains separate from byte forwarding. |
+Bounded compression, scoped identities, turn-state ownership, Lite/metadata negotiation and broader native item fixtures are implemented. Mock interruption cases count submissions rather than assuming retry flags prevent replay. The [development plan](development-plan.md#sustained-sessions-and-failure-behavior) tracks remaining acceptance: full model windows, large tool output, multi-hour sessions, saturation and actual upstream outages.
 
 ## Evidence and repeatable review
 
-- Offline native runs on 2026-10-02: Codex 0.160.0 and OpenCode V2 2.0.22 each completed tool → local execution → tool output → final response over HTTP/SSE and WS against the mock. Both HTTP 503 cases made one primary submission. Six submitted WS interruption cases made one generation each, with no HTTP replay. All 206 ordinary tests and standard static/publication checks passed.
-- Authorized current-client real tool cycles passed on Linux aarch64 over HTTP/WS, plus one explicit compressed HTTP request. OpenCode exposed an ordering regression in the first WS probe; moving handshake metadata after response.created passed a new independent real cycle. A five-process Codex WS canary/reopen/restart probe reached 49–86k input tokens with one correctly unknown interrupted warmup. Two lowered compaction thresholds were used, but actual compaction requests were not counted. These results do not establish sustained/full-window reliability or replace the stronger four-case harness; see [measured results](live-testing.md#measured-follow-up-2026-10-02).
-- Previously authorized real-backend Codex 0.160.0 synthetic probes after the thread-header fix completed a 100-line patch at about 35k and 120k input tokens over HTTP and a Code Mode call at about 120k over WS. All reached completion in 20–31 seconds. Public ingress and multi-hour sessions were not tested by those probes.
-- The earlier stream stalled inside custom-tool input, before a terminal event. The header fix was followed by passing reproduction scenarios. This supports the fix; the exact private-backend causal mechanism is not independently proven.
-- The later public-ingress matrix passed Codex HTTP/WS and OpenCode HTTP/WS through two observed compaction cycles, process reopening and verified server restart. Before serialized turn identity projection, a separate Codex WS case stalled after compaction and retained one interrupted request with unknown usage; its fixed event timings do not prove the private-backend cause. After projection, all four cases passed with fresh sessions. The independent large Codex WS case reached 217,156 input tokens, compacted and completed a canary tool continuation with six known completions. These bounded results and the 192k-token fixture that fell below its test-size requirement are recorded in [deployment evidence](live-testing.md#measured-deployment-continuity-2026-10-02).
+The October 2 offline matrix passed four native tool cycles, two HTTP rejection cases and six WS interruption cases, alongside 206 ordinary tests and static/publication checks. Authorized real tool/compaction/restart runs and failed probes are recorded once in [live testing](live-testing.md#measured-follow-up-2026-10-02). The later [public-ingress matrix](live-testing.md#measured-deployment-continuity-2026-10-02) passed two observed compaction cycles for both transports/clients, plus a separate 217,156-token Codex WS case. These results do not establish multi-hour reliability or prove the private-backend cause of earlier stalls.
 
 Review source drift explicitly:
 

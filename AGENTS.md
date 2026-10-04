@@ -38,9 +38,13 @@ Read the relevant contract before changing behavior: `docs/openai-api.md`, `docs
 
 Human-readable output is the default; `--json` is the explicit automation interface. Keep terminal charts/decorative bars inside the TUI, not ordinary CLI reports. Dates use the system's local time zone and readable English names; percentages omit unnecessary trailing decimals.
 
-Keep contextual key hints in the bottom Controls area. Navigation is left/right across Overview, Usage, Tokens, Models and Settings. The borderless top header shows ExetRouter and its version on the left, the connection on the right, and tabs beneath with one-space selection padding. Enter opens account/token/Settings action menus; operator locks must be enforced by the server. Deactivation is reversible and retains OAuth state. Reset-credit errors use dismissible dialogs. Available client updates highlight Settings; server updates belong to the operator. Token creation/rotation copies secrets to the clipboard without rendering them; check clipboard support before issuing a secret.
+- Put contextual key hints in the bottom Controls area. Navigate left/right across Overview, Usage, Tokens, Models and Settings.
+- Use a borderless header: ExetRouter/version on the left, connection on the right, tabs beneath with one-space selection padding.
+- Enter opens account/token/Settings actions. Enforce operator locks on the server. Deactivation is reversible and retains OAuth state; reset-credit errors use dismissible dialogs.
+- Highlight Settings for client updates; server updates belong to the operator.
+- Check clipboard support before token issuance/rotation, then copy secrets without rendering them.
 
-Update checks and ordinary metadata refresh must not submit inference or consume reset credits. The explicit weekly-activation exception permits one minimal gpt-5.6-sol request on a freshly verified 100%-remaining weekly window whose reset is exactly seven days ahead at minute precision; persist the attempt before submission, prevent repeat attempts for seven days, and never replay an uncertain outcome. Respect `EXR_NO_UPDATE_CHECK`. Mark stale/unknown subscription observations honestly and preserve reported window durations.
+Update checks and ordinary metadata refresh must not submit inference or consume reset credits. The weekly-activation exception permits one minimal `gpt-5.6-sol` request on a freshly verified 100%-remaining weekly window with reset exactly seven days ahead at minute precision. Persist the attempt before submission, suppress repeats for seven days and never replay an uncertain outcome. Respect `EXR_NO_UPDATE_CHECK`; label stale/unknown observations honestly and preserve reported durations.
 
 ## Development and validation
 

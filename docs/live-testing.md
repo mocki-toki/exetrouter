@@ -1,6 +1,6 @@
 # Real upstream testing
 
-Use dedicated operator OAuth accounts and private state outside build output. Ordinary cargo test never contacts real upstream. The six real tests are ignored: live_catalog, live_upstream_smoke, live_native_clients, live_native_compaction, live_prompt_cache, live_two_account_pool. Inference consumes the selected account's quota.
+Use dedicated operator OAuth accounts and private state outside build output. Ordinary cargo test never contacts real upstream. The six tests in `tests/live_upstream.rs` are ignored: `live_catalog`, `live_upstream_smoke`, `live_native_clients`, `live_native_compaction`, `live_prompt_cache`, `live_two_account_pool`. Deployed fixtures are also opt-in. Inference consumes the selected account's quota.
 
 ## Preparation
 
@@ -68,7 +68,7 @@ Six HTTP JSON requests, three with explicit key and three without, use separate 
 
 ## Measured results, 2026-10-01
 
-Protocol smoke: 11 completed/known usage. Latest native matrix: Codex HTTP 2, WS 3 including warmup; OpenCode HTTP/WS 3 each including title; all known in the latest run. Earlier cancelled title requests had unknown usage.
+Protocol smoke: 11 completed/known usage. The October 1 native matrix: Codex HTTP 2, WS 3 including warmup; OpenCode HTTP/WS 3 each including title; all known in the latest run. Earlier cancelled title requests had unknown usage.
 
 Automatic compaction:
 
@@ -87,15 +87,17 @@ Cache observation: explicit-key group input 6646 each, cached 0/0/6400 (32.10% a
 
 Two-account pool: ten known completions, A seven/B three, three local rejections, preserved checkpoint and original WS. Client-export failure from differing supports_experimental_context was fixed with conservative capability intersection before the successful run. The repeated native matrix on two accounts completed another eleven known requests using both accounts.
 
-Full model windows, sustained sessions/load, actual external authentication/quota recovery, Linux/aarch64, public TLS/nginx and restricted SSH UID remain unverified. Short local real-upstream runs do not establish deployment readiness.
+At this point, Linux/aarch64 and public ingress were not verified; later runs below add that evidence. Full model windows, multi-hour/load and actual external authentication/quota recovery remain unverified.
 
 ## Measured follow-up, 2026-10-02
 
-Reviewed current runtimes were Codex 0.160.0 and OpenCode V2 2.0.22. Authorized Linux aarch64 probes used temporary private profiles, loopback ingress, revoked diagnostic tokens and no inference retries. HTTP tool cycles completed in 18 seconds (Codex, two requests) and 14 seconds (OpenCode, three requests). Codex WS completed in 29 seconds with three requests. The initial OpenCode WS probe failed because router handshake metadata preceded `response.created`; after correcting the order, a new independent probe completed its tool cycle in 14 seconds with three completed requests and no HTTP fallback. This was not a replay of the failed generation. An explicit compressed HTTP probe completed one generation with known counters.
+Codex 0.160.0 and OpenCode V2 2.0.22 ran on Linux aarch64 with isolated private profiles and loopback ingress. HTTP tool cycles completed in 18 seconds/two requests (Codex) and 14 seconds/three requests (OpenCode); Codex WS took 29 seconds/three requests. OpenCode WS initially failed because handshake metadata preceded `response.created`. After correcting the order, a new independent cycle completed in 14 seconds/three known requests, without HTTP fallback. One explicit compressed HTTP generation also completed with known usage.
 
-A separate Codex WS continuity probe used five native process invocations. The original random canary appeared only in the seed; later invocations had to recall it through a local tool. Fresh reference text increased measured input from about 49k to 86k tokens. The router was restarted after a verified private backup between the third and fourth invocations. Request counts were 2/5/3/4/3; all generations completed except one interrupted warmup with correctly unknown usage. Both later tool checks retained the canary, and there was no HTTP fallback. Two thresholds were lowered to request native compaction, but the diagnostic did not count actual compaction requests. The strengthened four-scenario `EXETROUTER_LIVE_TWO_COMPACTIONS=1` harness was compiled, not executed in this follow-up.
+A separate Codex WS probe retained a seed canary across five process invocations, fresh reference text and verified backup/router restart. Measured input grew from 49k to 86k tokens; request counts were 2/5/3/4/3, with one interrupted warmup correctly unknown. Two thresholds were lowered, but actual compaction requests were not counted. It therefore does not replace the four-case compaction harness.
 
-These results cover bounded current-client tool and continuity scenarios, not full model windows, multi-hour sessions, all-client repeated compaction, saturation or external ingress inference. A separate external HTTPS check verified TLS but found the health routes unexposed (404); it does not verify public HTTP/WS sessions. Restricted SSH service and loopback API health were checked separately during installation.
+Separate native custom-tool probes after the thread-header fix completed a 100-line patch over HTTP at about 35k/120k input tokens and a Code Mode call over WS at about 120k. All reached completion in 20–31 seconds. The earlier stall occurred during custom-tool input; passing reproductions support the correction without proving a private-backend cause.
+
+These were bounded loopback checks. An external TLS check returned 404 for unexposed health routes; public inference was verified only by the later matrix below. Restricted SSH and loopback health were checked separately during installation.
 
 ## Current clients through an existing deployment
 
@@ -114,7 +116,7 @@ If management is supervised externally, `EXETROUTER_DEPLOY_BEARER` accepts a tem
 
 ## Measured deployment continuity, 2026-10-02
 
-Reviewed Codex 0.160.0 and OpenCode V2 2.0.22 ran on macOS arm64 through public HTTPS/WS to the existing Linux aarch64 router. Each case used a fresh private profile and temporary token, five native process invocations, disposable reference text, two separately observed compaction cycles and tool-based recall of the original random canary. Between cycles, the operator verified a drained private backup, restarted the existing router service and checked health. Tokens were revoked afterward. The existing production pool was used directly; no refresh-token database was copied.
+Codex 0.160.0 and OpenCode V2 2.0.22 ran on macOS arm64 through public HTTPS/WS to a Linux aarch64 router. Every case used a fresh private profile/temporary token, five process invocations, two individually observed compaction cycles and tool-based recall of a seed canary. The supervisor verified a drained private backup, restarted the existing service and checked health between cycles. Tokens were revoked afterward; no production refresh-token database was copied.
 
 | Case | Initial input tokens | Observed compaction requests | Durable requests / known usage | Continuity and supervised restart |
 | --- | ---: | ---: | ---: | --- |
@@ -123,25 +125,29 @@ Reviewed Codex 0.160.0 and OpenCode V2 2.0.22 ran on macOS arm64 through public 
 | OpenCode HTTP | 17,430 | 2 | 12 / 12 | Passed |
 | OpenCode WS | 17,341 | 2 | 12 / 12 | Passed |
 
-All requests completed; each case stayed on one owning account. Codex made two compaction requests in each forced cycle, OpenCode one. Counts include native warmups and auxiliary title requests where present. WS checkpoint tool results used WS; OpenCode's auxiliary HTTP title was expected. Public catalog routes returned authenticated 200 and unauthenticated 401. Public health routes remain intentionally unexposed, so their 404 is not an inference failure. Restricted SSH was not reconfigured; the supervisor used existing administrative SSH to the registered restricted gateway identity.
+All requests completed on one owning account per case. Codex made two compaction requests per forced cycle, OpenCode one; counts include warmups/title requests. WS checkpoint tools stayed on WS; OpenCode's auxiliary HTTP title was expected. Public catalog routes returned authenticated 200/unauthenticated 401. Health routes intentionally returned 404. Existing restricted/administrative SSH configuration was preserved.
 
-Before the serialized turn identity fix, a separate Codex WS case stalled after compaction: six requests completed with known counters and one interrupted request retained unknown usage. The last allowlisted event timing showed about 139 seconds without a new upstream event before the native process deadline ended the stream. No possibly submitted generation was replayed. Exact native source revealed inconsistent session/thread projection inside serialized turn metadata; the router now scopes it consistently with headers and frames. An earlier Codex HTTP case passed before the correction at 25,587 initial input tokens with 13 known requests. All four cases in the table passed afterward with fresh sessions. This supports the corrected contract but does not prove the private-backend cause of the stall.
+A pre-fix Codex WS case stalled after compaction: six known completions and one interrupted unknown request, with about 139 seconds since the last upstream event. Serialized turn metadata had inconsistent session/thread projection; all four fresh cases passed after correcting it. An earlier HTTP case had already passed with 25,587 initial tokens/13 known requests. No possibly submitted generation was replayed, and these observations do not prove the backend cause.
 
-The separate large-context Codex WS mode reached 217,156 observed input tokens. It compacted, reopened the session and recalled the seed canary through a local tool: one observed compaction request, six completed requests with known counters, one account, no HTTP generation fallback. Native invocation durations were about 9 and 24 seconds. An earlier independently completed 192,477-token case passed the same mechanism with six known requests but failed the harness's 200,000-token size requirement; increasing the next case's disposable reference fixture satisfied that requirement. This was new synthetic input, not a replay.
+The large-context Codex WS case reached **217,156 input tokens**, one observed compaction, six known completions and retained tool-based canary recall after reopening, with no HTTP generation fallback. Process durations were about 9/24 seconds. An earlier 192,477-token case completed the same mechanism but failed the harness's 200,000-token size requirement. The later larger fixture was independent input.
 
-Two earlier supervisor attempts inherited an open stdin pipe in the native child and waited before submitting inference; both had zero durable inference requests. Explicitly closing native child stdin fixed the fixture. Fixed counters now distinguish request receipt, body decoding, forwarding, response headers and terminal usage without exposing content.
+Two supervisor attempts stalled before inference because child stdin remained open; both had zero durable requests. Closing child stdin corrected the harness.
 
-These results verify bounded public-ingress continuity and repeated native compaction for the reviewed clients. They do not establish the full advertised model window, large custom-tool output, multi-hour sessions, saturation or actual external authentication/quota recovery. The optional multi-hour idle mode was implemented but not executed in this matrix. The standalone two-cycle harness was compiled, not run against a copied production grant pool.
+The matrix verifies bounded public-ingress continuity, not full advertised context, large custom-tool output, multi-hour sessions, saturation or actual authentication/quota outages. The optional multi-hour idle mode was not executed. The isolated two-cycle harness was compiled, not run against a copied production grant pool.
 
 ## Cross-account continuity and synthetic quota failover, 2026-10-02
 
-An authorized direct HTTP diagnostic used two eligible accounts, fresh synthetic identifiers and no automatic retries. Account A produced one encrypted compaction checkpoint (11,948 input / 77 output tokens). Account B received that checkpoint without the original seed, recalled the hidden identifier through a forced classic function call (156 / 33), then completed its tool-result continuation (181 / 12). This establishes portability for that checkpoint/classic-tool case on the private backend, rather than an assumption from Platform documentation. The diagnostic contacted upstream directly, outside router durable accounting; it printed only fixed proof flags and numeric token counters.
+Direct upstream probes used two eligible accounts, synthetic input and no automatic retries:
 
-A subsequent direct classic WS case also passed: A produced a checkpoint (11,942 / 102), recalled the hidden identifier through a WS function call (246 / 37), and B accepted the full checkpoint/call/result window and returned both the original identifier and the smoke marker (200 / 31). No original seed or previous response ID was sent to B. This case returned no `encrypted_function_args`, so it does not establish their live portability. A minimal classic WS control completed separately (139 / 23).
+| Probe | Observed input / output tokens | Result |
+| --- | --- | --- |
+| HTTP checkpoint on A → classic function on B → result on B | 11,948 / 77; 156 / 33; 181 / 12 | Hidden seed canary retained |
+| WS checkpoint and function on A → full checkpoint/call/result on B | 11,942 / 102; 246 / 37; 200 / 31 | Seed canary and smoke marker retained without seed or previous response ID on B |
+| Minimal classic WS control | 139 / 23 | Completed |
 
-A separate initial compaction probe completed but its diagnostic failed to assemble items omitted from terminal output. Subsequent direct WS Lite diagnostics were rejected before completion; changing the synthetic fixture did not establish WS encrypted-tool portability. These failures were not retried as an inference operation and are not recorded as successful compatibility evidence.
+These direct calls were outside router accounting. The WS case returned no `encrypted_function_args`, so it does not verify their live portability. An initial compaction diagnostic failed to assemble omitted terminal items; later direct WS Lite probes were rejected before completion. Those failures were not replayed or counted as successful evidence.
 
-Offline native binaries Codex 0.160.0 and OpenCode V2 2.0.22 each passed HTTP/WS tool continuation through a synthetic quota rejection on A followed by acceptance on B. Their total request counts were respectively 3/4 and 4/4, including warmup/title where present, with one rejected attempt and one accepted tool-result continuation per case. Six native early-close/partial/missing-terminal cases still made one primary submission each, without HTTP replay.
+Mock Codex 0.160.0 and OpenCode V2 2.0.22 each continued HTTP/WS tool results through a synthetic refusal on A and acceptance on B. Total request counts were Codex 3/4 and OpenCode 4/4, including warmups/title; each had one refused attempt. Six early-close/partial/missing-terminal cases still made one primary submission without HTTP replay.
 
 Run the new synthetic native matrix with the reviewed isolated binaries:
 
@@ -151,10 +157,12 @@ cargo test --locked --test responses current_clients_continue_tools_across_a_quo
 
 This mock test consumes no real quota. Actual external quota exhaustion was not induced. Live WS encrypted-tool transfer, multi-hour/concurrent failover, unavailable recovery windows and all upstream refusal variants require separate evidence.
 
-The newly built router image subsequently passed an isolated real-upstream quota-transfer fixture with six completed/known requests. Only access tokens for two eligible accounts were encrypted into fresh tmpfs state with synthetic unusable refresh grants; real refresh grants, production preferences, cooldowns and keys were not copied or changed. WS compacted on A, issued a tool call on A, then used a local test cooldown to continue the incremental tool result on B without changing the downstream socket. HTTP compacted on A, then used a local current-100% observation to select B for the canary tool/result cycle. The durable account sequence was A/A/B/A/B/B; both WS generations remained WS. Temporary container/state were removed. No old turn-state header was issued in that live WS case, so its transfer stripping remains covered by protocol fixtures rather than this live observation.
+An isolated real-upstream router fixture then completed six requests with known usage and account sequence **A/A/B/A/B/B**. WS compacted/called a tool on A, then a synthetic local cooldown transferred its incremental result to B on the same downstream socket. HTTP compacted on A, then a current-100% test observation selected B for a canary function/result cycle. WS stayed on WS. No old turn-state header appeared, so transfer stripping remains synthetic-fixture evidence.
 
-Two earlier isolated probes could not contact upstream from the temporary bridge-network container and recorded one interrupted request with unknown usage each. The fixture was changed to the deployment's existing host network with a private loopback listener. Its next run completed the three WS requests and an HTTP compaction, then stopped at a synthetic quota-row uniqueness error before further inference. A new independent fixture with an upsert completed all six requests above. None of these failures triggered inference replay. Ordinary validation after the implementation passed 213 offline tests and the standard static/publication checks.
+Only access tokens were encrypted into fresh tmpfs state with synthetic unusable refresh grants. Production refresh grants, preferences, cooldowns and keys were preserved; temporary state/container were removed. Earlier bridge-network probes each left one interrupted unknown request. A host-network fixture then stopped after three WS requests and HTTP compaction because of a synthetic quota-row uniqueness error. A new upsert-based fixture completed the six-request matrix; none of the failures caused replay. Validation passed 213 offline tests and standard checks.
 
-The same runtime source was installed on the existing server after a verified private backup and a zero-pending-request check. All 46 build inputs matched the workspace, the restricted gateway matched the server binary, keys and the existing host-network configuration were preserved, and health remained green. A public TLS current-client tool matrix completed eleven requests with eleven known usage records and no interruption/failure. It covered Codex 0.160.0 and OpenCode V2 2.0.22 over HTTP and WS; it did not inject quota changes into production. The temporary bearer was revoked. Mac `exr` was replaced atomically with the matching local build, without changing profiles or keys. Both remain development builds of 0.1.0; no release tag was published.
+The same source was installed after a verified private backup and zero-pending check. All 46 build inputs matched; gateway, keys and host-network settings were preserved, and health passed. A public current-client HTTP/WS tool matrix completed eleven known requests without injecting production quota changes. Its temporary bearer was revoked. The matching Mac client was replaced atomically, preserving profiles/keys. These were development builds of 0.1.0 at the time; no release tag was published by that operation.
 
-The final quota-header fix passes only validated numeric upstream window fields to HTTP clients. A synthetic A refusal reporting 100% followed by B acceptance reporting 20% returned B's 20% header. This preserves native HTTP `/status` observations after a switch; unknown limits are not fabricated. The current-client synthetic quota-switch matrix and standard checks also passed after this change.
+A final header fixture verified that an A refusal at 100%, followed by B acceptance at 20%, returns B's 20% observation for native HTTP `/status`. Unknown limits remain unknown; the synthetic switch matrix and standard checks passed afterward.
+
+Actual subscription exhaustion was not induced. Live WS encrypted-tool portability, multi-hour/concurrent failover, unavailable recovery windows and all upstream refusal variants still require evidence.

@@ -30,7 +30,7 @@ Upstream authentication failure is redacted as upstream_authentication_error (HT
 
 ## Opaque context
 
-The router saves a domain-separated user-scoped HMAC digest, internal account ID and expiry for encrypted_content output. No checkpoint, text, summary or tool arguments are persisted. Bindings survive restart with the same database/HMAC key; refresh preserves account identity.
+The router saves a domain-separated user-scoped HMAC digest, internal account ID and expiry for `encrypted_content` and `encrypted_function_args` output. Empty encrypted argument arrays are valid. No checkpoint, text, summary or tool arguments are persisted. Bindings survive restart with the same database/HMAC key; refresh preserves account identity.
 
 Lifetime is 24 hours from the last observation of that item in output, not extended by merely reading input. Bounds: 128 distinct opaque elements per snapshot, 4096 live bindings per user, 65536 total. Live bindings are not evicted to make room; failure is explicit and inference is not replayed.
 
@@ -38,14 +38,16 @@ All opaque input must have live bindings for the current user. Unknown/expired/f
 
 Bindings are saved before exposing the corresponding output. Storage failure stops projection/stream explicitly and retains independently known terminal usage. The router never exposes an unbound checkpoint. Quota-only transfer validates existing user ownership atomically and consumes registry capacity for its derived portability digests; no schema migration or raw history storage is required.
 
+### Saved conversations
+
+Saved backend conversation references use a separate user-scoped HMAC domain in the bounded context registry. Only IDs observed in that user's Responses events are accepted for 24 hours, and continuation remains pinned to the issuing account. Stored conversations cannot migrate on quota rejection because their backend-owned history is unavailable to the router. Raw IDs remain transient and are not persisted.
+
 ## Operator and diagnostics
 
 Operators use local `exrd admin oauth add --device`, list, reauth and disable. Remote clients never receive upstream account IDs or credentials. Doctor shows pool health counts and email-labeled per-account quota summaries; `server.quota` retains the older single-account-only field. `exr limits`/Overview TUI show actual 8-hour/weekly/other reported windows with freshness and resets.
 
-Short actual two-account routing and preserved affinity around a synthetic operational pause passed. Separate October 2 direct HTTP and classic WS probes confirmed cross-account encrypted compaction and classic tool continuity. Current native Codex/OpenCode HTTP/WS quota-switch tests passed against synthetic refusals. A newly built router also passed six real HTTP/WS requests across synthetic quota boundaries in isolated access-only state, with preserved canaries and exact durable account transitions. Actual external quota/authentication outage recovery and live WS encrypted-tool portability are not established by these tests. Full context, sustained sessions, model meters/credits, polling and load remain separate work. See [live testing](live-testing.md).
+Recorded two-account routing, checkpoint portability and synthetic quota-switch evidence is in [live testing](live-testing.md#cross-account-continuity-and-synthetic-quota-failover-2026-10-02). Actual external quota/authentication outages, live WS encrypted-tool portability, full context and sustained concurrent failover remain unverified.
 
 ## Starting an inactive weekly window
 
-Live limits may activate an apparently unused weekly window once with a minimal `gpt-5.6-sol` request. Eligibility requires fresh 100% remaining, a reported 10080-minute duration, and a reset exactly seven days ahead at minute precision. Selection is pinned to the account and respects user deactivation, operator policy, catalog support, quota cooldown and operational backoff. A durable claim prevents another attempt for seven days, including after an uncertain result or restart. This heuristic is separate from reset credits and never consumes them. See [CLI behavior](cli.md#reset-credits) and [schema migration](quota-activation-migration.md).
-
-Saved backend conversation references use a separate user-scoped HMAC domain in the bounded context registry. Only IDs observed in that user's Responses events are accepted for 24 hours, and continuation remains pinned to the issuing account. Stored conversations cannot migrate on quota rejection because their backend-owned history is unavailable to the router. Raw IDs remain transient and are not persisted.
+Live limits may activate an apparently unused weekly window once with a minimal `gpt-5.6-sol` request. Eligibility requires fresh 100% remaining, a reported 10080-minute duration, and a reset exactly seven days ahead at minute precision. Selection is pinned to the account and respects user deactivation, operator policy, catalog support, quota cooldown and operational backoff. A durable claim prevents another attempt for seven days, including after an uncertain result or restart. This heuristic is separate from reset credits and never consumes them. See [CLI behavior](cli.md#weekly-activation) and [schema migration](quota-activation-migration.md).

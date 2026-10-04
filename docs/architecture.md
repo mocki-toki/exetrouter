@@ -6,7 +6,7 @@ The router separates the public model API from management:
 Codex / OpenCode / OpenAI SDK
     │ Router bearer; HTTP/JSON/SSE or WebSocket
     ▼
-TLS proxy (deployment pending) → exrd on loopback → ChatGPT Codex OAuth backend
+TLS proxy → exrd on loopback → ChatGPT Codex OAuth backend
                                   │
                                   └→ SQLite + separate private keys
 
@@ -17,13 +17,13 @@ exr CLI/TUI → restricted SSH → forced exrd gateway → authenticated Unix co
 
 ## Components
 
-The shared Rust library contains auth, backup, store, usage, control, doctor, OAuth, quota, health, pool, affinity, cache, catalog, upstream, Chat, server transport/output/limits and client config/render/TUI modules. SQLite runs on a dedicated bounded worker. Migrations are transactional; schema 6 retains users/credentials/accounting while invalidating the older metadata-free catalog.
+The shared Rust library contains auth, backup, store, usage, control, doctor, OAuth, quota, health, pool, affinity, cache, catalog, upstream, Chat, server transport/output/limits and client config/render/TUI modules. SQLite runs on a dedicated bounded worker. SQLite schema 8 uses transactional migrations; see the [migration plans](implementation.md) before changing deployed state.
 
 HTTP authenticates before JSON parsing. Management resolves the forced server-side SSH identity to its user and verifies Unix peer UID; client-supplied user IDs do not select authority. Public management endpoints do not exist.
 
 ## Routing and transport
 
-Catalogs are merged across active accounts. Selection respects the requested model, quota/health and active load. Explicit cache/session hints provide a soft preference; known opaque context and an existing WS provide strong account affinity.
+Catalogs are merged across active accounts. Selection respects the requested model, quota/health and active load. User/operator preferences apply before quota/load selection. Cache/session hints provide a soft preference; opaque context and an existing WS retain normal account affinity. [Quota-only failover](account-pool.md#failure-behavior) requires complete current context.
 
 Native WS opens upstream after the first model-bearing response.create. HTTP Responses uses upstream SSE and can return raw SSE or assembled terminal JSON. Chat first tries upstream WS, with HTTP/SSE fallback only after an ordinary handshake failure **before** inference submission. Handshake authentication/quota failures prevent fallback. A possibly submitted request is never replayed.
 
@@ -33,6 +33,6 @@ Opaque output is fingerprinted with a user-scoped HMAC and bound to its originat
 
 One durable event is created before possible upstream submission and finalized from the terminal outcome. Interruptions and startup recovery preserve unknown consumption. Input/output/cached/reasoning counters remain nullable rather than invented zeros. Raw content is bounded in transient memory where projection needs it, not stored in SQLite.
 
-Quota observations preserve actual durations/reset/observation times. Explicit upstream rejection produces account cooldown; temporary errors produce operation-specific backoff. Already submitted responses continue. Diagnostic reads are metadata-only and do not probe network readiness.
+Quota observations preserve actual durations/reset/observation times. Explicit upstream rejection produces account cooldown; temporary errors produce operation-specific backoff. Already submitted responses continue. Doctor reads local metadata without probing network readiness. Live limits read upstream metadata and may trigger the documented [weekly activation](cli.md#weekly-activation).
 
 Per-user/global concurrency limits and bounded queues/messages protect resources. There is no request-frequency quota for the current private use case. See [implementation](implementation.md), [pool](account-pool.md) and [upstream](upstream-contract.md) for bounds and failure contracts.

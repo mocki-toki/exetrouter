@@ -4,8 +4,6 @@
 
 Use [GitHub private vulnerability reporting](https://github.com/mocki-toki/exetrouter/security/advisories/new). Do not put tokens, private keys, user prompts or raw request/response captures in a public issue. If private reporting is unavailable, open an issue containing only a request for a private contact method.
 
-Use a dedicated unprivileged server account, restricted gateway UID, protected state/keys and reviewed TLS ingress. See [deployment](deploy/README.md).
-
 ## What the server retains
 
 | Data | Retention |
@@ -19,14 +17,20 @@ Use a dedicated unprivileged server account, restricted gateway UID, protected s
 | Subscription limits | Percentages, durations, reset/observation times and cooldowns |
 | Account identity | Operator-owned account metadata and display email extracted from encrypted issuer credentials |
 
-Unavailable-upstream requests use the fixed model label `unavailable`; unvalidated free-form model input is not saved. Operational application logs contain a fixed event vocabulary, server-generated correlation IDs, numerical statuses/counts and timing. Upstream error messages, HTTP header values and arbitrary JSON keys are not logged. Stream diagnostics include the last allowlisted upstream event type, its router-observed Unix timestamp in milliseconds and its age measured by a monotonic clock. Unknown event types become `other`; no event payload is retained. Downstream heartbeats do not update upstream receipt times. The executable fixes its log target/level allowlist; `RUST_LOG=trace` cannot enable dependency body traces.
+### Logs
 
-Ingress templates disable access and error logs for the API virtual host, buffering, caching and upstream retries. Keep payload logging, debug traces, packet/body capture, WAF body inspection and third-party APM capture disabled in your own ingress. Client applications and OpenAI are separate systems with their own retention policies. The bundled native-client tests use isolated temporary profiles and synthetic prompts; never feed other users' content into debug/test tooling.
+Operational logs contain fixed event names, server-generated correlation IDs, numeric statuses/counts and timing. Unavailable models use the fixed label `unavailable`; unvalidated model input, upstream error messages, header values and arbitrary JSON keys are never saved.
 
-No management command retrieves conversations or request bodies. A server operator may see account identities, usage totals, model IDs and operational metadata. As a routing proxy, the process handles plaintext content in memory after TLS termination; an operator with host access can change the software or inspect memory. This design does not promise end-to-end confidentiality against that operator. For that property, the client must connect directly to a trusted provider without an untrusted intermediary.
+Stream diagnostics retain only the last allowlisted upstream event type, its Unix receipt timestamp in milliseconds and monotonic age. Unknown types become `other`; downstream heartbeats do not refresh these times. The executable fixes allowed log targets/levels, so `RUST_LOG=trace` cannot enable dependency body traces.
+
+## Deployment and operator access
+
+Use separate unprivileged service/gateway UIDs, protected state/keys and reviewed TLS ingress. [Deployment templates](deploy/README.md) disable API access/error logging, buffering, caching and upstream retries. Keep payload/debug/packet capture, WAF body inspection and APM body capture disabled in your ingress. Client applications and OpenAI have their own retention policies.
+
+Management exposes account identities, usage totals, model IDs and operational metadata, never conversations or request bodies. Content passes through memory after TLS termination. A host operator can inspect memory or replace software, so this is not end-to-end confidentiality against that operator. Connect directly to a trusted provider if that property is required.
 
 ## Verification and publication
 
 Privacy regression tests exercise HTTP JSON, SSE, WebSocket, compaction, tool content, malformed JSON and upstream errors under `RUST_LOG=trace`. They search logs and persisted state for synthetic payload markers. Offline CI also audits tracked publication files and Cargo packaging. Runtime state, credentials, local logs and downloaded compatibility clients are excluded from Git and package allowlists.
 
-When reporting a failure, include versions, transport, status and generated request ID. Do not attach body captures or complete native-client output. Real OAuth/inference/reset-credit tests are never run automatically by GitHub Actions.
+Use isolated profiles and synthetic prompts in debug/test tooling, never other users' content. When reporting a failure, include versions, transport, status and generated request ID. Do not attach body captures or complete native-client output. Real OAuth/inference/reset-credit tests are never run automatically by GitHub Actions.
