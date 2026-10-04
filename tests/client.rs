@@ -786,6 +786,7 @@ fn connection_settings_edit_in_the_middle_and_check_ssh_before_saving() {
     dashboard.send(b"\r");
     dashboard.wait("SSH host");
     dashboard.send(b"\x01route.test\x05\x1b[D\x1b[3~\x15router.test");
+    dashboard.send(b"\x1b[B\x1b[B\x1b[B\x1b[Bhttps://api.example.com/v1");
     dashboard.send(b"\r");
     dashboard.wait("Save these settings?");
     dashboard.send(b"y");
@@ -810,6 +811,7 @@ fn connection_settings_edit_in_the_middle_and_check_ssh_before_saving() {
         serde_json::from_slice(&fs::read(client.dir.path().join("config.json")).unwrap()).unwrap();
     assert_eq!(saved["host"], "router.test");
     assert_eq!(saved["identity"], key.to_str().unwrap());
+    assert_eq!(saved["api_url"], "https://api.example.com/v1");
     let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
     assert!(requests.contains("\"action\":\"doctor\""));
 }
@@ -1011,4 +1013,73 @@ fn opencode_connection_validation_precedes_catalog_requests() {
         .status
         .success());
     assert!(!client.dir.path().join("requests.log").exists());
+}
+
+#[test]
+fn opencode_exports_reuse_saved_api_url_and_select_only_catalog_models() {
+    let client = Client::configured();
+    assert!(client
+        .run(&["configure", "--api-url", "https://api.example.com/v1/"])
+        .status
+        .success());
+    let v1 = client.run(&[
+        "models",
+        "--json",
+        "--format",
+        "opencode-v1-json",
+        "--model",
+        "exetrouter/gpt-test",
+    ]);
+    assert!(
+        v1.status.success(),
+        "{}",
+        String::from_utf8_lossy(&v1.stderr)
+    );
+    let v1: serde_json::Value = serde_json::from_slice(&v1.stdout).unwrap();
+    assert_eq!(
+        v1["provider"]["exetrouter"]["options"]["baseURL"],
+        "https://api.example.com/v1"
+    );
+    assert_eq!(v1["model"], "exetrouter/gpt-test");
+    let v2 = client.run(&[
+        "models",
+        "--json",
+        "--format",
+        "opencode-v2-json",
+        "--model",
+        "exetrouter/gpt-other",
+        "--base-url",
+        "http://127.0.0.1:8787/v1",
+    ]);
+    assert!(v2.status.success());
+    let v2: serde_json::Value = serde_json::from_slice(&v2.stdout).unwrap();
+    assert_eq!(
+        v2["providers"]["exetrouter"]["settings"]["baseURL"],
+        "http://127.0.0.1:8787/v1"
+    );
+    assert_eq!(
+        v2["model"],
+        serde_json::json!({"providerID":"exetrouter","model":"gpt-other"})
+    );
+    let default = client.run(&["models", "--json", "--format", "opencode-v2-json"]);
+    assert!(default.status.success());
+    assert!(serde_json::from_slice::<serde_json::Value>(&default.stdout)
+        .unwrap()
+        .get("model")
+        .is_none());
+    assert!(!client
+        .run(&[
+            "models",
+            "--json",
+            "--format",
+            "opencode-v2-json",
+            "--model",
+            "exetrouter/unavailable-model"
+        ])
+        .status
+        .success());
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(client.dir.path().join("config.json")).unwrap()).unwrap();
+    assert_eq!(saved["host"], "localhost");
+    assert_eq!(saved["api_url"], "https://api.example.com/v1");
 }

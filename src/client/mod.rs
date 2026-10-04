@@ -49,6 +49,9 @@ struct Args {
     /// Private key path; configure once to save it.
     #[arg(long, global = true)]
     identity: Option<String>,
+    /// Public HTTP API URL to save with configure; SSH host and API host may differ.
+    #[arg(long, global = true)]
+    api_url: Option<String>,
     /// Configuration file (default: $XDG_CONFIG_HOME/exr/config.json).
     #[arg(long, global = true)]
     config: Option<std::path::PathBuf>,
@@ -94,9 +97,12 @@ enum CommandLine {
     Models {
         #[arg(long, value_enum)]
         format: Option<ModelFormat>,
-        /// Router API URL ending in /v1; required for an importable OpenCode config.
+        /// Override the configured API URL for this OpenCode export.
         #[arg(long)]
         base_url: Option<String>,
+        /// Select an exported OpenCode model, for example exetrouter/gpt-5.6-sol.
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Inspect stored configuration without making upstream requests.
     Doctor,
@@ -357,7 +363,12 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
         }
         return Ok(());
     }
-    if let CommandLine::Models { format, base_url } = &args.command {
+    if let CommandLine::Models {
+        format,
+        base_url,
+        model,
+    } = &args.command
+    {
         if !args.json && format.is_some() {
             return Err(
                 "model exports require --json (for example: exr models --json --format codex-json)"
@@ -369,22 +380,15 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
             Some(ModelFormat::OpencodeV1 | ModelFormat::OpencodeV2)
         );
         if opencode {
-            let value = base_url.as_deref().ok_or(
-                "OpenCode exports require --base-url (for example: http://127.0.0.1:8787/v1)",
-            )?;
-            let url = reqwest::Url::parse(value).map_err(|_| "invalid --base-url")?;
-            if !matches!(url.scheme(), "http" | "https")
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || !url.path().trim_end_matches('/').ends_with("/v1")
-            {
-                return Err("--base-url must be an HTTP(S) API URL ending in /v1, without credentials, query or fragment".into());
+            if let Some(url) = base_url {
+                config::normalize_api_url(url)?;
+            } else {
+                args.connection.api_base_url()?;
             }
-        } else if base_url.is_some() {
-            return Err("--base-url is only supported with an OpenCode export format".into());
+        } else if base_url.is_some() || model.is_some() {
+            return Err(
+                "--base-url and --model are only supported with an OpenCode export format".into(),
+            );
         }
     }
     if matches!(args.command, CommandLine::Doctor) {
@@ -442,7 +446,12 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
         },
     };
     let mut result = ssh_request(args, request).await?;
-    if let CommandLine::Models { format, base_url } = &args.command {
+    if let CommandLine::Models {
+        format,
+        base_url,
+        model,
+    } = &args.command
+    {
         let format = format.unwrap_or(ModelFormat::Openai);
         if !matches!(format, ModelFormat::Openai) {
             let models: Vec<crate::catalog::Model> = serde_json::from_value(result["data"].clone())
@@ -453,22 +462,38 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
                 ModelFormat::OpencodeV2 => crate::catalog::opencode_v2(&models)?,
                 ModelFormat::Openai => unreachable!(),
             };
-            match format {
-                ModelFormat::OpencodeV1 => {
-                    result["provider"]["exetrouter"]["options"]["baseURL"] =
-                        serde_json::json!(base_url
-                            .as_deref()
-                            .expect("validated URL")
-                            .trim_end_matches('/'));
+            if matches!(format, ModelFormat::OpencodeV1 | ModelFormat::OpencodeV2) {
+                let url = base_url
+                    .as_deref()
+                    .map(config::normalize_api_url)
+                    .unwrap_or_else(|| args.connection.api_base_url())?;
+                match format {
+                    ModelFormat::OpencodeV1 => {
+                        result["provider"]["exetrouter"]["options"]["baseURL"] =
+                            serde_json::json!(url)
+                    }
+                    ModelFormat::OpencodeV2 => {
+                        result["providers"]["exetrouter"]["settings"]["baseURL"] =
+                            serde_json::json!(url)
+                    }
+                    _ => unreachable!(),
                 }
-                ModelFormat::OpencodeV2 => {
-                    result["providers"]["exetrouter"]["settings"]["baseURL"] =
-                        serde_json::json!(base_url
-                            .as_deref()
-                            .expect("validated URL")
-                            .trim_end_matches('/'));
+                if let Some(id) = model {
+                    let id = id.strip_prefix("exetrouter/").unwrap_or(id);
+                    if !models.iter().any(|model| model.id == id) {
+                        return Err(
+                            "selected model is not available in the router catalog; run exr models"
+                                .into(),
+                        );
+                    }
+                    result["model"] = match format {
+                        ModelFormat::OpencodeV1 => serde_json::json!(format!("exetrouter/{id}")),
+                        ModelFormat::OpencodeV2 => {
+                            serde_json::json!({"providerID":"exetrouter","model":id})
+                        }
+                        _ => unreachable!(),
+                    };
                 }
-                _ => {}
             }
         }
     }

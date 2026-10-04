@@ -20,11 +20,11 @@ OpenCode receives reported context/input headroom, reasoning variants and modali
 ```sh
 exr models
 exr models --json --format codex-json > /absolute/path/models.json
-exr models --json --format opencode-v1-json --base-url https://api.example.com/v1 > /absolute/path/exetrouter-v1.json
-exr models --json --format opencode-v2-json --base-url https://api.example.com/v1 > /absolute/path/exetrouter-v2.json
+exr models --json --format opencode-v1-json > /absolute/path/exetrouter-v1.json
+exr models --json --format opencode-v2-json > /absolute/path/exetrouter-v2.json
 ```
 
-Codex 0.160.0 can fetch `/v1/models/codex` directly through its provider's `model_catalog_url` with `features.api_key_model_discovery=true`; no file export is required. Keep provider name `OpenAI` for native compaction V2. Older clients can use an absolute `model_catalog_json` path as an optional snapshot. OpenCode V1/V2 import the generated configuration through `OPENCODE_CONFIG`. Both exports create a dedicated `exetrouter` provider named `ExetRouter`, with the model list and metadata from the account-pool extractor; the OpenCode OpenAI catalog is not inherited. V2 enables native compaction; no plugin is needed. Catalog files are snapshots: regenerate after pool/catalog changes. See [client configuration and verification scope](compatibility.md).
+Codex 0.160.0 can fetch `/v1/models/codex` directly through its provider's `model_catalog_url` with `features.api_key_model_discovery=true`; no file export is required. Keep provider name `OpenAI` for native compaction V2. Older clients can use an absolute `model_catalog_json` path as an optional snapshot. OpenCode V1/V2 import the generated configuration through `OPENCODE_CONFIG`. Both exports create a dedicated `exetrouter` provider named `ExetRouter`, with the model list and metadata from the account-pool extractor; the OpenCode OpenAI catalog is not inherited. V2 enables native compaction; no plugin is needed. CLI exports reuse the standalone API address or the remote URL saved with `exr configure --api-url`; `--base-url` is only an override. [Example output for each format](model-export-examples.md) shows the generated JSON. Catalog files are snapshots: regenerate after pool/catalog changes. See [client configuration and verification scope](compatibility.md).
 
 ## Cache keys
 

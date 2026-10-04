@@ -115,13 +115,19 @@ For older clients without `model_catalog_url`, an optional snapshot remains avai
 
 Use ExetRouter as your OpenAI endpoint. No additional plugin is needed.
 
-Run `opencode --version` and use the export format for your installed major version. Set `EXETROUTER_TOKEN` to your router token in the launching environment. The generated configuration keeps an environment reference, never the token itself. Replace `https://api.example.com/v1` with your router API URL (`http://127.0.0.1:8787/v1` for standalone).
+Run `opencode --version` and use the export format for your installed major version. Set `EXETROUTER_TOKEN` to your router token in the launching environment. The generated configuration keeps an environment reference, never the token itself. Standalone exports use the running/configured local API address automatically. For a remote connection, save the operator’s public HTTP API URL once (it may differ from the SSH host):
+
+```sh
+exr configure --api-url https://api.example.com/v1
+```
+
+Exports reuse this setting; `--base-url URL` is an optional override for a single export. In standalone mode keep `exr` or `exr serve` running while OpenCode uses its API.
 
 ### V1 (opencode-ai)
 
 ```sh
-exr models --json --format opencode-v1-json --base-url https://api.example.com/v1 > exetrouter-v1.json &&
-  OPENCODE_CONFIG="$PWD/exetrouter-v1.json" opencode --model exetrouter/MODEL_ID
+exr models --json --format opencode-v1-json > exetrouter-v1.json &&
+  OPENCODE_CONFIG="$PWD/exetrouter-v1.json" opencode --model exetrouter/gpt-5.6-sol
 ```
 
 The export defines `provider.exetrouter` with `"npm": "@ai-sdk/openai"`, `"name": "ExetRouter"`, connection options and models extracted from your account pool. Its whitelist contains exactly those model IDs. Model limits, modalities, options and reasoning variants use V1's native configuration format.
@@ -129,16 +135,20 @@ The export defines `provider.exetrouter` with `"npm": "@ai-sdk/openai"`, `"name"
 ### V2 (@opencode/cli)
 
 ```sh
-exr models --json --format opencode-v2-json --base-url https://api.example.com/v1 > exetrouter-v2.json &&
+exr models --json --format opencode-v2-json --model exetrouter/gpt-5.6-sol > exetrouter-v2.json &&
   OPENCODE_CONFIG="$PWD/exetrouter-v2.json" opencode --standalone
 ```
 
 The export defines `providers.exetrouter` with `"name": "ExetRouter"`, package `@opencode/ai/providers/openai/responses`, the token environment variable, connection settings and models extracted from your account pool. It uses WebSocket transport, `store=false` and native compaction. `--standalone` starts a private OpenCode server with the fresh configuration instead of reusing an existing background server. For HTTP/SSE, change `providers.exetrouter.settings.transport` to `http`. Model capabilities, settings and reasoning variants use V2's native format.
 
-Both commands query ExetRouter before launching OpenCode and import the generated file through OpenCode's native `OPENCODE_CONFIG` setting. Choose a model under **ExetRouter** through `/models`. V1 also accepts `opencode --model exetrouter/MODEL_ID`; V2 accepts `opencode run --standalone --model exetrouter/MODEL_ID` for a noninteractive run. Use an ID from `exr models`. The dedicated `exetrouter` provider gets its model list and metadata from the extractor, without inheriting OpenCode's bundled OpenAI catalog. Other providers and unrelated settings can stay in your regular OpenCode configuration; keep the `exetrouter` definition in the generated file so older local model entries do not merge into it. Run the matching export again before each launch to refresh pool/catalog changes. No conversion script or plugin is required. OpenCode retains its standard retry policy.
+Both commands query ExetRouter before launching OpenCode and import the generated file through OpenCode's native `OPENCODE_CONFIG` setting. `exetrouter/gpt-5.6-sol` means provider `exetrouter`, model ID `gpt-5.6-sol`. The examples select this model: V1 through the launch flag, V2 through the exported configuration. It must be available in `exr models`; exporting with `--model` rejects an unavailable ID. Choose a different imported model through `/models`.
+
+Without a model override, OpenCode keeps its own selection rules. V1 uses a configured model, then an available recent model, then its default ranking. V2 uses a configured/default model, otherwise an available catalog model; the interactive client applies its own selection preferences. Neither mode guarantees ExetRouter will be selected if other providers are available. Omitting the exporter’s `--model` leaves the exported config’s `model` unset. V2 also accepts `opencode run --standalone --model exetrouter/gpt-5.6-sol` for a noninteractive run.
+
+The dedicated `exetrouter` provider gets its model list and metadata from the extractor, without inheriting OpenCode's bundled OpenAI catalog. Other providers and unrelated settings can stay in your regular OpenCode configuration; keep the `exetrouter` definition in the generated file so older local model entries do not merge into it. Run the matching export again before each launch to refresh pool/catalog changes. No conversion script or plugin is required. OpenCode retains its standard retry policy. See [example output for every format](model-export-examples.md).
 
 ### OpenCode model import
 
 Export shapes were checked against V1 1.18.34 and V2 2.0.22 configuration sources on 2026-10-04. Offline CLI/API tests check the extracted metadata and connection configuration; isolated native model-list checks, after catalog initialization, verify both versions load the generated files and expose only the exported IDs under `exetrouter`. Native mock tool-cycle checks also passed with these exported providers: V1 HTTP/SSE and process resume, and V2 HTTP/SSE and WebSocket. These use a synthetic loopback backend; they do not renew the real upstream inference matrix above. Unknown output limits remain zero under OpenCode's convention.
 
-Authenticated HTTP clients can obtain model/provider fragments at `/v1/models/opencode-v1` and `/v1/models/opencode-v2`. Those fragments omit `baseURL`; the CLI's `--base-url` produces a configuration ready for file import. `baseURL` alone changes the request destination and does not fetch models from the router.
+Authenticated HTTP clients can obtain model/provider fragments at `/v1/models/opencode-v1` and `/v1/models/opencode-v2`. Those fragments omit `baseURL`; the CLI adds the saved/standalone API URL to produce a configuration ready for file import. `baseURL` alone changes the request destination and does not fetch models from the router.

@@ -12,16 +12,16 @@ Migrate legacy `[profiles.exetrouter]`/top-level `profile="exetrouter"` from the
 
 ## OpenCode V1 and V2
 
-Resolve the installed version with `opencode --version`. Set the router token in `EXETROUTER_TOKEN`; never put it in the exported file. Export the account-visible catalog using the matching native format and the operator's API URL:
+Resolve the installed version with `opencode --version`. Set the router token in `EXETROUTER_TOKEN`; never put it in the exported file. Export the account-visible catalog using the matching native format. Standalone uses its API address; in remote mode first save the operator’s HTTP API URL with `exr configure --api-url https://api.example.com/v1`. `--base-url` only overrides an individual export:
 
 ```sh
-exr models --json --format opencode-v1-json --base-url https://api.example.com/v1 > exetrouter-v1.json &&
-  OPENCODE_CONFIG="$PWD/exetrouter-v1.json" opencode --model exetrouter/MODEL_ID
+exr models --json --format opencode-v1-json > exetrouter-v1.json &&
+  OPENCODE_CONFIG="$PWD/exetrouter-v1.json" opencode --model exetrouter/gpt-5.6-sol
 ```
 
-For V2 use `opencode-v2-json` and `exetrouter-v2.json`, then launch `OPENCODE_CONFIG="$PWD/exetrouter-v2.json" opencode --standalone` so a private OpenCode server reads the fresh configuration. Both exports create a dedicated `exetrouter` provider named `ExetRouter` with models and metadata from our extractor, without inheriting OpenCode's bundled OpenAI catalog. V1 uses `provider`, `npm="@ai-sdk/openai"`, options and a variant object. V2 uses `providers`, package `@opencode/ai/providers/openai/responses`, settings and a variant array; defaults are WebSocket, `store=false` and native compaction. For HTTP/SSE change V2 `providers.exetrouter.settings.transport` to `http`.
+For V2 use `opencode-v2-json --model exetrouter/gpt-5.6-sol` and `exetrouter-v2.json`, then launch `OPENCODE_CONFIG="$PWD/exetrouter-v2.json" opencode --standalone` so a private OpenCode server reads the fresh configuration. Both exports create a dedicated `exetrouter` provider named `ExetRouter` with models and metadata from our extractor, without inheriting OpenCode's bundled OpenAI catalog. V1 uses `provider`, `npm="@ai-sdk/openai"`, options and a variant object. V2 uses `providers`, package `@opencode/ai/providers/openai/responses`, settings and a variant array; defaults are WebSocket, `store=false` and native compaction. For HTTP/SSE change V2 `providers.exetrouter.settings.transport` to `http`.
 
-Use an ID from `exr models`, or choose **ExetRouter** in `/models`. Generate the file before each launch to refresh the catalog, and keep this provider's definition out of other configuration files so old model entries do not merge into it. Other settings/providers stay in the regular configuration. No conversion script or plugin is required. OpenCode retains its standard retry policy. See `docs/compatibility.md#opencode-model-import` for verification scope.
+The example model must be available in `exr models`. `exetrouter/gpt-5.6-sol` is provider/model notation. Without `--model`, OpenCode follows configured/recent/default selection and may pick another provider. Choose **ExetRouter** in `/models`. Generate the file before each launch to refresh the catalog, and keep this provider's definition out of other configuration files so old model entries do not merge into it. Other settings/providers stay in the regular configuration. No conversion script or plugin is required. OpenCode retains its standard retry policy. See `docs/compatibility.md#opencode-model-import` for verification scope.
 
 V1's experimental WebSocket transport, live upstream, compaction and long context remain unverified with ExetRouter.
 

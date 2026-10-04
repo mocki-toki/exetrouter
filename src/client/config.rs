@@ -29,6 +29,8 @@ pub(super) struct Connection {
     pub port: u16,
     pub ssh_user: String,
     pub identity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
 }
 impl Default for Connection {
     fn default() -> Self {
@@ -41,11 +43,15 @@ impl Default for Connection {
             port: 2222,
             ssh_user: "routercli".into(),
             identity: String::new(),
+            api_url: None,
         }
     }
 }
 impl Connection {
     pub fn validate(&self) -> Result<()> {
+        if let Some(url) = &self.api_url {
+            normalize_api_url(url)?;
+        }
         if self.mode == Mode::Standalone {
             if !Path::new(&self.state_dir).is_absolute() || !self.listen.ip().is_loopback() {
                 return Err(
@@ -65,6 +71,40 @@ impl Connection {
         }
         Ok(())
     }
+    pub fn api_base_url(&self) -> Result<String> {
+        if self.mode == Mode::Standalone {
+            let address = self
+                .local
+                .as_ref()
+                .map_or(self.listen, |local| local.address);
+            if address.port() == 0 {
+                return Err(
+                    "Start exr serve before exporting a dynamically assigned API address".into(),
+                );
+            }
+            return Ok(format!("http://{address}/v1"));
+        }
+        self.api_url.as_deref().map(normalize_api_url).unwrap_or_else(|| Err("Remote HTTP API URL is not configured. Save it once with exr configure --api-url https://api.example.com/v1, or override this export with --base-url".into()))
+    }
+}
+
+pub(super) fn normalize_api_url(value: &str) -> Result<String> {
+    let url = reqwest::Url::parse(value).map_err(|_| "invalid API URL")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || value.chars().any(char::is_control)
+        || !url.path().trim_end_matches('/').ends_with("/v1")
+    {
+        return Err(
+            "API URL must be an HTTP(S) URL ending in /v1, without credentials, query or fragment"
+                .into(),
+        );
+    }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 fn valid_host(s: &str) -> bool {
     !s.is_empty()
@@ -148,6 +188,9 @@ pub(super) fn load(args: &Args) -> Result<Connection> {
     if let Some(value) = args.listen {
         result.listen = value;
     }
+    if let Some(value) = &args.api_url {
+        result.api_url = Some(normalize_api_url(value)?);
+    }
     Ok(result)
 }
 fn prompt(label: &str, current: &str) -> Result<String> {
@@ -195,6 +238,7 @@ pub(super) fn configure(args: &Args, result: &mut Connection) -> Result<()> {
         && args.host.is_none()
         && args.port.is_none()
         && args.ssh_user.is_none()
+        && args.api_url.is_none()
     {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             return Err("use configure --identity PATH for non-interactive setup".into());
@@ -203,6 +247,13 @@ pub(super) fn configure(args: &Args, result: &mut Connection) -> Result<()> {
         result.port = prompt("SSH port", &result.port.to_string())?.parse()?;
         result.ssh_user = prompt("SSH username", &result.ssh_user)?;
         result.identity = expand(prompt("Private key", &result.identity)?)?;
+        let url = prompt(
+            "HTTP API URL (optional)",
+            result.api_url.as_deref().unwrap_or(""),
+        )?;
+        result.api_url = (!url.is_empty())
+            .then(|| normalize_api_url(&url))
+            .transpose()?;
     }
     result.validate()?;
     let meta = fs::metadata(&result.identity)?;
@@ -273,6 +324,30 @@ fn default_state_dir() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn standalone_export_resolves_the_running_api_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = crate::local::Local::open(
+            &dir.path().join("state"),
+            "127.0.0.1:0".parse().unwrap(),
+            true,
+        )
+        .await
+        .unwrap();
+        let connection = Connection {
+            mode: Mode::Standalone,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            api_url: Some("https://remote.example.com/v1".into()),
+            local: Some(local.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            connection.api_base_url().unwrap(),
+            format!("http://{}/v1", local.address)
+        );
+        assert_ne!(local.address.port(), 0);
+        local.stop().await.unwrap();
+    }
     #[test]
     fn saves_private_config_and_rejects_symlink_and_option_injection() {
         let dir = tempfile::tempdir().unwrap();

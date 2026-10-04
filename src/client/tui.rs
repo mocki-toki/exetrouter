@@ -2039,7 +2039,7 @@ fn settings_body(connection: &Connection, accounts: Option<&Value>, selected: us
         }
         text
     } else {
-        format!("Remote server\nSSH host       {}\nPort           {}\nSSH username   {}\nPrivate key    {}\n\nPress e to change connection or switch to standalone.\nRegister your public key with the operator and verify the SSH host key.\nUpstream accounts are managed by the server operator using exrd.\nNo private key or API secret is stored in the connection config.",render::safe(&connection.host),connection.port,render::safe(&connection.ssh_user),render::safe(&connection.identity))
+        format!("Remote server\nHTTP API URL   {}\nSSH host       {}\nPort           {}\nSSH username   {}\nPrivate key    {}\n\nPress e to change connection or switch to standalone.\nRegister your public key with the operator and verify the SSH host key.\nUpstream accounts are managed by the server operator using exrd.\nNo private key or API secret is stored in the connection config.",render::safe(connection.api_url.as_deref().unwrap_or("Not configured")),render::safe(&connection.host),connection.port,render::safe(&connection.ssh_user),render::safe(&connection.identity))
     }
 }
 fn dialog(
@@ -2280,6 +2280,10 @@ async fn settings_wizard(
             ("SSH port", connection.port.to_string()),
             ("SSH username", connection.ssh_user.clone()),
             ("Private key path", connection.identity.clone()),
+            (
+                "HTTP API URL (optional)",
+                connection.api_url.clone().unwrap_or_default(),
+            ),
         ]
     };
     let mut fields = fields
@@ -2320,6 +2324,9 @@ async fn settings_wizard(
                         connection.port = fields[1].1.value.parse()?;
                         connection.ssh_user = fields[2].1.value.clone();
                         connection.identity = super::config::expand(fields[3].1.value.clone())?;
+                        connection.api_url = (!fields[4].1.value.is_empty())
+                            .then(|| super::config::normalize_api_url(&fields[4].1.value))
+                            .transpose()?;
                         let meta = std::fs::metadata(&connection.identity)?;
                         use std::os::unix::fs::PermissionsExt;
                         if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
