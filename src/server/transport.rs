@@ -1995,87 +1995,155 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 );
             }
             let mut migrated = false;
-            if let Some(bound) = &binding {
-                let id = bound.account.info.id;
-                if upstream
-                    .account_enabled(identity.user_id, id)
-                    .await
-                    .unwrap_or(false)
-                    && upstream.quota_exhausted(id).await.unwrap_or(false)
-                {
-                    if let Ok(account) = select_context_account(
-                        &upstream,
-                        &model,
-                        None,
-                        identity.user_id,
-                        Some(id),
-                        &payload,
-                    )
-                    .await
-                    {
-                        if account.info.id != id {
-                            if payload
-                                .get("previous_response_id")
-                                .is_some_and(|v| !v.is_null())
-                                && !window
-                                    .as_ref()
-                                    .is_some_and(|history| history.expand(&mut payload))
-                            {
-                                let _ = send_client(&mut client, ws_error("context_recovery_unavailable", "quota exhausted; reconnect with the full current context to switch accounts")).await;
-                                continue 'frames;
-                            }
-                            // Account-specific turn state must not cross an upstream handshake.
-                            if let Some(metadata) = payload
-                                .get_mut("client_metadata")
-                                .and_then(Value::as_object_mut)
-                            {
-                                metadata.remove("x-codex-turn-state");
-                            }
-                            let native_session =
-                                upstream_identity_session.as_deref().expect("bound session");
-                            let thread = upstream_thread.as_deref().expect("bound thread");
-                            match upstream
-                                .websocket_with_quota_fallback(
-                                    account,
-                                    identity.user_id,
-                                    &model,
-                                    (native_session, thread),
-                                    &mut payload,
-                                )
+            'migration: {
+                if let Some(bound) = &binding {
+                    let id = bound.account.info.id;
+                    if upstream
+                        .account_enabled(identity.user_id, id)
+                        .await
+                        .unwrap_or(false)
+                        && (upstream.quota_exhausted(id).await.unwrap_or(false)
+                            || upstream
+                                .threshold_reached(identity.user_id, id)
                                 .await
-                            {
-                                Ok((account, socket, metadata)) => {
-                                    if transfer_context(&state, &identity, &mut payload, &account)
+                                .unwrap_or(false))
+                    {
+                        if let Ok(account) = select_context_account(
+                            &upstream,
+                            &model,
+                            None,
+                            identity.user_id,
+                            Some(id),
+                            &payload,
+                        )
+                        .await
+                        {
+                            if account.info.id != id {
+                                let exhausted = upstream.quota_exhausted(id).await.unwrap_or(true);
+                                let previous = payload
+                                    .get("previous_response_id")
+                                    .filter(|value| !value.is_null())
+                                    .cloned();
+                                let delta_len = payload["input"].as_array().map_or(0, Vec::len);
+                                if payload
+                                    .get("previous_response_id")
+                                    .is_some_and(|v| !v.is_null())
+                                    && !window
+                                        .as_ref()
+                                        .is_some_and(|history| history.expand(&mut payload))
+                                {
+                                    // A configured soft threshold must not interrupt an
+                                    // otherwise usable session without recovery history.
+                                    if !upstream.quota_exhausted(id).await.unwrap_or(true) {
+                                        break 'migration;
+                                    }
+                                    let _ = send_client(&mut client, ws_error("context_recovery_unavailable", "quota exhausted; reconnect with the full current context to switch accounts")).await;
+                                    continue 'frames;
+                                }
+                                // Keep only bounded routing metadata to restore a soft
+                                // transfer whose handshake fails, never clone full history.
+                                let old_turn = payload
+                                    .get_mut("client_metadata")
+                                    .and_then(Value::as_object_mut)
+                                    .and_then(|metadata| metadata.remove("x-codex-turn-state"));
+                                let native_session =
+                                    upstream_identity_session.as_deref().expect("bound session");
+                                let thread = upstream_thread.as_deref().expect("bound thread");
+                                let replacement = if exhausted {
+                                    upstream
+                                        .websocket_with_quota_fallback(
+                                            account,
+                                            identity.user_id,
+                                            &model,
+                                            (native_session, thread),
+                                            &mut payload,
+                                        )
+                                        .await
+                                } else {
+                                    // A proactive preference may fall back to the existing
+                                    // healthy connection if its alternative refuses the handshake.
+                                    upstream
+                                        .websocket(
+                                            &account,
+                                            (native_session, thread),
+                                            false,
+                                            &payload,
+                                        )
+                                        .await
+                                        .map(|(socket, metadata)| (account, socket, metadata))
+                                };
+                                match replacement {
+                                    Ok((account, socket, metadata)) => {
+                                        if transfer_context(
+                                            &state,
+                                            &identity,
+                                            &mut payload,
+                                            &account,
+                                        )
                                         .await
                                         .is_err()
+                                        {
+                                            let _ = send_client(
+                                                &mut client,
+                                                ws_error(
+                                                    "storage_unavailable",
+                                                    "context transfer unavailable",
+                                                ),
+                                            )
+                                            .await;
+                                            continue 'frames;
+                                        }
+                                        let mut old = binding
+                                            .replace(WsBinding::new(account, socket, metadata))
+                                            .expect("bound socket");
+                                        old.close().await;
+                                        frame_turn = None;
+                                        migrated = true;
+                                        retired_accounts.insert(id);
+                                    }
+                                    Err(ref failure)
+                                        if !exhausted
+                                            && !matches!(
+                                                failure,
+                                                crate::upstream::SocketError::Storage
+                                            )
+                                            && upstream
+                                                .select_pinned_for_user(
+                                                    &model,
+                                                    id,
+                                                    Some(identity.user_id),
+                                                )
+                                                .await
+                                                .is_ok() =>
                                     {
+                                        if let Some(previous) = previous {
+                                            let input = payload["input"]
+                                                .as_array_mut()
+                                                .expect("expanded input");
+                                            let delta = input.split_off(input.len() - delta_len);
+                                            payload["input"] = json!(delta);
+                                            payload["previous_response_id"] = previous;
+                                        }
+                                        if let Some(turn) = old_turn {
+                                            payload["client_metadata"]
+                                                .as_object_mut()
+                                                .expect("validated metadata")
+                                                .insert("x-codex-turn-state".into(), turn);
+                                        }
+                                        break 'migration;
+                                    }
+                                    Err(crate::upstream::SocketError::Cooldown(until)) => {
                                         let _ = send_client(
                                             &mut client,
-                                            ws_error(
-                                                "storage_unavailable",
-                                                "context transfer unavailable",
-                                            ),
+                                            cooldown_frame(until).to_string(),
                                         )
                                         .await;
                                         continue 'frames;
                                     }
-                                    let mut old = binding
-                                        .replace(WsBinding::new(account, socket, metadata))
-                                        .expect("bound socket");
-                                    old.close().await;
-                                    frame_turn = None;
-                                    migrated = true;
-                                    retired_accounts.insert(id);
-                                }
-                                Err(crate::upstream::SocketError::Cooldown(until)) => {
-                                    let _ =
-                                        send_client(&mut client, cooldown_frame(until).to_string())
-                                            .await;
-                                    continue 'frames;
-                                }
-                                Err(_) => {
-                                    let _ = send_client(&mut client, ws_error("upstream_websocket_unavailable", "replacement handshake failed before inference; reconnect with full context")).await;
-                                    continue 'frames;
+                                    Err(_) => {
+                                        let _ = send_client(&mut client, ws_error("upstream_websocket_unavailable", "replacement handshake failed before inference; reconnect with full context")).await;
+                                        continue 'frames;
+                                    }
                                 }
                             }
                         }

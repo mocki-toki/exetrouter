@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[derive(Clone)]
 pub(crate) struct Candidate {
     pub id: i64,
     pub quota: Option<f64>,

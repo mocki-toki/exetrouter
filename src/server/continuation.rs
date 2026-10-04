@@ -53,12 +53,21 @@ impl Window {
         }
         let mut input = self.input.clone();
         input.extend(delta.iter().cloned());
-        payload["input"] = Value::Array(input);
-        payload
-            .as_object_mut()
-            .expect("validated request")
-            .remove("previous_response_id");
-        Self::fits(payload)
+        let body = payload.as_object_mut().expect("validated request");
+        let original_input = body.insert("input".into(), Value::Array(input));
+        let previous = body.remove("previous_response_id");
+        if Self::fits(payload) {
+            return true;
+        }
+        // Failed soft-threshold recovery must leave the original request usable.
+        let body = payload.as_object_mut().expect("validated request");
+        if let Some(input) = original_input {
+            body.insert("input".into(), input);
+        }
+        if let Some(previous) = previous {
+            body.insert("previous_response_id".into(), previous);
+        }
+        false
     }
 
     pub(super) fn fits(payload: &Value) -> bool {
@@ -121,6 +130,18 @@ impl Window {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn oversized_expansion_leaves_original_incremental_request_unchanged() {
+        let budget = Arc::new(Semaphore::new(WINDOW_BYTES));
+        let mut request = json!({"input":[{"role":"user","content":"synthetic"}]});
+        let mut response = json!({"id":"a","output":[]});
+        let window = Window::completed(None, &mut request, &mut response, &budget).unwrap();
+        let mut delta =
+            json!({"previous_response_id":"a","input":[],"instructions":"x".repeat(WINDOW_BYTES)});
+        let before = delta.clone();
+        assert!(!window.expand(&mut delta));
+        assert_eq!(delta, before);
+    }
     #[test]
     fn latest_delta_recovers_complete_tool_history_and_releases_budget() {
         let budget = Arc::new(Semaphore::new(4096));

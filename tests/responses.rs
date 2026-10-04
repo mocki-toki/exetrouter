@@ -5555,3 +5555,285 @@ async fn saved_conversations_are_user_owned_pinned_and_never_migrate_on_quota() 
     );
     fixture.stop().await;
 }
+
+async fn configure_soft_threshold(fixture: &Fixture, account: i64, used: f64, age: i64) {
+    fixture.db.call(move |conn| {
+        use exetrouter::account_preferences::{set_user_rules, RoutingArgs, Setting};
+        set_user_rules(conn,1,account,None,None,&RoutingArgs { priority:Some(Setting::Number(if account == 1 { 10 } else { 1 })),switch_at:Some(Setting::Number(20)),..Default::default() })?;
+        let now=chrono::Utc::now().timestamp();
+        conn.execute("INSERT INTO oauth_quota_windows(account_id,kind,used_percent,window_minutes,reset_at,observed_at,request_order) VALUES(?1,'primary',?2,300,?3,?4,0) ON CONFLICT(account_id,kind) DO UPDATE SET used_percent=excluded.used_percent,reset_at=excluded.reset_at,observed_at=excluded.observed_at",rusqlite::params![account,used,now+300,now-age])?;
+        Ok(())
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn soft_threshold_prefers_alternatives_but_falls_back_and_ignores_stale_data() {
+    for (used, age, second_used, expected) in [
+        (79.9, 0, 10., "upstream-account"),
+        (80., 0, 10., "upstream-account-2"),
+        (90., 0, 85., "upstream-account"),
+        (90., 60, 10., "upstream-account"),
+    ] {
+        let fixture = Fixture::start(false).await;
+        fixture.add_account(&["gpt-test"], false).await;
+        fixture.upstream.models().await.unwrap();
+        configure_soft_threshold(&fixture, 1, used, age).await;
+        configure_soft_threshold(&fixture, 2, second_used, 0).await;
+        let mut body = request();
+        body["stream"] = json!(false);
+        assert_eq!(fixture.post(body).await.status(), 200);
+        assert_eq!(
+            fixture.mock.request_accounts.lock().unwrap().as_slice(),
+            [expected]
+        );
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn soft_threshold_is_shared_by_chat_and_compact_and_respects_deactivation() {
+    let fixture = Fixture::start(false).await;
+    fixture.add_account(&["gpt-test"], false).await;
+    fixture.upstream.models().await.unwrap();
+    configure_soft_threshold(&fixture, 1, 85., 0).await;
+    configure_soft_threshold(&fixture, 2, 10., 0).await;
+    assert_eq!(
+        fixture
+            .chat(json!({"model":"gpt-test","messages":[{"role":"user","content":"synthetic"}]}))
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(
+        fixture
+            .compact(json!({"model":"gpt-test","input":[{"role":"user","content":"synthetic"}]}))
+            .await
+            .status(),
+        200
+    );
+    assert!(fixture
+        .mock
+        .request_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|account| account == "upstream-account-2"));
+    fixture
+        .db
+        .call(|conn| {
+            exetrouter::account_preferences::set_user(conn, 1, 2, Some(false), None)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(fixture.post(request()).await.status(), 200);
+    assert_eq!(
+        fixture
+            .mock
+            .request_accounts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap(),
+        "upstream-account"
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn soft_threshold_migrates_checkpoint_forks_without_replaying_or_losing_ownership() {
+    let mut fixture = Fixture::start(false).await;
+    fixture.add_account(&["gpt-test"], false).await;
+    fixture.upstream.models().await.unwrap();
+    configure_soft_threshold(&fixture, 1, 10., 0).await;
+    let checkpoint = fixture
+        .compact(json!({"model":"gpt-test","input":[{"role":"user","content":"synthetic"}]}))
+        .await
+        .json::<Value>()
+        .await
+        .unwrap()["output"][0]
+        .clone();
+    configure_soft_threshold(&fixture, 1, 80., 0).await;
+    let mut body = request();
+    body["stream"] = json!(false);
+    body["input"] = json!([checkpoint,{"role":"user","content":"fork"}]);
+    let (a, b) = tokio::join!(fixture.post(body.clone()), fixture.post(body.clone()));
+    assert_eq!(a.status(), 200);
+    assert_eq!(b.status(), 200);
+    assert!(fixture
+        .mock
+        .request_accounts
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|account| account == "upstream-account-2"));
+    assert!(fixture
+        .mock
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request["input"][0] == checkpoint));
+    assert_eq!(fixture.rows().await.len(), 3);
+    fixture.restart().await;
+    assert_eq!(fixture.post(body).await.status(), 200);
+    assert_eq!(
+        fixture
+            .mock
+            .request_accounts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap(),
+        "upstream-account-2"
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn soft_threshold_ws_recovers_complete_context_and_keeps_downstream_socket() {
+    let fixture = Fixture::start(false).await;
+    fixture.add_account(&["gpt-test"], false).await;
+    fixture.upstream.models().await.unwrap();
+    configure_soft_threshold(&fixture, 1, 10., 0).await;
+    let mut socket = fixture.ws().await;
+    let mut body = request();
+    body["type"] = json!("response.create");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    let first = terminal(&mut socket).await;
+    assert_eq!(first["type"], "response.completed");
+    configure_soft_threshold(&fixture, 1, 80., 0).await;
+    body["previous_response_id"] = first["response"]["id"].clone();
+    body["input"] = json!([{"role":"user","content":"synthetic next"}]);
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+    let requests = fixture.mock.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].get("previous_response_id").is_none());
+    assert!(requests[1]["input"].as_array().unwrap().len() > 1);
+    assert_eq!(
+        requests[0]["prompt_cache_key"],
+        requests[1]["prompt_cache_key"]
+    );
+    assert_eq!(
+        *fixture.mock.request_accounts.lock().unwrap(),
+        ["upstream-account", "upstream-account-2"]
+    );
+    assert_eq!(fixture.rows().await.len(), 2);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn soft_threshold_without_recoverable_ws_history_stays_on_original_account() {
+    let fixture = Fixture::start(false).await;
+    fixture.add_account(&["gpt-test"], false).await;
+    fixture.upstream.models().await.unwrap();
+    configure_soft_threshold(&fixture, 1, 10., 0).await;
+    let mut socket = fixture.ws().await;
+    let mut body = request();
+    body["type"] = json!("response.create");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    let first = terminal(&mut socket).await;
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+    configure_soft_threshold(&fixture, 1, 80., 0).await;
+    // The most recent recovery window cannot expand an earlier branch.
+    body["previous_response_id"] = first["response"]["id"].clone();
+    body["input"] = json!([{"role":"user","content":"synthetic older branch"}]);
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+    assert_eq!(
+        *fixture.mock.request_accounts.lock().unwrap(),
+        ["upstream-account", "upstream-account", "upstream-account"]
+    );
+    assert_eq!(
+        fixture.mock.requests.lock().unwrap()[2]["previous_response_id"],
+        first["response"]["id"]
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn soft_threshold_failed_replacement_handshake_restores_original_incremental_request() {
+    let fixture = Fixture::start(false).await;
+    fixture.add_account(&["gpt-test"], false).await;
+    fixture.upstream.models().await.unwrap();
+    configure_soft_threshold(&fixture, 1, 10., 0).await;
+    let mut socket = fixture.ws().await;
+    let mut body = request();
+    body["type"] = json!("response.create");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    let first = terminal(&mut socket).await;
+    configure_soft_threshold(&fixture, 1, 80., 0).await;
+    fixture
+        .mock
+        .handshake_rate_limit
+        .store(true, Ordering::SeqCst);
+    body["previous_response_id"] = first["response"]["id"].clone();
+    body["input"] = json!([{"role":"user","content":"synthetic next"}]);
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+    assert_eq!(
+        *fixture.mock.request_accounts.lock().unwrap(),
+        ["upstream-account", "upstream-account"]
+    );
+    let requests = fixture.mock.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["previous_response_id"], first["response"]["id"]);
+    assert_eq!(requests[1]["input"], body["input"]);
+    assert_eq!(fixture.rows().await.len(), 2);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn hard_quota_can_use_an_alternative_below_its_soft_threshold() {
+    let fixture = Fixture::start(false).await;
+    fixture.add_account(&["gpt-test"], false).await;
+    fixture.upstream.models().await.unwrap();
+    configure_soft_threshold(&fixture, 1, 10., 0).await;
+    let checkpoint = fixture
+        .compact(json!({"model":"gpt-test","input":[{"role":"user","content":"synthetic"}]}))
+        .await
+        .json::<Value>()
+        .await
+        .unwrap()["output"][0]
+        .clone();
+    configure_soft_threshold(&fixture, 1, 100., 0).await;
+    configure_soft_threshold(&fixture, 2, 85., 0).await;
+    let mut body = request();
+    body["stream"] = json!(false);
+    body["input"] = json!([checkpoint,{"role":"user","content":"synthetic next"}]);
+    assert_eq!(fixture.post(body).await.status(), 200);
+    assert_eq!(
+        fixture
+            .mock
+            .request_accounts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap(),
+        "upstream-account-2"
+    );
+    fixture.stop().await;
+}

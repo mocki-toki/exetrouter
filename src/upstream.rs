@@ -356,12 +356,13 @@ impl Upstream {
         }
         let selected_model = model.to_owned();
         let model = selected_model.clone();
-        let (mut candidates, earliest, exhausted) = self.db.call(move |conn| {
+        let (mut candidates, earliest, exhausted, thresholds) = self.db.call(move |conn| {
             let now = Utc::now().timestamp();
             let mut stmt=conn.prepare("SELECT a.id,a.cooldown_until,(SELECT MAX(h.retry_at) FROM oauth_health h WHERE h.account_id=a.id AND h.generation=a.generation),a.expires_at FROM oauth_accounts a JOIN oauth_models m ON m.account_id=a.id WHERE a.state='active' AND m.model=?1 AND a.catalog_updated_at<=?2 AND a.catalog_updated_at>?2-60 ORDER BY a.id")?;
             let rows=stmt.query_map(params![model,now],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,Option<i64>>(1)?,row.get::<_,Option<i64>>(2)?,row.get::<_,i64>(3)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
             let mut candidates=Vec::new();
             let mut exhausted=Vec::new();
+            let mut thresholds=Vec::new();
             let mut earliest=None;
             for (id,until,health,expires) in rows {
                 let preference=crate::account_preferences::effective(conn,user,id)?;
@@ -372,11 +373,12 @@ impl Upstream {
                 if let Some(wait)=wait { earliest=Some(earliest.map_or(wait,|old:(i64,bool)|if wait.0<old.0 {wait} else {old}));continue; }
                 if expires<=now+60 { continue; }
                 let summary=crate::quota::summary(conn,id,now)?;
+                if preference.rules.reached(&summary) { thresholds.push(id); }
                 if summary.windows.iter().any(|window| window.status=="current" && window.used_percent>=100.0 && window.reset_at.is_some_and(|at|at>now)) { exhausted.push(id); }
                 let quota=if summary.status=="observed" { summary.windows.iter().map(|window|window.used_percent).reduce(f64::max) } else { None };
                 candidates.push(crate::pool::Candidate { id,quota,priority:preference.priority });
             }
-            Ok((candidates,earliest,exhausted))
+            Ok((candidates,earliest,exhausted,thresholds))
         }).await.map_err(|_|SelectError::UpstreamUnavailable)?;
         candidates.retain(|candidate| !excluded.contains(&candidate.id));
         if !excluded.is_empty()
@@ -390,7 +392,24 @@ impl Upstream {
             return Err(wait_error(earliest));
         }
         let mut retry = earliest;
-        while let Some(reservation) = self.pool.reserve_affinity(&candidates, affinity) {
+        while !candidates.is_empty() {
+            // Prefer above-threshold capacity, but retain the other tier if
+            // credential/catalog validation rejects every preferred candidate.
+            let preferred = candidates
+                .iter()
+                .filter(|c| !thresholds.contains(&c.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let Some(reservation) = self.pool.reserve_affinity(
+                if preferred.is_empty() {
+                    &candidates
+                } else {
+                    &preferred
+                },
+                affinity,
+            ) else {
+                break;
+            };
             let id = reservation.id;
             candidates.retain(|candidate| candidate.id != id);
             // Only credential/catalog checks may move to another candidate.
@@ -446,6 +465,24 @@ impl Upstream {
             .map_err(|_| SelectError::UpstreamUnavailable)
     }
 
+    pub(crate) async fn threshold_reached(
+        &self,
+        user: i64,
+        id: i64,
+    ) -> std::result::Result<bool, SelectError> {
+        self.db
+            .call(move |conn| {
+                let preference = crate::account_preferences::effective(conn, Some(user), id)?;
+                Ok(preference.rules.reached(&crate::quota::summary(
+                    conn,
+                    id,
+                    Utc::now().timestamp(),
+                )?))
+            })
+            .await
+            .map_err(|_| SelectError::UpstreamUnavailable)
+    }
+
     pub(crate) async fn select_continuation(
         &self,
         model: &str,
@@ -460,15 +497,19 @@ impl Upstream {
             return Err(SelectError::UpstreamUnavailable);
         }
         let pinned = self.select_pinned_for_user(model, id, Some(user)).await;
-        if self.quota_exhausted(id).await?
-            && matches!(pinned, Ok(_) | Err(SelectError::Cooldown(_)))
-        {
+        let exhausted = self.quota_exhausted(id).await?;
+        let threshold = self.threshold_reached(user, id).await?;
+        if (exhausted || threshold) && matches!(pinned, Ok(_) | Err(SelectError::Cooldown(_))) {
             if let Ok(alternate) = self
                 .select_excluding(model, affinity, Some(user), &[id])
                 .await
             {
                 // Avoid leaving credit-backed capacity for another exhausted subscription.
-                if !self.quota_exhausted(alternate.info.id).await? {
+                if !self.quota_exhausted(alternate.info.id).await?
+                    && (exhausted
+                        || !threshold
+                        || !self.threshold_reached(user, alternate.info.id).await?)
+                {
                     return Ok(alternate);
                 }
             }
