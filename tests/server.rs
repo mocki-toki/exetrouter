@@ -675,6 +675,50 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
         upgrade.on_upgrade(|mut socket| async move {
             while let Some(Ok(axum::extract::ws::Message::Text(text))) = socket.recv().await {
                 let body: Value = serde_json::from_str(&text).unwrap();
+                use axum::extract::ws::{CloseFrame, Message};
+                match body["metadata"]["mode"].as_str() {
+                    Some("ws_close" | "ws_partial_close") => {
+                        if body["metadata"]["mode"] == "ws_partial_close" {
+                            for event in events(&body).into_iter().take(2) {
+                                socket
+                                    .send(Message::Text(event.to_string().into()))
+                                    .await
+                                    .unwrap();
+                            }
+                        }
+                        let _ = socket
+                            .send(Message::Close(Some(CloseFrame {
+                                code: 1011,
+                                reason: ERROR.into(),
+                            })))
+                            .await;
+                        return;
+                    }
+                    Some("ws_reset") => return,
+                    Some("ws_binary") => {
+                        let _ = socket.send(Message::Binary(ERROR.as_bytes().into())).await;
+                        return;
+                    }
+                    Some("ws_invalid_json") => {
+                        let _ = socket.send(Message::Text(ERROR.into())).await;
+                        return;
+                    }
+                    Some("ws_invalid_event") => {
+                        let event = json!({"type":"response.output_text.delta","delta":OUTPUT});
+                        let _ = socket.send(Message::Text(event.to_string().into())).await;
+                        return;
+                    }
+                    Some("ws_wait") => {
+                        let event = events(&body).remove(0);
+                        socket
+                            .send(Message::Text(event.to_string().into()))
+                            .await
+                            .unwrap();
+                        let _ = socket.recv().await;
+                        return;
+                    }
+                    _ => {}
+                }
                 for event in events(&body) {
                     if socket
                         .send(axum::extract::ws::Message::Text(event.to_string().into()))
@@ -868,6 +912,103 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
             .execute("DELETE FROM oauth_health", [])
             .unwrap();
     }
+    let ws_cases = [
+        ("ws_close", "upstream_close"),
+        ("ws_partial_close", "upstream_close"),
+        ("ws_reset", "upstream_read_error"),
+        ("ws_binary", "upstream_invalid_frame"),
+        ("ws_invalid_json", "upstream_invalid_json"),
+        ("ws_invalid_event", "upstream_event_before_response_created"),
+        ("client_concurrent", "client_concurrent_request"),
+        ("client_close", "client_close"),
+    ];
+    for (mode, _) in ws_cases {
+        let db = rusqlite::Connection::open(server.dir.path().join("state.sqlite")).unwrap();
+        let before: i64 = db
+            .query_row("SELECT count(*) FROM usage_events", [], |row| row.get(0))
+            .unwrap();
+        let mut request = format!("ws://{}/v1/responses", server.address)
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {secret}").parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let mut payload = body.clone();
+        payload["type"] = json!("response.create");
+        payload["metadata"] =
+            json!({"mode": if mode.starts_with("client_") { "ws_wait" } else { mode }});
+        socket
+            .send(Message::Text(payload.to_string().into()))
+            .await
+            .unwrap();
+        if mode.starts_with("client_") {
+            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let Message::Text(text) = frame else {
+                panic!("expected response.created")
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(&text).unwrap()["type"],
+                "response.created"
+            );
+            if mode == "client_close" {
+                use tokio_tungstenite::tungstenite::{
+                    protocol::frame::coding::CloseCode, protocol::CloseFrame,
+                };
+                socket
+                    .close(Some(CloseFrame {
+                        code: CloseCode::Normal,
+                        reason: TOOL.into(),
+                    }))
+                    .await
+                    .unwrap();
+            } else {
+                socket
+                    .send(Message::Text(payload.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        }
+        if mode != "client_close" {
+            loop {
+                let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                if let Message::Text(text) = frame {
+                    let event: Value = serde_json::from_str(&text).unwrap();
+                    if event["type"] == "error" {
+                        assert_eq!(event["status"], 400);
+                        assert_eq!(event["error"]["code"], "upstream_interrupted");
+                        break;
+                    }
+                    assert_ne!(event["type"], "response.completed");
+                }
+            }
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let (count, status, input, output): (i64, String, Option<i64>, Option<i64>) = db.query_row(
+                "SELECT (SELECT count(*) FROM usage_events),status,input_tokens,output_tokens FROM usage_events ORDER BY id DESC LIMIT 1",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).unwrap();
+            if count == before + 1 && status == "interrupted" {
+                assert!(input.is_none() && output.is_none());
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "interruption was not accounted"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        db.execute("DELETE FROM oauth_health", []).unwrap();
+    }
     server.stop();
     let logs = fs::read_to_string(server.dir.path().join("server.log")).unwrap();
     assert!(logs.contains("model_request_finished") && logs.contains("upstream_protocol_rejected"));
@@ -877,7 +1018,7 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|line| line["fields"]["event"] == "upstream_stream_interrupted")
         .collect();
-    assert_eq!(interruptions.len(), 2);
+    assert_eq!(interruptions.len(), 2 + ws_cases.len());
     for (line, kind, count) in [
         (&interruptions[0], "response.output_text.delta", 2),
         (&interruptions[1], "other", 3),
@@ -889,6 +1030,43 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
         assert_eq!(fields["output_seen"], true);
         assert!(fields["last_event_at_ms"].as_i64().unwrap() > 0);
         assert!(fields["last_event_age_ms"].as_u64().is_some());
+    }
+    for (line, (mode, reason)) in interruptions[2..].iter().zip(ws_cases) {
+        let fields = &line["fields"];
+        assert_eq!(fields["reason"], reason, "{mode}");
+        assert_eq!(fields["upstream_transport"], "websocket");
+        assert!(fields["duration_ms"].as_u64().is_some());
+        assert_eq!(fields["request_id"].as_str().unwrap().len(), 32);
+        assert_eq!(
+            fields["stage"],
+            if mode == "ws_invalid_event" {
+                "event_observation"
+            } else {
+                "receive"
+            }
+        );
+        if matches!(mode, "ws_close" | "ws_partial_close" | "client_close") {
+            assert_eq!(
+                fields["close_code"],
+                if mode == "client_close" { 1000 } else { 1011 }
+            );
+        }
+        if mode == "ws_reset" {
+            assert_eq!(
+                fields["transport_error_kind"],
+                "reset_without_close_handshake"
+            );
+        }
+        if mode == "ws_partial_close" {
+            assert_eq!(fields["response_created"], true);
+            assert_eq!(fields["output_seen"], true);
+            assert_eq!(fields["events_seen"], 2);
+            assert_eq!(fields["last_event_kind"], "response.output_text.delta");
+        } else if !mode.starts_with("client_") && mode != "ws_invalid_event" {
+            assert_eq!(fields["response_created"], false);
+            assert_eq!(fields["events_seen"], 0);
+            assert_eq!(fields["last_event_kind"], "none");
+        }
     }
     for entry in fs::read_dir(server.dir.path()).unwrap() {
         let path = entry.unwrap().path();
