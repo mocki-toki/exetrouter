@@ -23,6 +23,8 @@ Operational logs contain fixed event names, server-generated correlation IDs, nu
 
 Stream diagnostics retain only the last allowlisted upstream event type, its Unix receipt timestamp in milliseconds and monotonic age. Unknown types become `other`; downstream heartbeats do not refresh these times. The executable fixes allowed log targets/levels, so `RUST_LOG=trace` cannot enable dependency body traces.
 
+WebSocket interruption diagnostics include a fixed reason and stage, elapsed time, a fixed transport-error category and an optional numeric close code. They distinguish upstream closure/read/write failures, invalid events, client closure/concurrent frames, storage stages and service shutdown. Close-reason text, underlying error messages and frame contents are never logged. An interrupted request with no observed events still has an unknown outcome and is never replayed.
+
 ## Deployment and operator access
 
 Use separate unprivileged service/gateway UIDs, protected state/keys and reviewed TLS ingress. [Deployment templates](deploy/README.md) disable API access/error logging, buffering, caching and upstream retries. Keep payload/debug/packet capture, WAF body inspection and APM body capture disabled in your ingress. Client applications and OpenAI have their own retention policies.
