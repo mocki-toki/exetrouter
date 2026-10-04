@@ -115,7 +115,7 @@ For older clients without `model_catalog_url`, an optional snapshot remains avai
 
 Use ExetRouter as your OpenAI endpoint. No additional plugin is needed.
 
-Run `opencode --version` and use the matching configuration below. Replace `https://api.example.com/v1` with your router URL (`http://127.0.0.1:8787/v1` for standalone) and both occurrences of `MODEL_ID` with a model from `exr models`.
+Run `opencode --version` and use the matching configuration below. Replace `https://api.example.com/v1` with your router URL (`http://127.0.0.1:8787/v1` for standalone).
 
 Supply your router token through `EXETROUTER_TOKEN`, then start `opencode` from that environment. Keep the token out of the configuration file.
 
@@ -125,22 +125,25 @@ Add this to `opencode.jsonc`, keeping your other settings:
 
 ```jsonc
 {
-  "model": "openai/MODEL_ID",
   "provider": {
     "openai": {
-      "name": "ExetRouter",
       "npm": "@ai-sdk/openai",
-      "env": ["EXETROUTER_TOKEN"],
-      "options": {"baseURL": "https://api.example.com/v1"},
-      "models": {
-        "MODEL_ID": {"options": {"store": false}}
+      "options": {
+        "baseURL": "https://api.example.com/v1",
+        "apiKey": "{env:EXETROUTER_TOKEN}"
       }
     }
   }
 }
 ```
 
-V1 uses HTTP/SSE by default. Its experimental WebSocket transport has not been verified with ExetRouter.
+Start `opencode` and choose an available model through `/models`, or select it when launching:
+
+```sh
+opencode --model openai/MODEL_ID
+```
+
+Use an ID from `exr models`. The OpenAI adapter already defaults to `store=false`; no per-model configuration is needed for that setting. V1 uses HTTP/SSE by default. Its experimental WebSocket transport has not been verified with ExetRouter.
 
 ### OpenCode V2
 
@@ -148,7 +151,6 @@ Add this to `opencode.jsonc`, keeping your other settings:
 
 ```jsonc
 {
-  "model": "openai/MODEL_ID",
   "providers": {
     "openai": {
       "name": "ExetRouter",
@@ -160,14 +162,13 @@ Add this to `opencode.jsonc`, keeping your other settings:
         "transport": "websocket",
         "store": false,
         "compaction": {"type": "native"}
-      },
-      "models": {"MODEL_ID": {}}
+      }
     }
   }
 }
 ```
 
-For HTTP/SSE, change `transport` to `http`.
+Start `opencode` and select a model through `/models`, or run `opencode --model openai/MODEL_ID` with an ID from `exr models`. For HTTP/SSE, change `transport` to `http`.
 
 ### OpenCode model metadata
 

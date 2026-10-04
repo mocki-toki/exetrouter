@@ -18,7 +18,7 @@ For optional pool-specific model metadata, export `exr models --json --format op
 
 ## OpenCode V1
 
-Use singular `provider`, provider ID `openai`, `npm="@ai-sdk/openai"`, env `EXETROUTER_TOKEN`, and options `baseURL`. No plugin is required. Set model `options.store=false`. Start with bundled model metadata; optional router metadata export/conversion is documented in `docs/compatibility.md#opencode-model-metadata`. Select `openai/MODEL_ID`.
+Use singular `provider`, provider ID `openai`, `npm="@ai-sdk/openai"`, options `baseURL` and `apiKey="{env:EXETROUTER_TOKEN}"`. No plugin is required. The adapter defaults to `store=false`; no per-model override is needed. Start with bundled model metadata; optional router metadata export/conversion is documented in `docs/compatibility.md#opencode-model-metadata`. Select the model with `/models` or `opencode --model openai/MODEL_ID`, using an ID from `exr models`.
 
 The checked 1.18.34 client passed synthetic HTTP/SSE tools and process resume. V1 has experimental WS, but that transport, live upstream, compaction and long context remain unverified with ExetRouter.
 
