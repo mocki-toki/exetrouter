@@ -47,6 +47,18 @@ brew install mocki-toki/exetrouter/exr
 exr
 ```
 
+### Nix (Linux or macOS)
+
+With flakes enabled, build and run directly from source:
+
+```sh
+nix run github:mocki-toki/exetrouter -- --help
+nix profile add github:mocki-toki/exetrouter#exetrouter
+exr
+```
+
+The package includes both `exr` and `exrd`. See [Nix installation](docs/installation.md#nix-linux-or-macos) for pinned revisions, NixOS/Home Manager configuration, builds and upgrades.
+
 ### Build from source
 
 Use Rust 1.88 or newer and a C compiler:
