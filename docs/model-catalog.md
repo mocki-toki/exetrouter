@@ -10,11 +10,11 @@ Schema 6 saves an allowlist of Codex ModelInfo fields: context/compaction limits
 | --- | --- |
 | GET /v1/models | OpenAI list; each model's `exetrouter` field contains allowed metadata. |
 | GET /v1/models/codex | `models` with Codex ModelInfo descriptors. |
-| GET /v1/models/opencode | `providers.exetrouter.models` configuration fragment. |
+| GET /v1/models/opencode | `providers.openai.models` configuration fragment. |
 
 Duplicate IDs use minimum numeric limits, intersected reasoning/modalities and positive capabilities enabled only when all accounts support them. Missing/false supports_experimental_context disables that shared capability. Incompatible instructions/tool modes or request-shaping fields reject client export with model_metadata_unavailable; the ordinary ID list remains accessible.
 
-OpenCode receives reported context/input headroom, reasoning variants and modalities. Unreported output limits export as `output: 0`, its unknown-limit convention. Its output reserve is a heuristic; the plugin removes automatic output caps rejected by this backend. Public API prices are not inferred.
+OpenCode receives reported context/input headroom, reasoning variants and modalities. Unreported output limits export as `output: 0`, its unknown-limit convention. Its output reserve is a heuristic; the built-in OpenAI adapter omits output caps rejected by this backend. Public API prices are not inferred.
 
 ```sh
 exr models
@@ -22,7 +22,7 @@ exr models --json --format codex-json > /absolute/path/models.json
 exr models --json --format opencode-jsonc > /absolute/path/models.jsonc
 ```
 
-Codex 0.160.0 can fetch `/v1/models/codex` directly through its provider's `model_catalog_url` with `features.api_key_model_discovery=true`; no file export is required. Keep provider name `OpenAI` for native compaction V2. Older clients can use an absolute `model_catalog_json` path as an optional snapshot. OpenCode merges the exported models into its provider, enables native compaction and uses the repository plugin. Catalog files are snapshots: regenerate after pool/catalog changes. See [client configuration and verification scope](compatibility.md#codex-cli).
+Codex 0.160.0 can fetch `/v1/models/codex` directly through its provider's `model_catalog_url` with `features.api_key_model_discovery=true`; no file export is required. Keep provider name `OpenAI` for native compaction V2. Older clients can use an absolute `model_catalog_json` path as an optional snapshot. OpenCode V2 merges the exported models into its built-in `openai` provider and enables native compaction; no custom plugin is needed. Catalog files are snapshots: regenerate after pool/catalog changes. See [client configuration and verification scope](compatibility.md#codex-cli).
 
 ## Cache keys
 

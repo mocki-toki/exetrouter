@@ -32,7 +32,7 @@ Resolve/download/review current clients using [compatibility](compatibility.md).
 cargo test --locked --test live_upstream live_native_clients -- --ignored --nocapture
 ```
 
-Four isolated HTTP/WS profiles receive exported real catalogs, run /bin/echo EXETROUTER_TOOL_OK in a temporary workspace, and return its result. Assertions inspect the actual tool cycle, primary transport and durable usage. OpenCode's title may be auxiliary HTTP and may be cancelled with unknown usage. Codex retries are disabled; OpenCode loads the provider-scoped plugin. Ordinary client auth/settings are untouched.
+Four isolated HTTP/WS profiles receive exported real catalogs, run /bin/echo EXETROUTER_TOOL_OK in a temporary workspace, and return its result. Assertions inspect the actual tool cycle, primary transport and durable usage. OpenCode's title may be auxiliary HTTP and may be cancelled with unknown usage. Codex retries are disabled; OpenCode uses the built-in `openai` provider and its standard retry policy. Ordinary client auth/settings are untouched.
 
 The harness creates/revokes a temporary bearer, stops its local service and preserves OAuth state/usage. Budget: 12 inference requests and 180 seconds per short scenario. EXETROUTER_LIVE_CLIENT selects codex-http/codex-ws/opencode-http/opencode-ws.
 

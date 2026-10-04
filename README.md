@@ -114,25 +114,46 @@ Replace both URLs with your router's address. For standalone use, they are `http
 
 Start `codex --profile exetrouter` from the terminal where the token is available. Codex fetches model IDs and metadata from the router; no catalog export or fixed `model` setting is needed. It inherits your existing model preference, or chooses a catalog default if none is configured. Use `/model` to choose another model available in your pool. Keep the provider name `OpenAI` for native compaction. Automatic catalog discovery is an opt-in Codex feature, marked under development in 0.160.0.
 
-OpenCode V1 1.18.34 has a separate HTTP/SSE bridge with mock tool/resume and error no-replay checks. See [V1 setup and measured limitations](docs/compatibility.md#opencode-v1-check-2026-10-03) before using it.
+### OpenCode
 
-### OpenCode V2
+Use ExetRouter as your OpenAI endpoint. No additional plugin is needed.
 
-Use the bundled bridge plugin with the tested OpenCode V2 client. If you installed only the binary, download the repository for the plugin:
+Run `opencode --version` and use the matching configuration below. Replace `https://api.example.com/v1` with your router URL (`http://127.0.0.1:8787/v1` for standalone) and both occurrences of `MODEL_ID` with a model from `exr models`.
 
-```sh
-git clone https://github.com/mocki-toki/exetrouter.git
-exr models --json --format opencode-jsonc > exetrouter-models.json
-```
+Supply your router token through `EXETROUTER_TOKEN`, then start `opencode` from that environment. Keep the token out of the configuration file.
 
-Merge this into your OpenCode `opencode.jsonc`, preserving existing providers and plugins. Replace the plugin path with the absolute path to `clients/opencode/exetrouter` in your checkout:
+#### V1 (opencode-ai)
+
+Add this to `opencode.jsonc`, keeping your other settings:
 
 ```jsonc
 {
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": ["/absolute/path/exetrouter/clients/opencode/exetrouter"],
+  "model": "openai/MODEL_ID",
+  "provider": {
+    "openai": {
+      "name": "ExetRouter",
+      "npm": "@ai-sdk/openai",
+      "env": ["EXETROUTER_TOKEN"],
+      "options": {"baseURL": "https://api.example.com/v1"},
+      "models": {
+        "MODEL_ID": {"options": {"store": false}}
+      }
+    }
+  }
+}
+```
+
+V1 uses HTTP/SSE by default. Its experimental WebSocket transport has not been verified with ExetRouter.
+
+#### V2 (@opencode/cli)
+
+Add this to `opencode.jsonc`, keeping your other settings:
+
+```jsonc
+{
+  "model": "openai/MODEL_ID",
   "providers": {
-    "exetrouter": {
+    "openai": {
       "name": "ExetRouter",
       "canonical": "openai",
       "package": "@opencode/ai/providers/openai/responses",
@@ -149,7 +170,9 @@ Merge this into your OpenCode `opencode.jsonc`, preserving existing providers an
 }
 ```
 
-Replace the `models` object with `providers.exetrouter.models` from the exported `exetrouter-models.json`; it supplies context limits, capabilities and reasoning variants. Start OpenCode from the terminal where the token is available and select `exetrouter/MODEL_ID`. The bridge removes unsupported output-token caps and disables this provider's session retry hook. These settings target **OpenCode V2**, not V1; see the [compatibility matrix and configuration](docs/compatibility.md#opencode-v2).
+For HTTP/SSE, change `transport` to `http`.
+
+OpenCode uses its bundled model metadata by default. For model limits and reasoning variants reported by your account pool, see [model metadata](docs/compatibility.md#opencode-model-metadata).
 
 ### OpenAI SDKs and other BYOK tools
 

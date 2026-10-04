@@ -2,7 +2,7 @@
 
 Use a model ID discovered with `exr models --json`. Obtain the service base URL from the deployment; `https://api.example.com/v1` is a reserved example, while local tests use loopback. Verify the actual service endpoint and TLS certificate.
 
-The library's API-key field holds an **ExetRouter bearer**, supplied to the consuming process through its secret environment. Upstream uses ChatGPT OAuth, not Platform API-key BYOK. Disable consuming-client inference retries: after a disconnect the submitted generation may have run.
+The library's API-key field holds an **ExetRouter bearer**, supplied to the consuming process through its secret environment. Upstream uses ChatGPT OAuth, not Platform API-key BYOK. A consuming client may retry after a disconnect; the router itself never replays an accepted or ambiguous generation.
 
 ## Codex CLI
 
@@ -12,15 +12,15 @@ Migrate legacy `[profiles.exetrouter]`/top-level `profile="exetrouter"` from the
 
 ## OpenCode V2
 
-Export `exr models --json --format opencode-jsonc`; merge `providers.exetrouter.models` into the chosen configuration, preserving unrelated fields. Provider: `canonical="openai"`, package `@opencode/ai/providers/openai/responses`, env `EXETROUTER_TOKEN`, settings `baseURL`, `transport="websocket"`, `store=false`, `compaction={type:"native"}`. Select `exetrouter/MODEL_ID`.
+Use the built-in provider ID `openai`, package `@opencode/ai/providers/openai/responses`, env `EXETROUTER_TOKEN`, settings `baseURL`, `transport="websocket"`, `store=false`, and `compaction={type:"native"}`. No plugin is required. Use `transport="http"` for HTTP/SSE.
 
-Install the repository's `clients/opencode/exetrouter` plugin using an absolute path in `plugins`. It removes unsupported automatic output caps and disables this provider's session retry hook. It does not guarantee every possible client recovery path. Change transport to `http` for an isolated HTTP/SSE test.
+For optional pool-specific model metadata, export `exr models --json --format opencode-jsonc` and merge `providers.openai.models` into your configuration. Select `openai/MODEL_ID`. OpenCode retains its standard retry policy.
 
 ## OpenCode V1
 
-The exact checked client is `opencode-ai` 1.18.34, HTTP/SSE only. Use singular `plugin` and `provider`, `npm="@ai-sdk/openai"`, env `EXETROUTER_TOKEN`, options `baseURL`, and provider ID `exetrouter`. Load the separate absolute `file://.../clients/opencode-v1/exetrouter.mjs` plugin. Its public config hook wraps only this provider's transport and turns failures into fixed non-retryable client errors; it also removes caps/sampling and sets store=false. Detailed upstream errors are suppressed. The unmodified V1 client automatically retries errors and is unsuitable for the no-replay contract.
+Use singular `provider`, provider ID `openai`, `npm="@ai-sdk/openai"`, env `EXETROUTER_TOKEN`, and options `baseURL`. No plugin is required. Set model `options.store=false`. Start with bundled model metadata; optional router metadata export/conversion is documented in `docs/compatibility.md#opencode-model-metadata`. Select `openai/MODEL_ID`.
 
-Convert the exported model metadata to V1 descriptors as shown in `docs/compatibility.md`; do not copy V2 configuration. Tools/process resume and four synthetic failure cases passed. V1 real upstream, WebSocket, compaction and long context remain unverified. Avoid experimental native LLM/WebSocket paths and do not apply this bridge to an unreviewed version.
+The checked 1.18.34 client passed synthetic HTTP/SSE tools and process resume. V1 has experimental WS, but that transport, live upstream, compaction and long context remain unverified with ExetRouter.
 
 ## SDKs and service APIs
 
