@@ -928,7 +928,7 @@ pub(super) async fn http(
             )
         }
         Err(crate::upstream::SelectError::Cooldown(until)) => return cooldown_error(until),
-        Err(crate::upstream::SelectError::Backoff(until)) => return backoff_error(until),
+        Err(crate::upstream::SelectError::Backoff(until)) => return backoff_error(until, &id),
         Err(_) => {
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -993,7 +993,7 @@ pub(super) async fn http(
                     let _=log.finish("storage_error", Counters::default()).await;
                     return error(StatusCode::SERVICE_UNAVAILABLE,"storage_unavailable","quota storage unavailable");
                 },
-                Err(crate::upstream::SocketError::Backoff(until))=> {let _=log.finish("local_rejected",Counters::default()).await;return backoff_error(until);},
+                Err(crate::upstream::SocketError::Backoff(until))=> {let _=log.finish("local_rejected",Counters::default()).await;return backoff_error(until, &id);},
                 Err(crate::upstream::SocketError::Authentication)=> {let _=log.finish("local_rejected",Counters::default()).await;return error(StatusCode::BAD_GATEWAY,"upstream_authentication_error","upstream credentials rejected; a separate new request may refresh them");},
                 Err(_)=> {
                     log.transport="http_sse";
@@ -1009,7 +1009,7 @@ pub(super) async fn http(
         let _ = log.finish("local_rejected", Counters::default()).await;
         return match err {
             crate::upstream::SelectError::Cooldown(until) => cooldown_error(until),
-            crate::upstream::SelectError::Backoff(until) => backoff_error(until),
+            crate::upstream::SelectError::Backoff(until) => backoff_error(until, &id),
             _ => error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "storage_unavailable",
@@ -1491,7 +1491,9 @@ fn cooldown_frame(until: i64) -> Value {
 fn backoff_frame(until: i64) -> Value {
     json!({"type":"error","status":503,"error":{"type":"upstream_backoff","code":"upstream_backoff","message":"upstream account temporarily unavailable; wait before starting a new request","retry_after":until.saturating_sub(chrono::Utc::now().timestamp()).max(0)}})
 }
-fn backoff_error(until: i64) -> Response {
+fn backoff_error(until: i64, id: &RequestId) -> Response {
+    tracing::info!(event="upstream_request_deferred",request_id=%id.0,
+        reason="operational_backoff",retry_after=until.saturating_sub(chrono::Utc::now().timestamp()).max(0));
     let value = backoff_frame(until);
     let retry = value["error"]["retry_after"].to_string();
     let mut response = (
@@ -1523,6 +1525,7 @@ fn cooldown_error(until: i64) -> Response {
 pub(super) async fn websocket(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<Identity>,
+    Extension(id): Extension<RequestId>,
     ws: std::result::Result<
         WebSocketUpgrade,
         axum::extract::ws::rejection::WebSocketUpgradeRejection,
@@ -1548,7 +1551,7 @@ pub(super) async fn websocket(
     match upstream.check_available().await {
         Ok(()) => {}
         Err(crate::upstream::SelectError::Cooldown(until)) => return cooldown_error(until),
-        Err(crate::upstream::SelectError::Backoff(until)) => return backoff_error(until),
+        Err(crate::upstream::SelectError::Backoff(until)) => return backoff_error(until, &id),
         Err(_) => {
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1609,8 +1612,48 @@ struct WsSession {
 
 struct WsBinding {
     account: crate::upstream::Selection,
-    socket: UpstreamSocket,
+    socket: Option<UpstreamSocket>,
     metadata: Option<HeaderMap>,
+    // At most one bounded idle metadata notification, delivered after created.
+    pending_metadata: Option<String>,
+    connection_id: RequestId,
+    connected: Instant,
+    finished: u64,
+    responses: HashSet<String>,
+}
+
+impl WsBinding {
+    fn new(
+        account: crate::upstream::Selection,
+        socket: UpstreamSocket,
+        metadata: HeaderMap,
+    ) -> Self {
+        Self {
+            account,
+            socket: Some(socket),
+            metadata: Some(metadata),
+            pending_metadata: None,
+            connection_id: RequestId::new(),
+            connected: Instant::now(),
+            finished: 0,
+            responses: HashSet::new(),
+        }
+    }
+
+    async fn close(&mut self) {
+        if let Some(mut socket) = self.socket.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(1), socket.close(None)).await;
+        }
+        self.metadata = None;
+        self.pending_metadata = None;
+    }
+
+    fn idle_closed(&self, failure: &WsInterruption) {
+        tracing::info!(event="upstream_websocket_idle_closed",connection_id=%self.connection_id.0,
+            connection_age_ms=self.connected.elapsed().as_millis() as u64,
+            finished_requests=self.finished, reason=failure.reason,
+            transport_error_kind=failure.transport_error_kind,close_code=failure.close_code);
+    }
 }
 
 async fn ws_loop(mut client: WebSocket, session: WsSession) {
@@ -1624,14 +1667,79 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
     let mut retired_accounts = HashSet::new();
     let mut binding: Option<WsBinding> = None;
     let mut window: Option<super::continuation::Window> = None;
+    let mut idle_log: Option<RequestLog> = None;
     let mut upstream_session: Option<String> = None;
     let mut upstream_thread: Option<String> = None;
     let mut upstream_identity_session: Option<String> = None;
     let stopped = state.stopped.clone();
     'frames: loop {
-        let message = tokio::select! {
-            _=wait_for_stop(stopped.clone())=>break,
-            message=tokio::time::timeout(Duration::from_secs(300),client.next())=>match message { Ok(Some(Ok(message)))=>message,_=>break },
+        let idle_deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        let message = loop {
+            tokio::select! {
+                // Consume queued upstream closure before a simultaneously ready new request.
+                biased;
+                _ = wait_for_stop(stopped.clone()) => break 'frames,
+                _ = tokio::time::sleep_until(idle_deadline) => break 'frames,
+                incoming = async {
+                    match binding.as_mut().and_then(|bound| bound.socket.as_mut()) {
+                        Some(socket) => socket.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let bound = binding.as_mut().expect("polled binding");
+                    let failure = match incoming {
+                        Some(Ok(UpstreamMessage::Ping(bytes))) => {
+                            send_upstream(bound.socket.as_mut().expect("polled socket"), UpstreamMessage::Pong(bytes))
+                                .await.err()
+                        }
+                        Some(Ok(UpstreamMessage::Pong(_))) => None,
+                        Some(Ok(UpstreamMessage::Text(text))) => {
+                            let event = serde_json::from_str::<Value>(&text).ok();
+                            if let Some(event) = event.filter(|event| matches!(event["type"].as_str(),
+                                Some("ping" | "codex.rate_limits" | "codex.response.metadata" | "response.metadata" | "responsesapi.websocket_timing"))) {
+                                if let Some(log) = &mut idle_log {
+                                    if log.observe(&event).await.is_err() {
+                                        bound.idle_closed(&WsInterruption::new("event_observation_failed"));
+                                        break 'frames;
+                                    }
+                                }
+                                if matches!(event["type"].as_str(), Some("codex.response.metadata" | "response.metadata")) {
+                                    if text.len() > 64 * 1024 {
+                                        bound.idle_closed(&WsInterruption::new("idle_metadata_capacity_exceeded"));
+                                        break 'frames;
+                                    }
+                                    bound.pending_metadata = Some(text.to_string());
+                                } else if send_client(&mut client, text.to_string()).await.is_err() {
+                                    break 'frames;
+                                }
+                                None
+                            } else {
+                                // Never treat a late terminal/error as a refusal of the next request.
+                                bound.idle_closed(&WsInterruption::new("upstream_unexpected_idle_event"));
+                                break 'frames;
+                            }
+                        }
+                        Some(Ok(UpstreamMessage::Close(frame))) => Some(WsInterruption {
+                            close_code: frame.map(|frame| u16::from(frame.code)),
+                            ..WsInterruption::new("upstream_close")
+                        }),
+                        Some(Err(error)) => Some(WsInterruption::transport("upstream_read_error", &error)),
+                        None => Some(WsInterruption::new("upstream_eof")),
+                        _ => {
+                            bound.idle_closed(&WsInterruption::new("upstream_invalid_frame"));
+                            break 'frames;
+                        }
+                    };
+                    if let Some(failure) = failure {
+                        bound.idle_closed(&failure);
+                        bound.close().await;
+                    }
+                }
+                incoming = client.next() => match incoming {
+                    Some(Ok(message)) => break message,
+                    _ => break 'frames,
+                },
+            }
         };
         let text = match message {
             Message::Text(text) => text,
@@ -1952,17 +2060,9 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                         continue 'frames;
                                     }
                                     let mut old = binding
-                                        .replace(WsBinding {
-                                            account,
-                                            socket,
-                                            metadata: Some(metadata),
-                                        })
+                                        .replace(WsBinding::new(account, socket, metadata))
                                         .expect("bound socket");
-                                    let _ = tokio::time::timeout(
-                                        Duration::from_secs(1),
-                                        old.socket.close(None),
-                                    )
-                                    .await;
+                                    old.close().await;
                                     frame_turn = None;
                                     migrated = true;
                                     retired_accounts.insert(id);
@@ -2105,7 +2205,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         break 'frames;
                     }
                     Err(_) => {
-                        let _=send_client(&mut client,ws_error("upstream_websocket_unavailable","upstream handshake failed before inference; reconnect using HTTP with full context")).await;
+                        let _=send_client(&mut client,ws_error("upstream_websocket_unavailable","upstream handshake failed before inference; reconnect with full context")).await;
                         break 'frames;
                     }
                 };
@@ -2127,11 +2227,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 upstream_identity_session = Some(cache.identity_session.clone());
                 upstream_session = Some(cache.session.clone());
                 upstream_thread = Some(cache.thread.clone());
-                binding = Some(WsBinding {
-                    account,
-                    socket,
-                    metadata: Some(metadata),
-                });
+                binding = Some(WsBinding::new(account, socket, metadata));
             }
             // A socket's cache/session header cannot change after its handshake.
             // Keep the same upstream key through subsequent frames, even when a
@@ -2173,6 +2269,11 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 account,
                 socket,
                 metadata,
+                pending_metadata,
+                connection_id,
+                connected,
+                finished,
+                responses: upstream_responses,
             } = binding.as_mut().expect("initialized binding");
             if !upstream
                 .account_enabled(identity.user_id, account.info.id)
@@ -2225,6 +2326,82 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     break 'frames;
                 }
             }
+            // Old socket IDs require recovery even after a replacement socket is open.
+            if payload
+                .get("previous_response_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| socket.is_none() || !upstream_responses.contains(id))
+                && !window
+                    .as_ref()
+                    .is_some_and(|history| history.expand(&mut payload))
+            {
+                let _ = send_client(
+                    &mut client,
+                    ws_error(
+                        "context_recovery_unavailable",
+                        "upstream connection closed; reconnect with the full current context",
+                    ),
+                )
+                .await;
+                continue 'frames;
+            }
+            if socket.is_none() {
+                // This is a new, unsent operation after a completed response, not a retry.
+                if let Some(meta) = payload
+                    .get_mut("client_metadata")
+                    .and_then(Value::as_object_mut)
+                {
+                    meta.remove("x-codex-turn-state");
+                }
+                match upstream
+                    .websocket(
+                        account,
+                        (
+                            upstream_identity_session.as_deref().expect("bound session"),
+                            upstream_thread.as_deref().expect("bound thread"),
+                        ),
+                        false,
+                        &payload,
+                    )
+                    .await
+                {
+                    Ok((replacement, headers)) => {
+                        *socket = Some(replacement);
+                        *metadata = Some(headers);
+                        *pending_metadata = None;
+                        *connection_id = RequestId::new();
+                        *connected = Instant::now();
+                        *finished = 0;
+                        upstream_responses.clear();
+                        tracing::info!(event="upstream_websocket_reconnected", connection_id=%connection_id.0);
+                    }
+                    Err(crate::upstream::SocketError::Cooldown(until)) => {
+                        let _ = send_client(&mut client, cooldown_frame(until).to_string()).await;
+                        continue 'frames;
+                    }
+                    Err(crate::upstream::SocketError::Backoff(until)) => {
+                        let _ = send_client(&mut client, backoff_frame(until).to_string()).await;
+                        continue 'frames;
+                    }
+                    Err(crate::upstream::SocketError::Authentication) => {
+                        let _ = send_client(
+                            &mut client,
+                            ws_error(
+                                "upstream_authentication_error",
+                                "upstream credentials rejected before inference",
+                            ),
+                        )
+                        .await;
+                        break 'frames;
+                    }
+                    Err(_) => {
+                        let _ = send_client(&mut client, ws_error("upstream_websocket_unavailable",
+                            "replacement handshake failed before inference; reconnect with full context")).await;
+                        continue 'frames;
+                    }
+                }
+            }
+            let socket = socket.as_mut().expect("connected socket");
             let id = RequestId::new();
             let mut log = match RequestLog::begin(
                 &state,
@@ -2269,6 +2446,9 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     }
                 }
                 log.sent().await.map_err(|_| WsInterruption::new("request_storage_failed").at("before_submission"))?;
+                tracing::info!(event="upstream_websocket_request_started",request_id=%log.id,
+                    connection_id=%connection_id.0,connection_age_ms=connected.elapsed().as_millis() as u64,
+                    finished_requests=*finished);
                 if let Err(failure) = send_upstream(socket, UpstreamMessage::Text(payload.to_string().into())).await {
                     let _ = log.health(Some(crate::health::Rejection::Temporary), "transport").await;
                     return Err(failure.at("request_write"));
@@ -2371,6 +2551,10 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                             send_client(&mut client, metadata).await
                                 .map_err(|failure| failure.at("metadata_write"))?;
                         }
+                        if let Some(metadata) = pending_metadata.take() {
+                            send_client(&mut client, metadata).await
+                                .map_err(|failure| failure.at("metadata_write"))?;
+                        }
                     }
                     if let Some(output) = &mut recovery_output {
                         if output.observe(&mut event).is_err() {
@@ -2454,17 +2638,9 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                     break 'frames;
                                 }
                                 let mut old = binding
-                                    .replace(WsBinding {
-                                        account: alternate,
-                                        socket,
-                                        metadata: Some(metadata),
-                                    })
+                                    .replace(WsBinding::new(alternate, socket, metadata))
                                     .expect("bound socket");
-                                let _ = tokio::time::timeout(
-                                    Duration::from_secs(1),
-                                    old.socket.close(None),
-                                )
-                                .await;
+                                old.close().await;
                                 retired_accounts.insert(old_id);
                                 continue 'attempt;
                             }
@@ -2490,18 +2666,21 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             if log.authentication_rejected {
                 break 'frames;
             }
-            if let Some(response) = log.response_id {
+            *finished = finished.saturating_add(1);
+            if let Some(response) = log.response_id.clone() {
                 if responses.len() >= 1024 {
                     break 'frames;
                 }
+                upstream_responses.insert(response.clone());
                 responses.insert(response);
             }
+            idle_log = Some(log);
             break 'attempt;
         }
         drop(permit);
     }
     if let Some(mut binding) = binding {
-        let _ = tokio::time::timeout(Duration::from_secs(1), binding.socket.close(None)).await;
+        binding.close().await;
     }
     let _ = tokio::time::timeout(Duration::from_secs(1), client.close()).await;
 }
