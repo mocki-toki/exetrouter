@@ -45,6 +45,8 @@ pub struct Mock {
     pub quota_event: Mutex<Option<Value>>,
     pub mode: Mutex<String>,
     pub release: Notify,
+    pub idle_pongs: AtomicUsize,
+    pub idle_closes: AtomicUsize,
     next_response: AtomicUsize,
 }
 
@@ -517,6 +519,53 @@ async fn websocket(
                         {
                             return;
                         }
+                    }
+                    if mode == "idle_metadata" {
+                        let metadata = json!({"type":"response.metadata","headers":{
+                            "x-codex-turn-state":"private-synthetic-idle-turn-state"}});
+                        if socket
+                            .send(Message::Text(metadata.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    if matches!(mode.as_str(), "idle_ping" | "idle_metadata") {
+                        let ping = b"synthetic-idle-heartbeat".as_slice();
+                        if socket.send(Message::Ping(ping.into())).await.is_err() {
+                            return;
+                        }
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(250),
+                            socket.next(),
+                        )
+                        .await
+                        {
+                            Ok(Some(Ok(Message::Pong(bytes)))) if bytes == ping => {
+                                state.idle_pongs.fetch_add(1, Ordering::SeqCst);
+                            }
+                            _ => {
+                                let _ = socket
+                                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                                        code: 1011,
+                                        reason: "synthetic heartbeat timeout".into(),
+                                    })))
+                                    .await;
+                                state.idle_closes.fetch_add(1, Ordering::SeqCst);
+                                return;
+                            }
+                        }
+                    }
+                    if mode == "idle_close" {
+                        let _ = socket
+                            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                                code: 1011,
+                                reason: "synthetic idle closure".into(),
+                            })))
+                            .await;
+                        state.idle_closes.fetch_add(1, Ordering::SeqCst);
+                        return;
                     }
                     if matches!(
                         mode.as_str(),

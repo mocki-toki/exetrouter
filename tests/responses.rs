@@ -636,6 +636,75 @@ async fn codex_does_not_replay_submitted_ws_interruptions() {
 }
 
 #[tokio::test]
+#[ignore = "requires the reviewed isolated Codex runtime; no real upstream"]
+async fn codex_completes_ws_tool_cycles_with_idle_ping_and_idle_reconnection() {
+    let binary = std::env::var("EXETROUTER_CODEX_BIN").unwrap();
+    native::version(&binary, &native::reviewed_version("codex"))
+        .await
+        .unwrap();
+    for mode in ["idle_ping", "idle_close"] {
+        let fixture = Fixture::start(false).await;
+        *fixture.mock.mode.lock().unwrap() = mode.into();
+        fixture.mock.tools.store(true, Ordering::SeqCst);
+        let probe = probe::Probe::bounded(&fixture.url, 12).await.unwrap();
+        let output = native::Run {
+            binary: &binary,
+            client: "codex",
+            url: &probe.url,
+            model: "gpt-test",
+            bearer: &fixture.secret,
+            websocket: true,
+            directory: fixture.dir.path(),
+            prompt: "Run the local compatibility fixture and report the result.",
+        }
+        .execute()
+        .await
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            native::diagnostic(&output.stdout)
+        );
+        assert!(native::tool_result(&output.stdout), "{mode}");
+        let calls = fixture.mock.requests.lock().unwrap().clone();
+        assert!(calls.iter().all(|call| call["type"] == "response.create"));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call["generate"] != false)
+                .count(),
+            2
+        );
+        assert!(calls.last().unwrap()["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "function_call_output"));
+        assert!(fixture
+            .rows()
+            .await
+            .iter()
+            .all(|row| row["status"] == "completed"));
+        let handshakes = fixture.mock.handshakes.lock().unwrap().clone();
+        assert!(handshakes
+            .iter()
+            .all(|account| account == "upstream-account"));
+        if mode == "idle_ping" {
+            assert_eq!(handshakes.len(), 1);
+            assert_eq!(fixture.mock.idle_closes.load(Ordering::SeqCst), 0);
+            assert!(fixture.mock.idle_pongs.load(Ordering::SeqCst) >= 2);
+        } else {
+            assert_eq!(handshakes.len(), calls.len());
+            assert!(calls
+                .iter()
+                .all(|call| call.get("previous_response_id").is_none()));
+        }
+        println!("Codex {mode}: WS tool cycle completed, two generations, no HTTP fallback");
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn large_histories_reach_upstream_over_http_compact_chat_and_websocket() {
     let fixture = Fixture::start(false).await;
     let history = "synthetic-long-history ".repeat(150_000);
@@ -3798,6 +3867,208 @@ async fn pool_refresh_leases_are_independent_and_coalesce_per_account() {
     assert_eq!(fixture.mock.refreshes.load(Ordering::SeqCst), 2);
     assert!(fixture.mock.requests.lock().unwrap().is_empty());
     fixture.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_services_upstream_ping_between_requests() {
+    let fixture = Fixture::start(false).await;
+    let mut socket = fixture.ws().await;
+    let mut body = request();
+    body["type"] = json!("response.create");
+    body["generate"] = json!(false);
+    body["test_mode"] = json!("idle_ping");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    let warmup = terminal(&mut socket).await;
+    assert_eq!(warmup["type"], "response.completed");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture.mock.idle_pongs.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("upstream ping was not serviced while the client was idle");
+    assert_eq!(fixture.mock.idle_closes.load(Ordering::SeqCst), 0);
+    body.as_object_mut().unwrap().remove("generate");
+    body.as_object_mut().unwrap().remove("test_mode");
+    body["previous_response_id"] = warmup["response"]["id"].clone();
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+    assert_eq!(fixture.mock.handshakes.lock().unwrap().len(), 1);
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 2);
+    assert!(fixture
+        .rows()
+        .await
+        .iter()
+        .all(|row| row["status"] == "completed"));
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_reconnects_idle_closed_upstream_before_submitting_continuation() {
+    let fixture = Fixture::start(false).await;
+    let mut socket = fixture.ws().await;
+    let mut body = request();
+    body["type"] = json!("response.create");
+    body["test_mode"] = json!("idle_close");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    let first = terminal(&mut socket).await;
+    assert_eq!(first["type"], "response.completed");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture.mock.idle_closes.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    body.as_object_mut().unwrap().remove("test_mode");
+    body["previous_response_id"] = first["response"]["id"].clone();
+    body["input"] = json!([{"role":"user","content":"continue after an idle closure"}]);
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+    let requests = fixture.mock.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].get("previous_response_id").is_none());
+    assert_eq!(requests[1]["input"][0], requests[0]["input"][0]);
+    assert_eq!(
+        requests[1]["input"].as_array().unwrap().last().unwrap(),
+        &body["input"][0]
+    );
+    assert_eq!(
+        fixture.mock.handshakes.lock().unwrap().as_slice(),
+        &["upstream-account", "upstream-account"]
+    );
+    let sessions = fixture.mock.sessions.lock().unwrap().clone();
+    assert_eq!(sessions[0].1, sessions[1].1);
+    let rows = fixture.rows().await;
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row["status"] == "completed"));
+    // An older branch cannot silently use an ID belonging to the retired socket.
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal(&mut socket).await["error"]["code"],
+        "context_recovery_unavailable"
+    );
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 2);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_defers_idle_metadata_until_the_next_response_created() {
+    let fixture = Fixture::start(false).await;
+    let mut socket = fixture.ws().await;
+    let mut body = request();
+    body["type"] = json!("response.create");
+    body["test_mode"] = json!("idle_metadata");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    let first = terminal(&mut socket).await;
+    assert_eq!(first["type"], "response.completed");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture.mock.idle_pongs.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    body.as_object_mut().unwrap().remove("test_mode");
+    body["previous_response_id"] = first["response"]["id"].clone();
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    let created = socket.next().await.unwrap().unwrap().into_text().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&created).unwrap()["type"],
+        "response.created"
+    );
+    let metadata = socket.next().await.unwrap().unwrap().into_text().unwrap();
+    let metadata: Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(metadata["type"], "response.metadata");
+    let state = metadata["headers"]["x-codex-turn-state"].clone();
+    assert_eq!(state, "private-synthetic-idle-turn-state");
+    let second = terminal(&mut socket).await;
+    assert_eq!(second["type"], "response.completed");
+    body["previous_response_id"] = second["response"]["id"].clone();
+    body["client_metadata"] = json!({"x-codex-turn-state":state});
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 3);
+    assert_eq!(fixture.mock.handshakes.lock().unwrap().len(), 1);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_idle_recovery_rechecks_revocation_deactivation_and_backoff() {
+    for guard in ["revoked", "disabled", "backoff"] {
+        let fixture = Fixture::start(false).await;
+        fixture.add_account(&["gpt-test"], false).await;
+        let mut socket = fixture.ws().await;
+        let mut body = request();
+        body["type"] = json!("response.create");
+        body["test_mode"] = json!("idle_close");
+        socket
+            .send(Message::Text(body.to_string().into()))
+            .await
+            .unwrap();
+        let first = terminal(&mut socket).await;
+        assert_eq!(first["type"], "response.completed");
+        let token = fixture.token_id.clone();
+        fixture.db.call(move |conn| {
+            match guard {
+                "revoked" => { exetrouter::revoke_token(conn, 1, &token)?; }
+                "disabled" => {
+                    exetrouter::account_preferences::set_policy(conn, 1, Some(false), None, Some(true))?;
+                }
+                "backoff" => {
+                    conn.execute("UPDATE oauth_health SET retry_at=?1, reason='transport', failures=1 WHERE account_id=1 AND scope='responses'",
+                        [chrono::Utc::now().timestamp()+60])?;
+                }
+                _ => unreachable!(),
+            }
+            Ok(())
+        }).await.unwrap();
+        body.as_object_mut().unwrap().remove("test_mode");
+        body["previous_response_id"] = first["response"]["id"].clone();
+        socket
+            .send(Message::Text(body.to_string().into()))
+            .await
+            .unwrap();
+        let expected = match guard {
+            "revoked" => "authentication_error",
+            "disabled" => "account_disabled",
+            _ => "upstream_backoff",
+        };
+        assert_eq!(
+            terminal(&mut socket).await["error"]["code"],
+            expected,
+            "{guard}"
+        );
+        assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
+        assert_eq!(fixture.mock.handshakes.lock().unwrap().len(), 1);
+        assert_eq!(fixture.rows().await.len(), 1);
+        fixture.stop().await;
+    }
 }
 
 #[tokio::test]
