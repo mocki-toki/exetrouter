@@ -2,12 +2,16 @@
 
 ## Unreleased
 
-- Export separate OpenCode V1/V2 model configuration fragments through `opencode-v1-json` and `opencode-v2-json`, with matching authenticated model routes.
+## 0.3.0
+
+- Export dedicated OpenCode V1/V2 providers with pool models, native metadata and connection settings; reuse the standalone or saved remote API URL. Matching authenticated model routes expose provider fragments.
 - Forward backend request options without a static capability denylist and translate Chat output caps. Preserve backend HTTP statuses with redacted HTTP/Chat errors, resource bounds and adapter checks; enforce user ownership and account pinning for saved conversation references.
 - Activate apparently inactive weekly windows with one durably guarded minimal gpt-5.6-sol request; retain nullable counters in user/model/total usage and expose the attempt status. Requires the explicit schema-7-to-8 migration plan.
 - Support Ctrl-C cancellation throughout connection setup without saving edits.
 - Add a visible cursor and editing within connection fields, including Unicode and long paths.
 - Check remote SSH settings before saving and allow verified first-time host-key confirmation in the same terminal.
+- Add source-pinned Nix flake installation and development support.
+- Simplify documentation, separate client configuration from launch and provide a dedicated Docker/native server installation guide.
 
 ## 0.2.2
 
