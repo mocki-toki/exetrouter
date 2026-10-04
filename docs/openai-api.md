@@ -85,6 +85,10 @@ Supply full input as a string or array. Strings become user messages, `system` b
 
 HTTP JSON is assembled from upstream SSE/completed items; raw SSE preserves events. WS omits the HTTP `stream` field and preserves native event forwarding. Routing ownership, resource bounds and adapter checks still apply.
 
+Native WS services upstream ping/pong and control events between requests. If the upstream closes while no response is in flight, the downstream WS stays open. A separate next request may open a replacement WS on the same eligible account with the same scoped session/thread identity. Incremental input is expanded from the bounded latest completed context; an older or unavailable window returns `context_recovery_unavailable` before inference. Old upstream response IDs are not forwarded to a replacement socket. This never reconnects or replays an in-flight generation, and never switches accounts to bypass an operational pause or deactivation.
+
+Idle metadata is retained as at most one 64 KiB transient notification and delivered after the next `response.created`, preserving native event ordering. Unexpected idle data/terminal/error frames close the downstream connection instead of attributing them to a later request. Upstream controls do not extend the 300-second downstream idle deadline.
+
 Responses Lite preserves its ordered `additional_tools` prefix and custom/namespace definitions. An explicit Lite header needs a recognized native prefix or frame-mode metadata; arbitrary caller headers are not forwarded.
 
 Compact appends `compaction_trigger` to one Responses SSE request and projects `response.compaction` with exactly one opaque checkpoint. Independent requests may select another eligible account; normal checkpoint/socket affinity takes precedence over cache preference.

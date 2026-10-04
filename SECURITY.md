@@ -23,7 +23,7 @@ Operational logs contain fixed event names, server-generated correlation IDs, nu
 
 Stream diagnostics retain only the last allowlisted upstream event type, its Unix receipt timestamp in milliseconds and monotonic age. Unknown types become `other`; downstream heartbeats do not refresh these times. The executable fixes allowed log targets/levels, so `RUST_LOG=trace` cannot enable dependency body traces.
 
-WebSocket interruption diagnostics include a fixed reason and stage, elapsed time, a fixed transport-error category and an optional numeric close code. They distinguish upstream closure/read/write failures, invalid events, client closure/concurrent frames, storage stages and service shutdown. Close-reason text, underlying error messages and frame contents are never logged. An interrupted request with no observed events still has an unknown outcome and is never replayed.
+WebSocket interruption diagnostics include a fixed reason and stage, elapsed time, a fixed transport-error category and an optional numeric close code. They distinguish upstream closure/read/write failures, invalid events, client closure/concurrent frames, storage stages and service shutdown. Close-reason text, underlying error messages and frame contents are never logged. An interrupted request with no observed events still has an unknown outcome and is never replayed. Native WS logs also correlate requests with generated upstream connection IDs, connection age and the number of finished requests. Idle closure and replacement-handshake events contain no frame contents or close-reason text.
 
 ## Deployment and operator access
 
