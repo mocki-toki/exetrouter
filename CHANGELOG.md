@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+- Select individual models, users or API tokens with recorded usage in the dashboard; user totals include all of their tokens, while token IDs remain scoped to the authenticated user.
+- Default Usage charts to reported tokens and draw clearer lines with readable upper axis limits rounded upward.
+- Keep the selected item in the chart legend, including full token IDs on small terminals; reserve the combined view for total grouping.
+- Show keyboard help for the current dashboard tab.
+- Simplify OpenCode V1/V2 configuration to the built-in OpenAI provider, removing the optional custom plugins.
+
 ## 0.2.1
 
 - Simplify OpenCode V1/V2 setup to the built-in OpenAI provider with a router endpoint and token; remove the custom client plugins and retain standard OpenCode retries.
