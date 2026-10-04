@@ -300,7 +300,7 @@ pub fn opencode(models: &[Model]) -> Result<Value> {
             "variants":variants,"settings":settings
         }));
     }
-    Ok(json!({"providers":{"exetrouter":{"models":entries}}}))
+    Ok(json!({"providers":{"openai":{"models":entries}}}))
 }
 
 #[cfg(test)]
@@ -318,7 +318,7 @@ mod tests {
             .is_none());
         assert!(codex(std::slice::from_ref(&model)).is_err());
         let profile = opencode(&[model]).unwrap();
-        let value = &profile["providers"]["exetrouter"]["models"]["a"];
+        let value = &profile["providers"]["openai"]["models"]["a"];
         assert_eq!(
             value["limit"],
             json!({"context":100000,"input":95000,"output":0})
@@ -367,7 +367,7 @@ mod tests {
                 );
                 assert_eq!(catalog["models"][0]["context_window"], 100000);
                 assert_eq!(
-                    opencode(&[model]).unwrap()["providers"]["exetrouter"]["models"]["a"]["limit"]
+                    opencode(&[model]).unwrap()["providers"]["openai"]["models"]["a"]["limit"]
                         ["context"],
                     100000
                 );

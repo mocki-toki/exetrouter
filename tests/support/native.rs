@@ -102,7 +102,6 @@ impl Run<'_> {
             .env("HOME", self.directory)
             .env("LANG", "en_US.UTF-8")
             .env("EXETROUTER_TOKEN", self.bearer);
-        let marker = config.join("retry-hook.ready");
         match self.client {
             "codex" => {
                 let catalog_path = config.join("models.json");
@@ -139,24 +138,15 @@ impl Run<'_> {
                 }
                 command.arg(self.prompt);
             }
-            "opencode-v1" | "opencode-v1-bridge" => {
+            "opencode-v1" => {
                 // V1 continuation checks process reopening only. Its summarizing
                 // compaction protocol is not part of this fixture.
                 if self.websocket {
                     return Err("OpenCode V1 fixture only supports HTTP".into());
                 }
-                let provider = if self.client == "opencode-v1-bridge" {
-                    "exetrouter"
-                } else {
-                    "openai"
-                };
+                let provider = "openai";
                 let model = format!("{provider}/{}", self.model);
-                let mut options = json!({"model":model,"enabled_providers":[provider],"provider":{provider:{"npm":"@ai-sdk/openai","env":["EXETROUTER_TOKEN"],"options":{"baseURL":format!("{}/v1",self.url)},"models":{self.model:{"name":"Synthetic fixture","limit":{"context":128000,"output":8192},"options":{"store":false}}}}},"permission":{"*":"allow"}});
-                if self.client == "opencode-v1-bridge" {
-                    let plugin = Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("clients/opencode-v1/exetrouter.mjs");
-                    options["plugin"] = json!([format!("file://{}", plugin.display())]);
-                }
+                let options = json!({"model":model,"enabled_providers":[provider],"provider":{provider:{"npm":"@ai-sdk/openai","env":["EXETROUTER_TOKEN"],"options":{"baseURL":format!("{}/v1",self.url)},"models":{self.model:{"name":"Synthetic fixture","limit":{"context":128000,"output":8192},"options":{"store":false}}}}},"permission":{"*":"allow"}});
                 command
                     .env("XDG_CONFIG_HOME", &config)
                     .env("XDG_DATA_HOME", self.directory.join("data"))
@@ -183,22 +173,13 @@ impl Run<'_> {
                 command.arg(self.prompt);
             }
             "opencode" => {
-                let plugin = config.join("no-retries");
-                fs::create_dir_all(&plugin)?;
-                fs::write(
-                    plugin.join("package.json"),
-                    r#"{"type":"module","main":"index.js"}"#,
-                )?;
-                let bridge = Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("clients/opencode/exetrouter/index.js");
-                fs::write(plugin.join("index.js"),format!("import {{ writeFile }} from 'node:fs/promises';\nimport bridge from {};\nexport default {{ id: 'exetrouter-test-bridge', async setup(context) {{ const dispose = await bridge.setup(context); await writeFile({}, 'ready', {{mode:0o600}}); return dispose; }} }};\n",json!(format!("file://{}",bridge.display())),json!(marker)))?;
-                let model = format!("exetrouter/{}", self.model);
-                if !catalog["providers"]["exetrouter"]["models"].is_object() {
+                let model = format!("openai/{}", self.model);
+                if !catalog["providers"]["openai"]["models"].is_object() {
                     return Err("invalid OpenCode model catalog".into());
                 }
-                let mut options = json!({"model":model,"plugins":[plugin],"providers":{"exetrouter":{"name":"ExetRouter","canonical":"openai","package":"@opencode/ai/providers/openai/responses","env":["EXETROUTER_TOKEN"],"settings":{"baseURL":format!("{}/v1",self.url),"transport":if self.websocket {"websocket"} else {"http"},"store":false,"compaction":{"type":"native"}},"models":catalog["providers"]["exetrouter"]["models"]}}});
+                let mut options = json!({"model":model,"providers":{"openai":{"name":"ExetRouter","canonical":"openai","package":"@opencode/ai/providers/openai/responses","env":["EXETROUTER_TOKEN"],"settings":{"baseURL":format!("{}/v1",self.url),"transport":if self.websocket {"websocket"} else {"http"},"store":false,"compaction":{"type":"native"}},"models":catalog["providers"]["openai"]["models"]}}});
                 if let Some(policy) = policy {
-                    let window = options["providers"]["exetrouter"]["models"][self.model]["limit"]
+                    let window = options["providers"]["openai"]["models"][self.model]["limit"]
                         ["input"]
                         .as_u64()
                         .ok_or("OpenCode input limit unavailable")?;
@@ -237,9 +218,6 @@ impl Run<'_> {
         let output = tokio::time::timeout(Duration::from_secs(180), command.output())
             .await
             .map_err(|_| "native client timed out; inspect usage before another run")??;
-        if self.client == "opencode" && !marker.is_file() {
-            return Err("OpenCode test retry hook did not load".into());
-        }
         Ok(output)
     }
 }

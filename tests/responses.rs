@@ -571,8 +571,8 @@ async fn unsupported_public_state_and_named_lanes_fail_before_submission() {
 
 #[tokio::test]
 #[ignore = "requires the reviewed isolated Codex/OpenCode runtimes; no real upstream"]
-async fn current_clients_do_not_replay_submitted_ws_interruptions() {
-    for client in ["codex", "opencode"] {
+async fn codex_does_not_replay_submitted_ws_interruptions() {
+    for client in ["codex"] {
         let binary = std::env::var(if client == "codex" {
             "EXETROUTER_CODEX_BIN"
         } else {
@@ -3968,7 +3968,7 @@ async fn current_clients_complete_tool_cycles_over_http_and_websocket() {
         );
         fixture.stop().await;
     }
-    for (client, binary) in [("codex", &codex), ("opencode", &opencode)] {
+    for (client, binary) in [("codex", &codex)] {
         let fixture = Fixture::start(false).await;
         fixture.add_account(&["gpt-test"], false).await;
         *fixture.mock.mode.lock().unwrap() = "upstream_503".into();
@@ -4341,7 +4341,7 @@ async fn model_metadata_is_authenticated_persistent_and_conservative_across_acco
     )
     .await;
     assert_eq!(
-        open["providers"]["exetrouter"]["models"]["gpt-test"]["limit"],
+        open["providers"]["openai"]["models"]["gpt-test"]["limit"],
         json!({"context":32000,"input":30400,"output":0})
     );
     row["shell_type"] = json!("shell_command");
@@ -5041,95 +5041,4 @@ async fn check_opencode_v1_http(client: &str) {
         .all(|row| row["status"] == "completed"));
     println!("{client}: resumed session passed");
     fixture.stop().await;
-}
-
-#[tokio::test]
-#[ignore = "requires exact reviewed OpenCode V1 binary; measures synthetic error retries"]
-async fn opencode_v1_error_retry_probe() {
-    let binary = std::env::var("EXETROUTER_OPENCODE_V1_BIN").unwrap();
-    native::version(&binary, &native::reviewed_version("opencode-v1"))
-        .await
-        .unwrap();
-    for mode in ["upstream_503", "disconnect"] {
-        let fixture = Fixture::start(false).await;
-        fixture.add_account(&["gpt-test"], false).await;
-        *fixture.mock.mode.lock().unwrap() = mode.into();
-        for account in fixture.mock.accounts.lock().unwrap().values_mut() {
-            account.mode = mode.into();
-        }
-        let probe = probe::Probe::bounded(&fixture.url, 12).await.unwrap();
-        let run = native::Run {
-            binary: &binary,
-            client: "opencode-v1",
-            url: &probe.url,
-            model: "gpt-test",
-            bearer: &fixture.secret,
-            websocket: false,
-            directory: fixture.dir.path(),
-            prompt: "Run the local compatibility fixture and report the result.",
-        };
-        // execute bounds each child to 180 seconds; the proxy permits at most 12 submissions.
-        let output = run.execute().await.unwrap();
-        let metadata = probe.observed.lock().unwrap().metadata();
-        let diagnostic = native::diagnostic(&output.stdout);
-        println!("opencode-v1 mode={mode}: diagnostic={diagnostic} metadata={metadata}");
-        assert!(
-            metadata["primary_requests"].as_u64().unwrap() > 1,
-            "recorded V1 retry limitation changed; review compatibility evidence"
-        );
-        fixture.stop().await;
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires exact reviewed OpenCode V1 binary; synthetic upstream only"]
-async fn opencode_v1_bridge_http_compatibility_probe() {
-    check_opencode_v1_http("opencode-v1-bridge").await;
-}
-
-#[tokio::test]
-#[ignore = "requires exact reviewed OpenCode V1 binary; synthetic no-replay checks"]
-async fn opencode_v1_bridge_does_not_replay_failed_operations() {
-    let binary = std::env::var("EXETROUTER_OPENCODE_V1_BIN").unwrap();
-    native::version(&binary, &native::reviewed_version("opencode-v1"))
-        .await
-        .unwrap();
-    for mode in [
-        "upstream_503",
-        "early_close",
-        "disconnect",
-        "missing_terminal",
-    ] {
-        let fixture = Fixture::start(false).await;
-        fixture.add_account(&["gpt-test"], false).await;
-        *fixture.mock.mode.lock().unwrap() = mode.into();
-        for account in fixture.mock.accounts.lock().unwrap().values_mut() {
-            account.mode = mode.into();
-        }
-        let probe = probe::Probe::bounded(&fixture.url, 12).await.unwrap();
-        let output = native::Run {
-            binary: &binary,
-            client: "opencode-v1-bridge",
-            url: &probe.url,
-            model: "gpt-test",
-            bearer: &fixture.secret,
-            websocket: false,
-            directory: fixture.dir.path(),
-            prompt: "Run the local compatibility fixture and report the result.",
-        }
-        .execute()
-        .await
-        .unwrap();
-        let metadata = probe.observed.lock().unwrap().metadata();
-        println!(
-            "opencode-v1 bridge mode={mode}: diagnostic={} metadata={metadata}",
-            native::diagnostic(&output.stdout)
-        );
-        assert_eq!(metadata["primary_requests"], 1, "V1 bridge replayed {mode}");
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Automatic retries are disabled"));
-        // Partial text can already be visible when the terminal event is lost.
-        assert_eq!(native::diagnostic(&output.stdout)["error_events"], 1);
-        assert_eq!(metadata["terminal_usage_samples"], 0);
-        fixture.stop().await;
-    }
 }

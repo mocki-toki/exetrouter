@@ -2,7 +2,7 @@
 
 ## 0.2.1
 
-- Add a separate OpenCode V1 1.18.34 HTTP/SSE bridge with provider-scoped failure handling, bounded SSE parsing and deadlines. Verify tool/process continuation and one-submission behavior for synthetic server errors and interrupted streams; retain explicit live/compaction limitations.
+- Simplify OpenCode V1/V2 setup to the built-in OpenAI provider with a router endpoint and token; remove the custom client plugins and retain standard OpenCode retries.
 
 - Put Linux binary installation first in the README, followed by macOS Homebrew and source builds; give shared-server deployment its own section.
 

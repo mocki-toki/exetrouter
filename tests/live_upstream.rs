@@ -90,7 +90,7 @@ async fn live_catalog() {
         exetrouter::catalog::opencode(&models).expect("real catalog lacks OpenCode metadata");
     assert_eq!(codex["models"].as_array().unwrap().len(), models.len());
     assert_eq!(
-        opencode["providers"]["exetrouter"]["models"]
+        opencode["providers"]["openai"]["models"]
             .as_object()
             .unwrap()
             .len(),
