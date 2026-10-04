@@ -2,9 +2,9 @@
 
 Choose a role: **client** runs `exr` standalone or connects to an existing router; **server** hosts `exrd` and an OAuth pool. The supported systems are macOS and Linux (x86_64/ARM64). Windows/WSL gateway deployment is not verified. Never initialize or overwrite an existing state directory during an upgrade.
 
-## Existing server: client
+## Install the client
 
-You need the server's SSH host/port/user, your protected Ed25519 private key, operator key registration and an independently verified host-key fingerprint. The client defaults to localhost, port 2222 and user routercli; it does not select a third-party deployment.
+Install `exr` for either standalone use or an existing shared server.
 
 ### Homebrew on macOS
 
@@ -16,7 +16,7 @@ brew install mocki-toki/exetrouter/exr
 exr
 ```
 
-The formula installs only `exr`, supports Apple Silicon and Intel Macs, and does not modify connection settings, accounts or SSH. Update with `brew upgrade mocki-toki/exetrouter/exr`, then reopen the dashboard. The built-in updater detects Homebrew's receipt and directs you to Homebrew rather than replacing a managed binary.
+The formula installs only `exr` on Apple Silicon/Intel Macs. It preserves connection settings, accounts and SSH. Upgrade through Homebrew; see [updates](#updates).
 
 ### Release binaries on Linux or macOS
 
@@ -33,7 +33,7 @@ For a fixed reviewed version, replace `main` in the URL with its `vMAJOR.MINOR.P
 
 Linux release binaries may require a newer glibc than the target system provides. For older systems, use the locked source installation below; the Docker image builds against Debian 12. The installer checks that both selected binaries run before replacing anything.
 
-The installer detects OS/architecture, downloads the matching public GitHub release and verifies its SHA-256 checksum before extracting/installing. Default destination: `~/.local/bin`. It does not change shell profiles, SSH, system services or state. Add that directory to PATH if needed; no alias is required. `--prefix /your/root` changes the installation root; `--version v0.1.0` selects a specific release. Checksums establish release integrity, not independent trust in the publisher. The server role installs `exrd`; `--role both` installs both binaries.
+The installer selects the OS/architecture and verifies the release checksum before installation. It defaults to `~/.local/bin`; add it to `PATH` if needed. `--prefix /your/root` changes the root, `--version v0.1.0` pins a release, and `--role server`/`both` installs `exrd`/both binaries. Shell profiles, SSH, services and state stay unchanged. Checksums verify integrity, not independent publisher trust.
 
 ### Nix (Linux or macOS)
 
@@ -94,7 +94,7 @@ python3 scripts/check-publication.py
 
 ### Locked source build
 
-If no release exists yet, use Rust 1.88 or newer and a C compiler:
+To build from source, use Rust 1.88 or newer and a C compiler:
 
 ```sh
 cargo install --locked --git https://github.com/mocki-toki/exetrouter --bin exr
@@ -106,7 +106,17 @@ sh scripts/install.sh --from-source --role client
 
 Debian/Ubuntu build prerequisites: `sudo apt-get install build-essential pkg-config ca-certificates curl git`. macOS needs Xcode Command Line Tools (`xcode-select --install`). If Rust is missing, follow the [official Rust installation guide](https://www.rust-lang.org/tools/install); inspect any downloaded installer before executing it. You do not need Node, Python, OpenAI Platform keys or a SQLite server to run the client. Python is needed only for development/audit tooling.
 
-### Configure once
+## Standalone: no server or SSH
+
+Install only `exr`, run it in a terminal, choose Standalone in the first-run wizard, review the private state path/local port and save. In Settings press Enter and choose Add account to sign in through the browser. In Tokens create/copy a local API bearer. Use the endpoint shown in Settings; keep the TUI open or use `exr serve` in a foreground service.
+
+For scripted configuration: `exr configure --standalone`. Defaults are `~/.local/share/exr` (or `$XDG_DATA_HOME/exr`) and `127.0.0.1:8787`. `--state-dir PATH` and `--listen ADDRESS` override them. API listening is loopback only. Existing remote config remains valid; Settings can change modes. Account add/reauth and credit consumption still require human interaction.
+
+Opening `exr` while `exr serve` owns the profile attaches the dashboard to that API. Closing the attached dashboard leaves it running. Stop the headless API before changing its listen address.
+
+## Configure once
+
+For a shared server, obtain its SSH host/port/user, API URL, public host-key fingerprint and registration of your public Ed25519 key. Keep the private key on your device with owner-only permissions.
 
 ```sh
 ssh-add ~/.ssh/exetrouter_ed25519  # If your private key has a passphrase
@@ -114,7 +124,6 @@ exr configure --host api.example.com --port 2222 --ssh-user routercli \
   --identity ~/.ssh/exetrouter_ed25519
 exr doctor
 exr models
-exr limits
 exr
 ```
 
@@ -124,9 +133,9 @@ In your interactive desktop terminal run `exr token create --name laptop`; its s
 
 ## New server
 
-Install `exrd` using `sh scripts/install.sh --role server`, or build/install locked source with `--from-source --role server`. Server installation also requires systemd/OpenSSH and a TLS reverse proxy; follow the concrete [Debian/Ubuntu server guide](../deploy/README.md). Binary installation alone does not create users, initialize state, open ports or set up OAuth.
+Follow [Remote Server setup](remote-server.md) for Docker/native installation guides and the agent prompt. Both deployments require restricted OpenSSH management and reviewed TLS ingress. Binary installation alone does not initialize state, open ports or set up OAuth.
 
-The operator supplies ChatGPT OAuth using device login. Platform API keys are not a replacement. The human completes the login in their browser; neither a client nor an agent should ask for pasted OAuth tokens. Configure clients only after verifying the API/SSH boundary. Real inference consumes subscription quota; model discovery, limits and health checks do not generate inference.
+The account owner completes device login in their browser. Never ask for pasted OAuth tokens; Platform API keys are not a replacement. Verify API/SSH boundaries before onboarding clients. Model discovery, Doctor and health checks do not generate inference. Live Limits/Overview may trigger [weekly activation](cli.md#weekly-activation); include it in agent verification only when inference is authorized.
 
 ## Upgrade and rollback
 
@@ -134,25 +143,11 @@ Back up and verify private state with the documented [backup procedure](backup.m
 
 ## Agent installation
 
-Copy [the client prompt](../prompts/install-client.md) for an existing server, or [the server prompt](../prompts/install-server.md) for self-hosting. Fill in the connection/domain/public-key details before giving it to an agent. OAuth login and clipboard token issuance require the user's interaction. Install the bundled [exr skill](../skills/exr/SKILL.md) in your agent's local skills directory; it covers all management commands and mutation/secret handling.
-
-## Standalone: no server or SSH
-
-Install only `exr`, run it in a terminal, choose Standalone in the first-run wizard, review the private state path/local port and save. In Settings press Enter and choose Add account to sign in through the browser. In Tokens create/copy a local API bearer. Use the endpoint shown in Settings; keep the TUI open or use `exr serve` in a foreground service.
-
-For scripted configuration: `exr configure --standalone`. Defaults are `~/.local/share/exr` (or `$XDG_DATA_HOME/exr`) and `127.0.0.1:8787`. `--state-dir PATH` and `--listen ADDRESS` override them. API listening is loopback only. Existing remote config remains valid; Settings can change modes. Account add/reauth and credit consumption still require human interaction.
-
-## Docker server
-
-Follow [Docker Compose installation](../deploy/docker/README.md). It retains restricted host SSH and puts the API in an unprivileged container, with separate state/config/credential mounts. Use `docker compose exec exrd exrd admin ...` for operator commands. The host launcher is an optional compatibility convenience; the native restricted SSH gateway is a separate component. [Server command reference](server-cli.md) explains every operation.
-
-Install the separate server skill by copying `skills/exrd` into your agent's skill directory; `skills/exr` handles standalone/remote client use.
-
-Opening exr while exr serve is already running attaches the dashboard to that local profile; closing the attached dashboard does not stop the API. Stop the headless API before changing its listen address.
+Copy [the client prompt](../prompts/install-client.md) for an existing server, or [the server prompt](../prompts/install-server.md) for self-hosting. Fill in the connection/domain/public-key details before giving it to an agent. OAuth login and clipboard token issuance require the user's interaction. Install [exr](../skills/exr/SKILL.md) for client/standalone work, or [exrd](../skills/exrd/SKILL.md) for server operation.
 
 ## Updates
 
-`exr` checks the latest public GitHub release in the background when the dashboard opens. The top-right header shows the client version; an available update highlights **Settings ↑**. `v` checks again; Enter opens Settings actions, where Update exr opens the update confirmation. Your existing installation is updated in place; quit and reopen the dashboard afterward. Set `EXR_NO_UPDATE_CHECK=1` to disable the automatic metadata request. Checks send only an application user agent, with no router credentials, accounts or usage data.
+The dashboard highlights **Settings ↑** when a client update is available. Use its update action or the commands below, then reopen the dashboard. `EXR_NO_UPDATE_CHECK=1` disables automatic release checks, which send no router credentials, account or usage data. See [dashboard controls](cli.md#software-updates).
 
 ```sh
 exr update --check          # Read-only version check
@@ -162,10 +157,15 @@ exrd update --check         # Server operator: read-only check
 exrd update                 # Server operator: update the installed server
 ```
 
-Release installations reuse the checksummed binary installer and the existing prefix. Cargo installations are recognized through Cargo's package receipt and updated from the published tag using a locked source build; Rust and a C compiler are required for that method. Settings, account state, keys and tokens stay in their existing locations. Source builds can take several minutes. `update` never silently installs an older version.
+| Installation | Update method |
+| --- | --- |
+| Release in `PREFIX/bin` | `exr update` / `exrd update`: checksummed atomic replacement in the same prefix |
+| Cargo | Built-in update: locked source build of the published tag; requires Rust and a C compiler |
+| Homebrew | `brew upgrade mocki-toki/exetrouter/exr`; built-in update preserves Homebrew ownership |
+| Nix | Profile upgrade or flake update/rebuild, as [described above](#nix-linux-or-macos) |
+| Docker | [Compose update procedure](../deploy/docker/README.md#updates-with-compose), with snapshot/schema checks and a matching native gateway |
+| Other managed/custom path | The package manager or deployment method that installed it |
 
-On a Docker host, use the [Compose update procedure](../deploy/docker/README.md#updates-with-compose): verify a private snapshot, compare schema versions, select a published GHCR image, update the separate native gateway, and apply it with `docker compose pull` and `docker compose up -d --wait`. Official images starting with 0.2.0 support Linux AMD64/ARM64; the server does not need Rust or an on-host build. An optional root-owned `update-host` helper automates digest pinning, version/schema checks, backup and health rollback through the existing systemd Compose service. Existing `exrd-host` launchers may keep `exrd update` as a convenience. Install the reviewed new helpers once when migrating older source-building helpers. No Docker access is granted to the restricted SSH gateway.
+Settings, state, keys and tokens stay in place. Built-in update never silently downgrades. For older binaries without `update`, rerun the reviewed installer with the same prefix. A remote client's Settings updates only its `exr`; native servers need the normal service restart after replacement.
 
-Native `exrd update` atomically replaces a standard `PREFIX/bin/exrd` installation; restart your native service afterward, using the deployment's normal backup/restart procedure. For a binary in a custom managed path, use the same installer/deployment method that placed it there. Homebrew installations use `brew upgrade mocki-toki/exetrouter/exr`; the built-in updater preserves that ownership. Other package-manager-controlled installations should be upgraded through their package manager.
-
-For an older binary without `update`, run the reviewed installer again with the **same prefix**. A shared-server client's Settings updates its own `exr`, not the operator's server.
+Docker's optional `update-host` helper automates digest pinning, backup/schema checks and health rollback. Review/install the new helpers once when migrating older source-building installations; preserve custom Compose files and keep Docker access away from the restricted gateway.

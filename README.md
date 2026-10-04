@@ -10,15 +10,15 @@
        width="680">
 </p>
 
-Turn your **ChatGPT Plus or Pro subscription into a shared OpenAI-compatible endpoint** for friends, BYOK tools and scripts. Give each person or service their own router token, keep your ChatGPT login private, and see usage grouped by user in the terminal dashboard. Run it locally for your own tools or host it on a server you control.
+Use your **ChatGPT Plus or Pro subscriptions through one OpenAI-compatible endpoint** for friends, BYOK tools and scripts. Sign in through OAuth, give each person or service a router token, and track usage in the terminal dashboard. Run it locally or on your own server.
 
-Codex CLI already supports ChatGPT subscriptions directly. ExetRouter adds a common endpoint for multiple people and tools, separate access tokens and shared account-pool management. Sign in to upstream accounts once through OAuth; clients receive router tokens instead of your ChatGPT credentials. Supported requests use the subscriptions' available limits rather than a separately billed OpenAI Platform API key.
+Codex CLI can use ChatGPT directly. ExetRouter adds shared access, separate tokens and an account pool. Supported requests consume subscription limits; clients do not receive your ChatGPT credentials.
 
 ## How it works
 
 - **`exr`** opens the terminal dashboard: accounts, tokens, usage, subscription limits and settings. Choose **Standalone** and add an OAuth account for personal use — no server or SSH setup required.
 - **`exr serve`** keeps the standalone API running without a dashboard.
-- **`exrd`** (optional) runs a shared server, with Docker or native deployment. Friends configure `exr` once to connect over restricted SSH; private SSH keys stay on their devices.
+- **`exrd`** (optional) runs a shared server, with Docker or native deployment. Friends connect with `exr` over restricted SSH. See [Remote Server setup](docs/remote-server.md) for installation guides and an agent prompt.
 
 ## Install
 
@@ -68,15 +68,6 @@ cargo install --locked --git https://github.com/mocki-toki/exetrouter --bin exr
 exr
 ```
 
-## Remote Server
-
-Run `exrd` on a server to share your ChatGPT account pool with friends, tools and services. Each person gets their own access and tokens; OAuth accounts stay on the server. Users install `exr` on their devices and choose **Remote Server** in the first-run wizard. The dashboard connects over restricted SSH, while applications use the shared HTTPS API endpoint.
-
-Choose a server installation:
-
-- [Docker Compose](deploy/docker/README.md)
-- [Native server](deploy/README.md)
-
 ## Usage
 
 ### Set up ExetRouter
@@ -84,9 +75,9 @@ Choose a server installation:
 Run `exr`. On the first launch, the wizard asks how you want to use it:
 
 - **Standalone:** manage your own accounts and run the API on this computer. Open **Settings**, add an account and complete the OAuth sign-in in your browser. The default API endpoint is `http://127.0.0.1:8787/v1`; Settings shows the actual address. Keep the dashboard open, or use `exr serve` for a headless API.
-- **Remote Server:** connect to an existing shared server. Enter the SSH host, port, username and private-key path in the wizard. Ask the operator to register your public key, provide a verified SSH host key and give you the HTTPS API endpoint. SSH is for the dashboard; Codex, OpenCode and SDKs use the API endpoint.
+- **Remote Server:** connect to an existing shared server. Enter the SSH host, port, username, private-key path and HTTP API URL in the wizard. Ask the operator to register your public key, provide a verified SSH host key and give you the HTTPS API endpoint. SSH is for the dashboard; Codex, OpenCode and SDKs use the API endpoint.
 
-You can change mode or connection later in **Settings**. No shell alias or connection flags are needed.
+You can change mode or connection later in **Settings**.
 
 In **Tokens**, create a token for the tool you want to connect. Its secret is copied directly to your clipboard. You need the **API endpoint and router token** to connect. For tools that ask for a model ID, choose one in **Models** and press Enter to copy it; Codex can select a model interactively.
 
@@ -103,66 +94,45 @@ Use `http://127.0.0.1:8787/v1` for the default standalone setup. For remote acce
 
 ### Codex CLI
 
-Use Codex CLI **0.160.0 or newer**. Create `~/.codex/exetrouter.config.toml` with the following settings. Profiles use separate files; do not put this inside a `[profiles.exetrouter]` table in `config.toml`.
-
-```toml
-model_provider = "exetrouter"
-
-[features]
-api_key_model_discovery = true
-
-[model_providers.exetrouter]
-name = "OpenAI"
-base_url = "https://api.example.com/v1"
-model_catalog_url = "https://api.example.com/v1/models/codex"
-wire_api = "responses"
-env_key = "EXETROUTER_TOKEN"
-supports_websockets = true
-request_max_retries = 0
-stream_max_retries = 0
-```
-
-Replace both URLs with your router's address. For standalone use, they are `http://127.0.0.1:8787/v1` and `http://127.0.0.1:8787/v1/models/codex`.
-
-Start `codex --profile exetrouter` from the terminal where the token is available. Codex fetches model IDs and metadata from the router; no catalog export or fixed `model` setting is needed. It inherits your existing model preference, or chooses a catalog default if none is configured. Use `/model` to choose another model available in your pool. Keep the provider name `OpenAI` for native compaction. Automatic catalog discovery is an opt-in Codex feature, marked under development in 0.160.0.
+Use Codex CLI 0.160.0 or newer. Follow the [Codex profile setup](docs/compatibility.md#codex-cli), then launch `codex --profile exetrouter`. The profile discovers models from your router; `/model` lets you choose one. Discovery is opt-in and marked under development in 0.160.0.
 
 ### OpenCode
 
-Use ExetRouter as your OpenAI endpoint. No additional plugin is needed.
+Check `opencode --version` and export the matching configuration. The export uses the API URL saved during setup.
 
-Run `opencode --version` and use the export format for your installed major version. Set `EXETROUTER_TOKEN` to your router token in the launching environment. The generated configuration keeps an environment reference, never the token itself. Standalone exports use the running/configured local API address automatically. For a remote connection, save the operator’s public HTTP API URL once (it may differ from the SSH host):
+For V1 (`opencode-ai`):
 
-```sh
-exr configure --api-url https://api.example.com/v1
-```
-
-Exports reuse this setting; `--base-url URL` is an optional override for a single export. In standalone mode keep `exr` or `exr serve` running while OpenCode uses its API.
-
-#### V1 (opencode-ai)
+Create the configuration:
 
 ```sh
-exr models --json --format opencode-v1-json > exetrouter-v1.json &&
-  OPENCODE_CONFIG="$PWD/exetrouter-v1.json" opencode --model exetrouter/gpt-5.6-sol
+exr models --json --format opencode-v1-json > exetrouter-v1.json
 ```
 
-The export defines `provider.exetrouter` with `"npm": "@ai-sdk/openai"`, `"name": "ExetRouter"`, connection options and models extracted from your account pool. Model limits, modalities, options and reasoning variants use V1's native configuration format.
-
-#### V2 (@opencode/cli)
+Then start OpenCode:
 
 ```sh
-exr models --json --format opencode-v2-json --model exetrouter/gpt-5.6-sol > exetrouter-v2.json &&
-  OPENCODE_CONFIG="$PWD/exetrouter-v2.json" opencode --standalone
+OPENCODE_CONFIG="$PWD/exetrouter-v1.json" opencode --model exetrouter/gpt-5.6-sol
 ```
 
-The export defines `providers.exetrouter` with `"name": "ExetRouter"`, package `@opencode/ai/providers/openai/responses`, the token environment variable, connection settings and models extracted from your account pool. It uses WebSocket transport, `store=false` and native compaction. `--standalone` starts a private OpenCode server with the fresh configuration instead of reusing an existing background server. For HTTP/SSE, change `providers.exetrouter.settings.transport` to `http`. Model capabilities, settings and reasoning variants use V2's native format.
+For V2 (`@opencode/cli`):
 
-Both commands query ExetRouter before launching OpenCode and import the generated file through OpenCode's native `OPENCODE_CONFIG` setting. `exetrouter/gpt-5.6-sol` means provider `exetrouter`, model ID `gpt-5.6-sol`. The examples select this model: V1 through the launch flag, V2 through the exported configuration. It must be available in `exr models`; exporting with `--model` rejects an unavailable ID. Choose a different imported model through `/models`.
+Create the configuration:
 
-Without a model override, OpenCode keeps its own selection rules. V1 uses a configured model, then an available recent model, then its default ranking. V2 uses a configured/default model, otherwise an available catalog model; the interactive client applies its own selection preferences. Neither mode guarantees ExetRouter will be selected if other providers are available. Omitting the exporter’s `--model` leaves the exported config’s `model` unset. V2 also accepts `opencode run --standalone --model exetrouter/gpt-5.6-sol` for a noninteractive run.
+```sh
+exr models --json --format opencode-v2-json --model exetrouter/gpt-5.6-sol > exetrouter-v2.json
+```
 
-The dedicated `exetrouter` provider gets its model list and metadata from the extractor, without inheriting OpenCode's bundled OpenAI catalog. Other providers and unrelated settings can stay in your regular OpenCode configuration; keep the `exetrouter` definition in the generated file so older local model entries do not merge into it. Run the matching export again before each launch to refresh pool/catalog changes. No conversion script or plugin is required. OpenCode retains its standard retry policy. See [example output for every format](docs/model-export-examples.md).
+Then start OpenCode:
 
-See [configuration verification](docs/compatibility.md#opencode-model-import).
+```sh
+OPENCODE_CONFIG="$PWD/exetrouter-v2.json" opencode --standalone
+```
+
+Run from the configuration file’s directory, or use its absolute path in `OPENCODE_CONFIG`.
+
+The example model must appear in `exr models`; replace it if needed. Both configurations read the token from `EXETROUTER_TOKEN` at launch and import your pool's models under **ExetRouter**. Standalone exports use the local API address; keep `exr` or `exr serve` running. Regenerate the configuration after account-pool or model changes.
+
+V2 defaults to WebSocket and native compaction; `--standalone` starts a private OpenCode server with the fresh configuration. OpenCode keeps its standard retry policy. See [OpenCode setup](docs/compatibility.md#opencode-setup) for transport options, configuration merging and verification scope. No plugin is required.
 
 ### OpenAI SDKs and other BYOK tools
 
@@ -209,25 +179,18 @@ Retries are disabled because a generation may have run even if its response was 
 
 ## Privacy and scope
 
-- The router does **not log or store prompts, messages, outputs, tool arguments/results, authorization headers or request/response bodies**. Operational logs contain fixed events, generated IDs, statuses and timing; usage stores model IDs and numeric counters. Context bindings store keyed digests, not conversation content. See [privacy details](SECURITY.md).
-- A proxy necessarily processes content in memory. This is not end-to-end encryption against an operator who controls the host or can replace its software. The project provides no conversation-history or payload-inspection admin feature.
-- Upstream uses ChatGPT Codex OAuth. OpenAI Platform API keys are not upstream credentials. BYOK applications can use a router bearer and your deployment's custom endpoint within the supported API contract.
-- Opaque context and open WebSockets stay on their originating account. The router never silently migrates an existing conversation or retries a possibly submitted inference request.
-- Management uses restricted SSH and an authenticated Unix socket; there is no public HTTP admin endpoint. Resource concurrency protects the process; per-minute/IP quotas are not imposed.
-- Compatibility is not an official guarantee of backend stability or permission to share subscriptions. Operators are responsible for their provider agreements.
+- The router never logs or stores prompts, messages, outputs, tool payloads, authorization headers or request/response bodies. It retains usage counters, operational metadata and keyed context digests. See [security and privacy](SECURITY.md).
+- Content passes through server memory. A host operator can inspect memory or replace the software; this is not end-to-end encryption against that operator.
+- Supported calls use ChatGPT Codex OAuth, not upstream Platform API keys. See the [API contract](docs/openai-api.md) for endpoints and limits.
+- Conversations normally stay on their originating account. [Quota failover](docs/account-pool.md#failure-behavior) requires complete current context. Accepted or ambiguous generations are never replayed.
+- Management uses restricted SSH and an authenticated Unix socket. There is no public HTTP admin API or per-minute/IP quota.
+- Backend compatibility does not establish permission to share subscriptions. Operators remain responsible for their provider agreements.
 
-## Develop
+## Documentation and development
 
-```sh
-cargo test --locked
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-python3 scripts/check-publication.py
-```
+[Installation](docs/installation.md) · [Client CLI/TUI](docs/cli.md) · [Server CLI](docs/server-cli.md) · [Client setup and compatibility](docs/compatibility.md) · [API contract](docs/openai-api.md) · [Account pool](docs/account-pool.md) · [Backup](docs/backup.md)
 
-Ordinary tests are offline and use synthetic fixtures. Live tests are explicitly opt-in; they spend subscription quota and must not run in CI. The separate [exr skill](skills/exr/SKILL.md) and [exrd skill](skills/exrd/SKILL.md) document client/standalone and server operation. See [contributing](CONTRIBUTING.md) and [the roadmap](docs/development-plan.md).
-
-[Client CLI/TUI](docs/cli.md) · [Server CLI](docs/server-cli.md) · [API contract](docs/openai-api.md) · [Client compatibility](docs/compatibility.md) · [Architecture](docs/architecture.md) · [Model metadata](docs/model-catalog.md) · [Account pool](docs/account-pool.md) · [Backup](docs/backup.md) · [Upstream contract](docs/upstream-contract.md)
+For development, see [contributing](CONTRIBUTING.md), [architecture](docs/architecture.md) and [remaining work](docs/development-plan.md). Ordinary tests are offline; [live tests](docs/live-testing.md) require explicit authorization and spend subscription quota. Bundled agent instructions are separate for [exr](skills/exr/SKILL.md) and [exrd](skills/exrd/SKILL.md).
 
 ## License
 
