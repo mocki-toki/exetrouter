@@ -1,4 +1,6 @@
 /target/
+/result
+/result-*
 /.local-state/
 /.env
 /.env.*

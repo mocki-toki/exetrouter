@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-ROOT_FILES = {"AGENTS.md", "CLAUDE.md", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md", ".gitignore", ".dockerignore"}
+ROOT_FILES = {"AGENTS.md", "CLAUDE.md", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md", ".gitignore", ".dockerignore", "flake.nix", "flake.lock"}
 SOURCE_DIRS = {"src", "tests", "docs", "deploy", "scripts", "skills", "prompts", ".github", "Formula"}
 SECRET_PATTERNS = [
     re.compile(r"\bexr_tok_[0-9a-f]{16}_[0-9a-f]{64}\b"),

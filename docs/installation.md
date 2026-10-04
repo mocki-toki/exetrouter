@@ -35,6 +35,63 @@ Linux release binaries may require a newer glibc than the target system provides
 
 The installer detects OS/architecture, downloads the matching public GitHub release and verifies its SHA-256 checksum before extracting/installing. Default destination: `~/.local/bin`. It does not change shell profiles, SSH, system services or state. Add that directory to PATH if needed; no alias is required. `--prefix /your/root` changes the installation root; `--version v0.1.0` selects a specific release. Checksums establish release integrity, not independent trust in the publisher. The server role installs `exrd`; `--role both` installs both binaries.
 
+### Nix (Linux or macOS)
+
+Enable Nix's `nix-command` and `flakes` experimental features. The flake builds from source using the committed `Cargo.lock` and pins the compiler/build dependencies in `flake.lock`. It exports `packages.<system>.exetrouter` (also `default`), apps for `exr` (also `default`) and `exrd`, a package check and a development shell. Outputs are provided for x86_64/ARM64 Linux and Apple Silicon macOS.
+
+Try the CLI without installing it, or add both binaries to your user profile:
+
+```sh
+nix run github:mocki-toki/exetrouter -- --help
+nix run github:mocki-toki/exetrouter#exrd -- --help
+nix profile add github:mocki-toki/exetrouter#exetrouter
+exr --version
+exrd --version
+```
+
+These commands follow the repository's default branch. For a reproducible installation, replace `github:mocki-toki/exetrouter` with `github:mocki-toki/exetrouter/COMMIT_SHA`, using a reviewed commit that contains the flake. Older release tags without a flake cannot be used with these commands. The first source build can take several minutes; no separate Rust installation is needed.
+
+To build and check a reviewed local checkout without installing it:
+
+```sh
+nix build .#exetrouter
+./result/bin/exr --version
+./result/bin/exrd --version
+nix flake check
+```
+
+The package check builds the package; it does not run the Rust test suite. Tests are disabled in the build sandbox because upstream CLI fixtures assume host timezone data. Run the standard tests separately in the development shell below; live tests stay opt-in. The client wrapper supplies OpenSSH and, on Linux, `wl-copy` and `xclip` for desktop clipboard operations. Clipboard access still requires a running desktop session. On macOS, the client uses the system `pbcopy`.
+
+For declarative installation, add this input to your NixOS or Home Manager flake:
+
+```nix
+inputs.exetrouter.url = "github:mocki-toki/exetrouter";
+```
+
+Pass `inputs` into your configuration module (for example with NixOS `specialArgs = { inherit inputs; };` or Home Manager `extraSpecialArgs = { inherit inputs; };`), then choose the appropriate package list:
+
+```nix
+{ inputs, pkgs, ... }: {
+  environment.systemPackages = [
+    inputs.exetrouter.packages.${pkgs.stdenv.hostPlatform.system}.exetrouter
+  ];
+}
+```
+
+For Home Manager, use `home.packages` instead of `environment.systemPackages`. Keep the input's own pinned nixpkgs for its toolchain. Commit your configuration's lock file, then rebuild with your usual NixOS/Home Manager command. Installing the package does not initialize state, configure accounts, create services or open ports. For personal use run `exr configure --standalone`, then `exr` or `exr serve`; shared-server deployment still requires the setup described below.
+
+Upgrade profile installations using `nix profile list` to find the entry's name, followed by `nix profile upgrade NAME`. A commit-pinned profile must be replaced with the newly reviewed revision. For declarative installations, run `nix flake update exetrouter` in your configuration repository and rebuild. Use Nix to upgrade, rather than `exr update` or `exrd update`: the Nix store is immutable. Existing user configuration, account state and credentials stay outside the store and are preserved. Restart the dashboard/service after upgrading; review state-schema compatibility before rolling back.
+
+For development and the repository's standard checks:
+
+```sh
+nix develop
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+python3 scripts/check-publication.py
+```
+
 ### Locked source build
 
 If no release exists yet, use Rust 1.88 or newer and a C compiler:
