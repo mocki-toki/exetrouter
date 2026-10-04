@@ -68,6 +68,15 @@ enum Modal {
         title: &'static str,
         message: String,
     },
+    Routing {
+        account: i64,
+        fields: Vec<TextInput>,
+        selected: usize,
+        error: String,
+        summary: String,
+        priority_only: bool,
+        locked: bool,
+    },
     UpdateConfirm,
     Name(String),
     Days {
@@ -498,15 +507,12 @@ fn action_menu(state: &State, connection: &Connection) -> (String, Vec<(String, 
                 vec![("Review reset credit".into(), KeyCode::Char('c'))]
             };
             if row["preference"]["locked"].as_bool() != Some(true) {
-                entries.push((
-                    if row["preference"]["priority"].as_i64().unwrap_or(0) > 0 {
-                        "Remove priority"
-                    } else {
-                        "Prioritize account"
-                    }
-                    .into(),
-                    KeyCode::Char('P'),
-                ));
+                if state.values[OVERVIEW]
+                    .as_ref()
+                    .is_some_and(|v| v["capabilities"]["account_routing_rules"] == 1)
+                {
+                    entries.push(("Set priority".into(), KeyCode::Char('P')));
+                }
                 entries.push((
                     if row["preference"]["enabled"].as_bool() == Some(false) {
                         "Activate for me"
@@ -517,6 +523,7 @@ fn action_menu(state: &State, connection: &Connection) -> (String, Vec<(String, 
                     KeyCode::Char('D'),
                 ));
             }
+            entries.push(("Switching rules".into(), KeyCode::Char('S')));
             return (
                 format!(
                     "{}{}",
@@ -663,6 +670,7 @@ fn account_ranges(value: &Value, width: u16) -> Vec<(u16, u16)> {
                     chrono::Utc::now().timestamp(),
                 )) + u16::from(account["refresh_error"].is_string())
                     + u16::from(render::weekly_activation(account).is_some())
+                    + u16::from(account["preference"]["rules"].is_object())
                     + if windows.is_empty() {
                         1
                     } else {
@@ -849,6 +857,17 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
         _ => keys(&[("↑ / ↓", "scroll"), ("PgUp / PgDn", "page")]),
     });
 
+    if let Some(Modal::Routing { locked, .. }) = &state.modal {
+        footer = vec![keys(if *locked {
+            &[("Esc / Enter", "close")]
+        } else {
+            &[
+                ("Tab / ↑ / ↓", "field"),
+                ("Enter", "save"),
+                ("Esc", "cancel"),
+            ]
+        })];
+    }
     frame.render_widget(
         Paragraph::new(footer).block(Block::default().padding(Padding::horizontal(2))),
         chunks[2],
@@ -857,6 +876,11 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
         let (title,text) = match modal {
             Modal::Actions { title, entries, selected } => (title.as_str(), format!("{}\n\n↑ / ↓: select   Enter: choose   Esc: close",entries.iter().enumerate().map(|(i,(name,_))|format!("{}{}",if i==*selected {"▶ "}else{"  "},name)).collect::<Vec<_>>().join("\n"))),
             Modal::Error { title, message } => (*title, format!("{message}\n\nEnter / Esc: close")),
+            Modal::Routing { fields, selected, error, summary, priority_only, locked, .. } => {
+                let labels = if *priority_only { vec!["Priority (-255..255 / default)"] } else { vec!["Priority (-255..255 / default)", "All windows (0..100 / off / default)", "Short window (0..100 / off / default)", "Weekly window (0..100 / off / default)"] };
+                let form = labels.iter().zip(fields).enumerate().map(|(i,(label,field))|format!("{}{}: {}",if i == *selected { "▶ " } else { "  " },label,field.value)).collect::<Vec<_>>().join("\n");
+                (if *priority_only { "Set priority" } else { "Switching rules" }, if *locked { format!("{summary}\n\nLocked by server operator") } else { format!("{form}\n\n{summary}\n\nDefault inherits operator settings. Thresholds are soft.\n{error}") })
+            },
             Modal::UpdateConfirm => ("Update exr", "Install the latest published release in the existing installation?\nThe installation method is preserved; config, accounts and tokens stay in place.\nSource builds may take several minutes. Restart exr after completion.\n\nEnter: update   Esc: cancel.".into()),
             Modal::Name(text) => ("Create token",format!("Token name: {text}\n\nEnter: next   Esc: cancel")),
             Modal::Days { name,text } => ("Create token",format!("Name: {name}\nExpires in days (1–365): {text}\n\nEnter: create   Esc: cancel")),
@@ -865,7 +889,11 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
             Modal::ResetConfirm(value) => ("Use reset credit?",format!("{}\n\ny: use one credit   Esc / n: cancel",render::reset_confirmation(value))),
             Modal::Help => ("Keyboard help", keyboard_help(state, connection)),
         };
-        let area = popup(frame.area());
+        let mut area = popup(frame.area());
+        if matches!(modal, Modal::Routing { .. }) {
+            area.height = area.height.min(chunks[2].y);
+            area.y = area.y.min(chunks[2].y.saturating_sub(area.height));
+        }
         frame.render_widget(Clear, area);
         let error = matches!(modal, Modal::Error { .. });
         let mut title = title_line(title);
@@ -887,6 +915,27 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
                 ),
             area,
         );
+        if let Modal::Routing {
+            fields,
+            selected,
+            locked: false,
+            ..
+        } = modal
+        {
+            let labels = [
+                "Priority (-255..255 / default)",
+                "All windows (0..100 / off / default)",
+                "Short window (0..100 / off / default)",
+                "Weekly window (0..100 / off / default)",
+            ];
+            let field = &fields[*selected];
+            let offset = Line::from(&field.value[..field.cursor]).width() as u16;
+            let column = area.x + 1 + 4 + labels[*selected].len() as u16 + offset;
+            frame.set_cursor_position((
+                column.min(area.right().saturating_sub(2)),
+                area.y + 1 + *selected as u16,
+            ));
+        }
     }
 }
 
@@ -1016,18 +1065,16 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
     }
     for (index, account) in accounts.into_iter().enumerate() {
         let label = format!(
-            "{}{}{}{}",
+            "{}{} · Priority {}{}",
             render::safe(account["label"].as_str().unwrap_or("Account")),
             if account["preference"]["enabled"].as_bool() == Some(false) {
                 " · Deactivated"
             } else {
                 ""
             },
-            if account["preference"]["priority"].as_i64().unwrap_or(0) > 0 {
-                " · Prioritized"
-            } else {
-                ""
-            },
+            account["preference"]["priority"]
+                .as_i64()
+                .map_or("unknown".into(), |n| n.to_string()),
             if account["preference"]["locked"].as_bool() == Some(true) {
                 " · Locked"
             } else {
@@ -1063,6 +1110,20 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
         }
         y += 1;
         for line in [
+            account["preference"]["rules"].is_object().then(|| {
+                Line::styled(
+                    format!(
+                        "{}{}",
+                        crate::account_preferences::compact_rules(&account["preference"]),
+                        if account["threshold_reached"] == true {
+                            " · Reached"
+                        } else {
+                            ""
+                        }
+                    ),
+                    Style::default().fg(Color::Gray),
+                )
+            }),
             expiring.then(|| credit_warning(&account)),
             render::weekly_activation(&account)
                 .map(|text| Line::styled(text, Style::default().fg(Color::Gray))),
@@ -1406,7 +1467,7 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
 }
 fn keyboard_help(state: &State, connection: &Connection) -> String {
     let actions = match state.tab {
-        OVERVIEW => "↑/↓: select account\nPgUp/PgDn: page\nEnter: account actions\nc: review reset credit (≤5% remaining)\nP: toggle priority; D: toggle activation\nOperator locks apply; reset credits require confirmation.",
+        OVERVIEW => "↑/↓: select account\nPgUp/PgDn: page\nEnter: account actions\nc: review reset credit (≤5% remaining)\nP: set numeric priority; S: switching rules; D: toggle activation\nOperator locks apply; reset credits require confirmation.",
         USAGE if state.group == 0 => "p: change period\nb: change grouping\nm: switch tokens / requests",
         USAGE => "↑/↓: select user, model or token with recorded usage\np: change period\nb: change grouping\nm: switch tokens / requests",
         TOKENS => "↑/↓: select token\nEnter: token actions\nn: create; o: rotate; x: revoke\nRotation and revocation require confirmation.",
@@ -1640,6 +1701,25 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                         state.modal = None;
                     }
                 }
+                Modal::Routing { account, fields, selected, error, priority_only, locked, .. } => {
+                    if *locked {
+                        if matches!(key.code,KeyCode::Esc|KeyCode::Enter) { state.modal = None; }
+                    } else {
+                        match key.code {
+                            KeyCode::Esc => state.modal = None,
+                            KeyCode::Tab | KeyCode::Down => *selected = (*selected + 1) % fields.len(),
+                            KeyCode::BackTab | KeyCode::Up => *selected = (*selected + fields.len() - 1) % fields.len(),
+                            KeyCode::Enter => match routing_form(fields,*priority_only) {
+                                Ok(routing) => { mutation = Some(ControlRequest::AccountSet { account:*account, enabled:None, priority:None, routing:Some(routing) }); state.modal = None; },
+                                Err(message) => *error = message.to_string(),
+                            },
+                            _ => {
+                                if !matches!(key.code,KeyCode::Char(_)) || fields[*selected].value.len() < 16 || key.modifiers.contains(KeyModifiers::CONTROL) { fields[*selected].edit(key); }
+                                error.clear();
+                            },
+                        }
+                    }
+                },
                 Modal::UpdateConfirm => match key.code {
                     KeyCode::Esc | KeyCode::Char('n') => state.modal = None,
                     KeyCode::Enter | KeyCode::Char('y') => {
@@ -1879,13 +1959,25 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     let (title, entries)=action_menu(&state,&args.connection);
                     if entries.is_empty() { state.modal=Some(Modal::Error{title:"Account unavailable",message:format!("{title}\n\nThis account is deactivated and locked by the server operator.")}); } else { state.modal=Some(Modal::Actions{title,entries,selected:0}); }
                 }
-                KeyCode::Char('P' | 'D') if state.tab == OVERVIEW => {
+                KeyCode::Char('P' | 'S') if state.tab == OVERVIEW => {
+                    if state.values[OVERVIEW].as_ref().is_none_or(|v| v["capabilities"]["account_routing_rules"] != 1) {
+                        state.modal = Some(Modal::Error { title: "Server update required", message: "Account routing rules require an updated server and SSH gateway.".into() });
+                    } else if let Some(row) = state.values[OVERVIEW].as_ref().and_then(|v|v["quota_accounts"].as_array()).and_then(|rows|rows.get(state.account_selected)) {
+                        if let Some(account) = row["id"].as_i64() {
+                            let preference = &row["preference"];
+                            let priority_only = key.code == KeyCode::Char('P');
+                            let names = if priority_only { vec!["priority"] } else { vec!["priority","switch_at","switch_at_short","switch_at_weekly"] };
+                            let fields = names.iter().map(|name| TextInput::new(preference["settings"][*name].as_i64().map(|n|n.to_string()).or_else(||preference["settings"][*name].as_str().map(str::to_owned)).unwrap_or("default".into()))).collect();
+                            state.modal = Some(Modal::Routing { account, fields, selected:0, error:String::new(), summary:format!("Effective priority: {}\n{}", preference["priority"],crate::account_preferences::describe(preference)), priority_only, locked:preference["locked"] == true });
+                        }
+                    }
+                }
+                KeyCode::Char('D') if state.tab == OVERVIEW => {
                     if let Some(row)=state.values[OVERVIEW].as_ref().and_then(|v|v["quota_accounts"].as_array()).and_then(|r|r.get(state.account_selected)) {
-                        if let Some(account)=row["id"].as_i64() {
-                            let preference=&row["preference"];
-                            mutation=Some(ControlRequest::AccountSet{account,
-                                enabled: (key.code==KeyCode::Char('D')).then(|| !preference["enabled"].as_bool().unwrap_or(true)),
-                                routing: None, priority: (key.code==KeyCode::Char('P')).then(|| if preference["priority"].as_i64().unwrap_or(0)>0 {0}else{1})});
+                        if row["preference"]["locked"] == true {
+                            state.modal = Some(Modal::Error {title:"Account settings locked",message:"Account settings are locked by the server operator.".into()});
+                        } else if let Some(account)=row["id"].as_i64() {
+                            mutation=Some(ControlRequest::AccountSet{account, enabled:Some(!row["preference"]["enabled"].as_bool().unwrap_or(true)), priority:None,routing:None});
                         }
                     }
                 }
@@ -2104,6 +2196,23 @@ pub(super) async fn setup(connection: &mut Connection, path: &std::path::Path) -
 fn setup_cancelled(key: KeyEvent) -> bool {
     key.code == KeyCode::Esc
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+fn routing_form(
+    fields: &[TextInput],
+    priority_only: bool,
+) -> Result<crate::account_preferences::RoutingArgs> {
+    use crate::account_preferences::{RoutingArgs, Setting};
+    let parse =
+        |i: usize| -> Result<Option<Setting>> { Ok(Some(fields[i].value.parse::<Setting>()?)) };
+    let routing = RoutingArgs {
+        priority: parse(0)?,
+        switch_at: if priority_only { None } else { parse(1)? },
+        switch_at_short: if priority_only { None } else { parse(2)? },
+        switch_at_weekly: if priority_only { None } else { parse(3)? },
+    };
+    routing.validate()?;
+    Ok(routing)
 }
 
 struct TextInput {
@@ -2404,6 +2513,63 @@ fn reset_screen(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    #[test]
+    fn routing_dialog_shows_all_fields_error_controls_and_cursor_on_minimum_terminal() {
+        let mut terminal = Terminal::new(TestBackend::new(72, 20)).unwrap();
+        let preference =
+            serde_json::to_value(crate::account_preferences::Preference::default()).unwrap();
+        let state = State {
+            modal: Some(Modal::Routing {
+                account: 1,
+                fields: ["1", "20", "off", "15"]
+                    .map(|text| TextInput::new(text.into()))
+                    .into(),
+                selected: 3,
+                error: "Switching threshold must be between 0 and 100, off or default".into(),
+                summary: format!(
+                    "Effective priority: 1\n{}",
+                    crate::account_preferences::describe(&preference)
+                ),
+                priority_only: false,
+                locked: false,
+            }),
+            ..Default::default()
+        };
+        terminal
+            .draw(|frame| render(frame, &state, &Connection::default(), false))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for expected in [
+            "All windows",
+            "Short window",
+            "Weekly window",
+            "between 0 and 100",
+            "Tab / ↑ / ↓",
+            "Enter: save",
+            "Esc: cancel",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        assert!(terminal.backend().cursor_visible());
+    }
+    #[test]
+    fn routing_form_preserves_off_and_default_and_rejects_invalid_input() {
+        let fields = ["-255", "20", "off", "default"].map(|text| TextInput::new(text.into()));
+        let patch = routing_form(&fields, false).unwrap();
+        assert_eq!(
+            serde_json::to_value(patch).unwrap(),
+            serde_json::json!({"priority":-255,"switch_at":20,"switch_at_short":"off","switch_at_weekly":"default"})
+        );
+        for invalid in ["256", "-256", "off", "1.5", ""] {
+            assert!(routing_form(&[TextInput::new(invalid.into())], true).is_err());
+        }
+        assert!(routing_form(&[TextInput::new("default".into())], true).is_ok());
+    }
     #[test]
     fn connection_input_edits_unicode_at_the_cursor_and_scrolls() {
         let mut input = TextInput::new("ab界cd".into());

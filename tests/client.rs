@@ -1131,3 +1131,97 @@ fn account_cli_serializes_numeric_rules_and_rejects_invalid_values_before_mutati
         requests
     );
 }
+
+#[test]
+fn dashboard_edits_rules_validates_and_cancels_without_mutating() {
+    let client = Client::configured();
+    let mut dashboard = Dashboard::start(client.command());
+    dashboard.wait("Priority 1");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    dashboard.send(b"P");
+    dashboard.wait("Set priority");
+    dashboard.send(b"\x15256\r");
+    dashboard.wait("Priority must be between");
+    dashboard.send(b"\x1b");
+    dashboard.wait("Priority 1");
+    assert!(!fs::read_to_string(client.dir.path().join("requests.log"))
+        .unwrap()
+        .contains("account_set"));
+    dashboard.send(b"S");
+    dashboard.wait("Switching rules");
+    dashboard.send(b"\x15-255\t\x1520\t\x15off\t\x1515\r");
+    dashboard.wait("Account preferences saved");
+    let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    let mutations = requests
+        .lines()
+        .filter(|line| line.contains("account_set"))
+        .collect::<Vec<_>>();
+    assert_eq!(mutations.len(), 1);
+    let mutation: serde_json::Value = serde_json::from_str(mutations[0]).unwrap();
+    assert_eq!(mutation["routing"]["priority"], -255);
+    assert_eq!(mutation["routing"]["switch_at"], 20);
+    assert_eq!(mutation["routing"]["switch_at_short"], "off");
+    assert_eq!(mutation["routing"]["switch_at_weekly"], 15);
+    dashboard.quit();
+}
+
+#[test]
+fn unsupported_remote_rules_are_explained_without_sending_a_mutation() {
+    let client = Client::configured();
+    let path = client.dir.path().join("ssh");
+    let script = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"capabilities\":{\"account_routing_rules\":1},", "");
+    fs::write(&path, script).unwrap();
+    let output = client.run(&["account", "set", "1", "--switch-at", "20"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("updated server and SSH gateway"));
+    assert!(!fs::read_to_string(client.dir.path().join("requests.log"))
+        .unwrap()
+        .contains("account_set"));
+    let mut dashboard = Dashboard::start(client.command());
+    dashboard.wait("Priority 1");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    dashboard.send(b"S");
+    dashboard.wait("Server update required");
+    dashboard.send(b"\x1b");
+    dashboard.wait("Priority 1");
+    dashboard.quit();
+    assert!(!fs::read_to_string(client.dir.path().join("requests.log"))
+        .unwrap()
+        .contains("account_set"));
+    assert!(client
+        .run(&["account", "set", "1", "--enabled", "false"])
+        .status
+        .success());
+    let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    let mutation: serde_json::Value = serde_json::from_str(
+        requests
+            .lines()
+            .find(|line| line.contains("account_set"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(mutation.get("routing").is_none());
+}
+
+#[test]
+fn dashboard_locked_rules_remain_visible_and_cannot_be_saved() {
+    let client = Client::configured();
+    let path = client.dir.path().join("ssh");
+    let script = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"locked\":false", "\"locked\":true");
+    fs::write(&path, script).unwrap();
+    let mut dashboard = Dashboard::start(client.command());
+    dashboard.wait("Priority 1");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    dashboard.send(b"S");
+    dashboard.wait("Locked by server operator");
+    dashboard.send(b"\x1520\r");
+    dashboard.wait("Priority 1");
+    dashboard.quit();
+    assert!(!fs::read_to_string(client.dir.path().join("requests.log"))
+        .unwrap()
+        .contains("account_set"));
+}
