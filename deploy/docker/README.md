@@ -97,7 +97,7 @@ sudo docker compose exec exrd exrd admin oauth add --device
 
 Replace user ID `1` with the returned ID. OAuth login uses your interactive terminal; complete the browser flow yourself. Never copy OAuth tokens into commands or logs. Do not run two routers with copies of the same refresh credentials.
 
-Normal operations remain ordinary Compose commands:
+Inspect the running server:
 
 ```sh
 sudo docker compose exec -T exrd exrd admin user-list --json
@@ -182,13 +182,13 @@ Read the target release notes and [schema/rollback guidance](../../docs/backup.m
 
 `deploy/docker/update-host` automates the same procedure: it pulls the release image, pins its digest, checks the binary version and live snapshot schema, preserves rollback files, replaces the gateway and invokes the existing systemd Compose service. It does not compile Rust on the server. It requires the standard `exetrouter.service`, Python 3 and the documented host paths.
 
-Existing hosts may keep `/usr/local/bin/exrd` as the optional `exrd-host` launcher. Its `admin` branch calls Compose `exec`; its `gateway` branch runs only the native gateway, never sudo/Docker. `exrd update` delegates to `update-host`. This is a convenience layer, not a different server or a requirement for new installations.
+Existing hosts may keep `/usr/local/bin/exrd` as the optional `exrd-host` launcher. Its `admin` branch calls Compose `exec`; its `gateway` branch runs only the native gateway, never sudo/Docker. `exrd update` delegates to `update-host`. The launcher is optional for new installations.
 
 To install the helper, review and install `update-host` at `/opt/exetrouter/docker/update-host` and `exrd-host` at `/usr/local/bin/exrd`, root-owned and mode `0755`. Preserve existing launchers and forced-command paths during migration. Older helpers build locally; install these reviewed versioned helper files once to switch to registry updates. Routine helper updates keep custom Compose files unchanged.
 
 ## Building from source
 
-Building is an explicit alternative for contributors or private images, not a prerequisite for operating a server:
+For contributors or private images, build from a reviewed checkout:
 
 ```sh
 sudo docker buildx build --load --build-arg EXETROUTER_VERSION=0.2.0 \

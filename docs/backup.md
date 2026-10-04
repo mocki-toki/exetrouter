@@ -45,4 +45,4 @@ Offline decryption does not prove upstream still accepts old credentials. Subseq
 
 Tests cover live committed WAL, transaction consistency, private modes/keys/OAuth, active and revoked bearers, quotas/health/context bindings, actual restored service startup/auth and shutdown socket cleanup. Damaged files/sidecars/symlinks/wrong keys/schema/permissions/existing destinations fail without overwriting.
 
-On 2026-10-01 an actual private two-account fixture snapshot (37 test users, 195 usage, no pending requests) passed offline verify/restore. The temporary restore was removed; the private snapshot was retained. No OAuth refresh/network/inference was triggered. Scheduling, encrypted off-host retention and Pi power-failure recovery remain operations work.
+A private two-account fixture passed offline verify/restore on October 1, 2026, without OAuth refresh, network access or inference. Scheduling, encrypted off-host retention and Pi power-failure recovery remain operations work.

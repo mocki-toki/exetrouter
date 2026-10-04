@@ -97,7 +97,7 @@ Open only the reviewed API/ACME/management ports; never expose the control socke
 
 ## 7. Verify and maintain
 
-Check service status/logs, expected listeners, actual UID/permissions, effective sshd/nginx configuration and the firewall. Verify the public endpoint returns 401 without a bearer, while `exr doctor`, `exr models` and `exr limits` work through restricted SSH. These checks generate no inference. Issue a bearer in your own interactive client terminal; it is copied to the clipboard, not printed.
+Check service status/logs, expected listeners, actual UID/permissions, effective sshd/nginx configuration and the firewall. Verify the public endpoint returns 401 without a bearer, while `exr doctor` and `exr models` work through restricted SSH. These checks generate no inference. Check live limits only when [weekly-activation inference](../docs/cli.md#weekly-activation) is authorized. Issue a bearer in your own interactive client terminal; it is copied to the clipboard, not printed.
 
 Use [backup/restore](../docs/backup.md) before upgrades, and retain a rollback binary/config. Use the service's existing state and keys. A verified snapshot does not guarantee that copied upstream refresh credentials are still valid. Stop old credential copies from refreshing concurrently. Do not consume reset credits during unattended verification.
 

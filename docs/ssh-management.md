@@ -12,17 +12,11 @@ The operator controls public key registration and authorized_keys. Private keys 
 
 ## Operator actions
 
+With the [saved server profile](server-cli.md#configure-paths-once) supplying database/key/socket paths:
+
 ```sh
-sudo -u exetrouter exrd --db /var/lib/exetrouter/exetrouter.sqlite \
-  --key /run/exetrouter/hmac.key \
-  --oauth-key /run/exetrouter/oauth.key \
-  --control-socket /run/exetrouter/control.sock \
-  admin ssh-key-add --user-id 1 --public-key-file /path/to/alice.pub
-sudo -u exetrouter exrd --db /var/lib/exetrouter/exetrouter.sqlite \
-  --key /run/exetrouter/hmac.key \
-  --oauth-key /run/exetrouter/oauth.key \
-  --control-socket /run/exetrouter/control.sock \
-  admin ssh-authorized-keys --gateway-bin /usr/local/bin/exrd
+sudo -u exetrouter exrd admin ssh-key-add --user-id 1 --public-key-file /path/to/alice.pub
+sudo -u exetrouter exrd admin ssh-authorized-keys --gateway-bin /usr/local/bin/exrd
 ```
 
 Review/atomically install the export into a separate /etc/exetrouter/authorized_keys: directory root:exetrouter-gateway 0750, file root:exetrouter-gateway 0640. The technical user reads but cannot edit it. The command only prints an export; it does not modify system files. ssh-key-list shows bindings; ssh-key-revoke key_ID immediately denies gateway access, even before re-export. Re-export also removes SSH authentication. Bearer tokens are separate and must be revoked separately after compromise.
@@ -49,4 +43,4 @@ PermitUserRC no
 
 Do not set a global ForceCommand that overrides per-key identities. routercli needs a shell capable of executing its forced command, but no arbitrary shell/SFTP/forwarding access. Validate sshd -t and effective sshd -T with the real configuration before starting it. Binary/configuration ownership must prevent routercli modification. Ensure these keys are not accepted on another, broader SSH endpoint.
 
-Normal client requests require a verified known_hosts entry and use StrictHostKeyChecking=yes. The interactive connection wizard checks SSH with StrictHostKeyChecking=ask before saving, allowing first-time host trust to be confirmed in the same terminal. Verify the displayed fingerprint with the operator; changed host keys are rejected. Do not trust an unverified ssh-keyscan as independent identity evidence. Save the connection once with exr configure --identity PATH; no alias or repeated flag is required.
+Normal client requests require a verified known_hosts entry and use StrictHostKeyChecking=yes. The interactive connection wizard checks SSH with StrictHostKeyChecking=ask before saving, allowing first-time host trust to be confirmed in the same terminal. Verify the displayed fingerprint with the operator; changed host keys are rejected. Do not trust an unverified ssh-keyscan as independent identity evidence. Save the connection with `exr configure --identity PATH`; see [client configuration](cli.md#configure-once).
