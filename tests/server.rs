@@ -1018,6 +1018,11 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|line| line["fields"]["event"] == "upstream_stream_interrupted")
         .collect();
+    let diagnostics: Vec<Value> = logs
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|line| line["fields"].clone())
+        .collect();
     assert_eq!(interruptions.len(), 2 + ws_cases.len());
     for (line, kind, count) in [
         (&interruptions[0], "response.output_text.delta", 2),
@@ -1033,6 +1038,35 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
     }
     for (line, (mode, reason)) in interruptions[2..].iter().zip(ws_cases) {
         let fields = &line["fields"];
+        let started = diagnostics
+            .iter()
+            .find(|entry| {
+                entry["event"] == "upstream_websocket_request_started"
+                    && entry["request_id"] == fields["request_id"]
+            })
+            .expect("interrupted request must be correlated to its client connection");
+        assert!(diagnostics.iter().any(|entry| {
+            entry["event"] == "client_websocket_frame_received"
+                && entry["client_connection_id"] == started["client_connection_id"]
+                && entry["frame_sequence"] == started["frame_sequence"]
+        }));
+        assert!(diagnostics.iter().any(|entry| {
+            entry["event"] == "upstream_websocket_request_sent"
+                && entry["request_id"] == fields["request_id"]
+                && entry["connection_id"] == started["connection_id"]
+        }));
+        assert!(diagnostics.iter().any(|entry| {
+            entry["event"] == "websocket_request_interrupted"
+                && entry["request_id"] == fields["request_id"]
+                && entry["connection_id"] == started["connection_id"]
+                && entry["client_connection_id"] == started["client_connection_id"]
+        }));
+        if mode == "ws_partial_close" {
+            assert!(diagnostics.iter().any(|entry| {
+                entry["event"] == "upstream_websocket_first_event"
+                    && entry["request_id"] == fields["request_id"]
+            }));
+        }
         assert_eq!(fields["reason"], reason, "{mode}");
         assert_eq!(fields["upstream_transport"], "websocket");
         assert!(fields["duration_ms"].as_u64().is_some());

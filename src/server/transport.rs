@@ -1531,6 +1531,7 @@ pub(super) async fn websocket(
         axum::extract::ws::rejection::WebSocketUpgradeRejection,
     >,
 ) -> Response {
+    tracing::info!(event="client_websocket_upgrade_received",client_connection_id=%id.0);
     let Some(upstream) = state.upstream.as_ref().cloned() else {
         return unavailable_get().await;
     };
@@ -1561,8 +1562,12 @@ pub(super) async fn websocket(
         }
     }
     let jobs = state.jobs.clone();
+    let upgrade_id = id.clone();
     ws.max_message_size(MAX_INFERENCE_REQUEST_BYTES)
         .max_frame_size(MAX_INFERENCE_REQUEST_BYTES)
+        .on_failed_upgrade(move |_| {
+            tracing::info!(event="client_websocket_upgrade_failed",client_connection_id=%upgrade_id.0);
+        })
         .on_upgrade(move |client| {
             jobs.track_future(ws_loop(
                 client,
@@ -1570,6 +1575,7 @@ pub(super) async fn websocket(
                     state,
                     identity,
                     upstream,
+                    client_connection_id: id,
                     _permit: permit,
                 },
             ))
@@ -1607,7 +1613,25 @@ struct WsSession {
     state: Arc<AppState>,
     identity: Identity,
     upstream: Arc<Upstream>,
+    client_connection_id: RequestId,
     _permit: limits::Permit,
+}
+
+// Fixed reasons and generated IDs only; never retain frame or close-reason text.
+struct ClientWsLog {
+    id: RequestId,
+    opened: Instant,
+    frames: u64,
+    reason: &'static str,
+    close_code: Option<u16>,
+}
+
+impl Drop for ClientWsLog {
+    fn drop(&mut self) {
+        tracing::info!(event="client_websocket_closed",client_connection_id=%self.id.0,
+            duration_ms=self.opened.elapsed().as_millis() as u64,frames_received=self.frames,
+            reason=self.reason,close_code=self.close_code);
+    }
 }
 
 struct WsBinding {
@@ -1661,8 +1685,17 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
         state,
         identity,
         upstream,
+        client_connection_id,
         _permit,
     } = session;
+    tracing::info!(event="client_websocket_opened",client_connection_id=%client_connection_id.0);
+    let mut client_log = ClientWsLog {
+        id: client_connection_id,
+        opened: Instant::now(),
+        frames: 0,
+        reason: "session_ended",
+        close_code: None,
+    };
     let mut responses = HashSet::new();
     let mut retired_accounts = HashSet::new();
     let mut binding: Option<WsBinding> = None;
@@ -1678,8 +1711,14 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             tokio::select! {
                 // Consume queued upstream closure before a simultaneously ready new request.
                 biased;
-                _ = wait_for_stop(stopped.clone()) => break 'frames,
-                _ = tokio::time::sleep_until(idle_deadline) => break 'frames,
+                _ = wait_for_stop(stopped.clone()) => {
+                    client_log.reason = "service_stopping";
+                    break 'frames;
+                },
+                _ = tokio::time::sleep_until(idle_deadline) => {
+                    client_log.reason = "client_idle_timeout";
+                    break 'frames;
+                },
                 incoming = async {
                     match binding.as_mut().and_then(|bound| bound.socket.as_mut()) {
                         Some(socket) => socket.next().await,
@@ -1737,13 +1776,24 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 }
                 incoming = client.next() => match incoming {
                     Some(Ok(message)) => break message,
-                    _ => break 'frames,
+                    Some(Err(_)) => {
+                        client_log.reason = "client_read_error";
+                        break 'frames;
+                    },
+                    None => {
+                        client_log.reason = "client_eof";
+                        break 'frames;
+                    },
                 },
             }
         };
         let text = match message {
             Message::Text(text) => text,
-            Message::Close(_) => break,
+            Message::Close(frame) => {
+                client_log.reason = "client_close";
+                client_log.close_code = frame.map(|frame| frame.code);
+                break;
+            }
             Message::Ping(bytes) => {
                 if send_client_message(&mut client, Message::Pong(bytes))
                     .await
@@ -1763,6 +1813,10 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 continue;
             }
         };
+        client_log.frames = client_log.frames.saturating_add(1);
+        let frame_received = Instant::now();
+        tracing::info!(event="client_websocket_frame_received",client_connection_id=%client_log.id.0,
+            frame_sequence=client_log.frames,frame_bytes=text.len());
         let bearer = identity.bearer.clone();
         let key = state.key.clone();
         let authentication = state
@@ -1889,6 +1943,8 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 continue;
             }
         };
+        tracing::info!(event="client_websocket_generation_admitted",client_connection_id=%client_log.id.0,
+            frame_sequence=client_log.frames,duration_ms=frame_received.elapsed().as_millis() as u64);
         if retired_accounts.len() >= 1024 {
             let _ = send_client(
                 &mut client,
@@ -2516,11 +2572,15 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 log.sent().await.map_err(|_| WsInterruption::new("request_storage_failed").at("before_submission"))?;
                 tracing::info!(event="upstream_websocket_request_started",request_id=%log.id,
                     connection_id=%connection_id.0,connection_age_ms=connected.elapsed().as_millis() as u64,
-                    finished_requests=*finished);
+                    finished_requests=*finished,client_connection_id=%client_log.id.0,
+                    frame_sequence=client_log.frames,preparation_ms=frame_received.elapsed().as_millis() as u64);
+                let write_started = Instant::now();
                 if let Err(failure) = send_upstream(socket, UpstreamMessage::Text(payload.to_string().into())).await {
                     let _ = log.health(Some(crate::health::Rejection::Temporary), "transport").await;
                     return Err(failure.at("request_write"));
                 }
+                tracing::info!(event="upstream_websocket_request_sent",request_id=%log.id,
+                    connection_id=%connection_id.0,duration_ms=write_started.elapsed().as_millis() as u64);
                 let mut upstream_deadline = tokio::time::Instant::now() + crate::upstream::INFERENCE_IDLE_TIMEOUT;
                 let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
                 heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2603,6 +2663,10 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                 .map(|failure| failure.at("event_observation"))
                                 .unwrap_or_else(|_| WsInterruption::new("event_observation_failed").at("event_observation"))
                         })?;
+                    if log.events_seen == 1 {
+                        tracing::info!(event="upstream_websocket_first_event",request_id=%log.id,
+                            connection_id=%connection_id.0,duration_ms=write_started.elapsed().as_millis() as u64);
+                    }
                     if pre_generation_quota && terminal {
                         rejected_quota = Some(text.to_string());
                         return Ok(());
@@ -2638,6 +2702,10 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 }
             }.await;
             if let Err(failure) = result {
+                tracing::info!(event="websocket_request_interrupted",request_id=%log.id,
+                    client_connection_id=%client_log.id.0,frame_sequence=client_log.frames,
+                    connection_id=%connection_id.0,connection_age_ms=connected.elapsed().as_millis() as u64,
+                    finished_requests=*finished,reason=failure.reason,stage=failure.stage);
                 log.ws_interrupted(&failure);
                 let _ = log.finish("interrupted", Counters::default()).await;
                 let _ = send_client(
