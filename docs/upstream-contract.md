@@ -12,7 +12,7 @@ The audit follow-up passed current-client real HTTP/WS tool cycles and explicit 
 
 - OAuth issuer: https://auth.openai.com, public client ID app_EMoamEEZ73f0CkXaXp7hrann. Device usercode/token endpoints followed by PKCE /oauth/token exchange; refresh_token grant for refresh. Credentials are encrypted under a separate AEAD key.
 - Catalog: /models?client_version=0.159.3 with upstream bearer and chatgpt-account-id; visible models, 60-second cache and metadata allowlist.
-- Responses: /responses, store=false, upstream HTTP SSE or native WS. Native WS uses OpenAI-Beta: responses_websockets=2026-02-06 and sequential response.create.
+- Responses: /responses, store=false by default, explicit backend options forwarded without a capability denylist, upstream HTTP SSE or native WS. Native WS uses OpenAI-Beta: responses_websockets=2026-02-06 and sequential response.create.
 - Compaction: one Responses SSE request with a final compaction_trigger; projected response.compaction requires exactly one opaque checkpoint. A separate upstream /responses/compact is not used.
 - Chat: supported incoming HTTP JSON/SSE is translated to Responses; upstream WS first, ordinary handshake fallback only before generation submission.
 - Usage: one durable event before possible submission; terminal counters or explicit unknown outcome. No automatic inference replay.

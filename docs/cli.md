@@ -17,7 +17,7 @@ Defaults are host `localhost`, port `2222`, username `routercli`. The private ke
 
 Use `--config /path/to/config.json` or `EXR_CONFIG` for a separate connection. Precedence: command-line flags override the saved settings; `--config` overrides `EXR_CONFIG`, which overrides the default path. `~/` identity paths expand to the current home directory. A shell alias is unnecessary.
 
-The operator must register your public Ed25519 key and provide a verified host-key fingerprint. Install the verified host key for `[api.example.com]:2222` in `known_hosts`. The client uses `StrictHostKeyChecking=yes`, `BatchMode=yes`, `IdentitiesOnly=yes`, disables forwarding and sends only `exrd-gateway`. Load a passphrase-protected key with `ssh-add` before use. Configure does not register keys or modify SSH settings.
+The operator must register your public Ed25519 key and provide a verified host-key fingerprint. The interactive connection wizard checks SSH before saving and lets OpenSSH ask you to confirm a new host fingerprint in the same terminal. Compare it with the operator’s verified fingerprint before accepting. Scripted configuration still requires a verified `[api.example.com]:2222` entry in `known_hosts`. Normal dashboard and CLI requests use `StrictHostKeyChecking=yes`, `BatchMode=yes`, `IdentitiesOnly=yes`, disables forwarding and sends only `exrd-gateway`. Load a passphrase-protected key with `ssh-add` before use. `exr configure` does not register keys or modify SSH settings.
 
 ## Commands
 
@@ -29,7 +29,8 @@ exr doctor --json           # Stable local/server diagnostic object
 exr models                  # Human-readable table
 exr models --json           # OpenAI-style catalog
 exr models --json --format codex-json > /absolute/path/models.json
-exr models --json --format opencode-jsonc > /absolute/path/models.jsonc
+exr models --json --format opencode-v1-json > /absolute/path/models-v1.json
+exr models --json --format opencode-v2-json > /absolute/path/models-v2.json
 exr usage --period day
 exr usage --period 24h
 exr usage --period week --by user
@@ -58,6 +59,8 @@ SSH exchanges have a 45-second deadline and a 1 MiB reply cap. Failed child proc
 
 Press `?` for keyboard help specific to the current tab.
 
+Connection fields show a cursor and support Left/Right, Home/End (or Ctrl-A/Ctrl-E), Backspace/Delete and Ctrl-U to clear. Up/Down selects a field. Esc cancels edits; Ctrl-C exits without saving. Remote settings are saved only after the SSH check succeeds.
+
 Usage charts default to reported tokens; `m` switches to requests. Use `b` to group by user, model or your API tokens, then ↑/↓ to select a group with recorded usage in the selected period. User groups include other users and combine all of each user’s tokens. `p` changes the period and selects the first available group.
 
 Start `exr` in an interactive terminal after configuration (minimum 72 columns × 20 rows). Views:
@@ -74,7 +77,7 @@ Keys: ←/→ change the five views; ↑/↓ select accounts in Overview, tokens
 
 Creation and rotation copy the secret directly to the local system clipboard without displaying it. Paste it into your service or password manager. Clipboard support is checked before issuing a token: macOS uses `pbcopy`, Wayland uses `wl-copy`, and X11 uses `xclip` or `xsel`; headless terminals cannot issue tokens. If the helper fails after issuance, the TUI retains the secret only in memory and offers `c` to retry copying without another token request. Esc discards the secret; rotate the token later to obtain a new one. The CLI reports the token ID and copy failure so you can rotate it. There is no fallback that prints a secret or emits it as a terminal escape sequence. The client does not write secrets to files or logs. Ctrl-C exits; interrupting an outstanding mutation reports that its outcome may be uncertain. Terminal raw mode and the alternate screen are restored on normal exit and returned errors. A forcibly killed process cannot guarantee terminal cleanup; run `reset` if needed.
 
-Views load on demand, with SSH work in the background. Switching away cancels an outstanding read; mutations are allowed to finish. Overview automatically polls live limit metadata every 30 seconds; other views load on demand. Refresh never generates inference. Freshness describes the age of the upstream observation, not the moment the screen was refreshed.
+Views load on demand, with SSH work in the background. Switching away cancels an outstanding read; mutations are allowed to finish. Overview automatically polls live limit metadata every 30 seconds; other views load on demand. Live limits may activate an apparently unused weekly window once; see below. Freshness describes the age of the upstream observation, not the moment the screen was refreshed.
 
 ## Limits and diagnostics
 
@@ -88,7 +91,11 @@ The client sends its system IANA time zone for Usage calendar boundaries. The se
 
 ## Reset credits
 
-Overview refreshes live limits automatically every 30 seconds while visible, when no command or confirmation is pending. Returning to Overview also refreshes. `exr limits` and the Overview view refresh live usage and reset-credit availability through authenticated Codex usage endpoints. A failed refresh retains historical quota observations and reports that live availability is unavailable. Doctor remains a local snapshot; its credit metadata, when present, may be cached. No inference is used to measure quota.
+Overview refreshes live limits automatically every 30 seconds while visible, when no command or confirmation is pending. Returning to Overview also refreshes. `exr limits` and the Overview view refresh live usage and reset-credit availability through authenticated Codex usage endpoints. A failed refresh retains historical quota observations and reports that live availability is unavailable. Doctor remains a local snapshot; its credit metadata, when present, may be cached. Quota is measured through usage metadata. The weekly-activation exception below can submit one minimal inference request.
+
+A fresh weekly window (10080 minutes) with **100% remaining** and a reset exactly seven days after the observation, compared at minute precision, is treated as apparently inactive. Live limits submit one minimal `gpt-5.6-sol` Responses request on that exact account to start the window, then reread usage. The account must be enabled for the authenticated user, operationally available and support this model. A recent ordinary request suppresses activation. Requests use low reasoning, no tools and a fixed short prompt; generated content is discarded. Catalog, Doctor, update checks and reset-credit previews remain free of inference.
+
+The attempt is recorded before submission and limited to once per account in seven days across users, processes and restarts. There is no retry or account fallback after rejection, timeout, interruption or an unknown outcome. Only one activation runs at a time, with a 20-second inference deadline and 64 KiB response limit. Overview and readable limits show the latest attempt status for seven days. Nullable numeric usage is retained and included in total, model and user reports; these requests have no API token and are excluded from token grouping. This pattern is a heuristic, not an upstream guarantee that a zero-percent window is inactive. Schema 8 requires the [migration and rollback plan](quota-activation-migration.md).
 
 Run `exr limits reset <email>` in an interactive terminal, or open the selected account with Enter in Overview and choose Review reset credit. Duplicate emails can be distinguished by local numeric account ID. The server requires a current ordinary subscription window with **≤5% remaining**, a known future reset time and an available reset credit. Unknown/elapsed windows are ineligible. Unsupported or expired detail rows cannot be consumed. The earliest-expiring supported credit is selected; if details are unavailable but usage reports credits, the upstream can select its next credit.
 

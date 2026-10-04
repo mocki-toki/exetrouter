@@ -11,6 +11,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/005_health.sql"),
     include_str!("migrations/006_model_metadata.sql"),
     include_str!("migrations/007_account_preferences.sql"),
+    include_str!("migrations/008_quota_activation.sql"),
 ];
 pub const SCHEMA_VERSION: usize = MIGRATIONS.len();
 const QUEUE_CAPACITY: usize = 32;
@@ -28,6 +29,7 @@ pub fn init(conn: &Connection) -> Result<()> {
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", index + 1)?;
     }
+    tx.execute("UPDATE quota_activation_attempts SET status='unknown' WHERE status='pending' AND attempted_at<=?1", [chrono::Utc::now().timestamp()-60])?;
     tx.commit()?;
     Ok(())
 }

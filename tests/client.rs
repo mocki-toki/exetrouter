@@ -20,7 +20,7 @@ request=$(cat)
 printf '%s\n' "$request" >> "$EXETROUTER_TEST_REQUESTS"
 case "$request" in
   *'"action":"token_list"'*) printf '%s' '{"ok":true,"result":[{"id":"tok_test","name":"Laptop","expires_at":2000000000,"revoked_at":null,"last_used_at":null}]}' ;;
-  *'"action":"models"'*) printf '%s' '{"ok":true,"result":{"data":[{"id":"gpt-test","display_name":"Test model","exetrouter":{"context_window":100000}},{"id":"gpt-other","display_name":"Other model","exetrouter":{"context_window":200000}}]}}' ;;
+  *'"action":"models"'*) printf '%s' '{"ok":true,"result":{"data":[{"id":"gpt-test","object":"model","owned_by":"openai","display_name":"Test model","exetrouter":{"context_window":100000,"input_modalities":["text","image"],"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low"}},{"id":"gpt-other","object":"model","owned_by":"openai","display_name":"Other model","exetrouter":{"context_window":200000,"input_modalities":["text"],"supported_reasoning_levels":[{"effort":"high"}]}}]}}' ;;
   *'"action":"doctor"'*|*'"action":"limits"'*) printf '%s' '{"ok":true,"result":{"quota_accounts":[{"id":1,"label":"test@example.com","reset_credits":{"available_count":2,"credits":[]},"quota":{"status":"current","windows":[{"kind":"primary","window_minutes":480,"used_percent":20,"remaining_percent":80,"status":"current"},{"kind":"secondary","window_minutes":10080,"used_percent":30,"remaining_percent":70,"status":"stale"}]}}]}}' ;;
   *'"action":"reset_prepare"'*) printf '%s' '{"ok":true,"result":{"confirmation":"synthetic-confirmation","email":"test@example.com","remaining_percent":5,"available_count":2,"credit_title":"Full reset","free_reset_at":2000000000,"recommend_wait":true,"credit_expires_at":null}}' ;;
   *'"action":"reset_confirm"'*) printf '%s' '{"ok":true,"result":{"code":"reset","windows_reset":2}}' ;;
@@ -566,6 +566,7 @@ fn terminal_text(bytes: &[u8]) -> String {
 
 struct Dashboard {
     master: fs::File,
+    _slave: fs::File,
     child: std::process::Child,
     output: Vec<u8>,
 }
@@ -602,11 +603,12 @@ impl Dashboard {
         let child = command
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
-            .stderr(Stdio::from(slave))
+            .stderr(Stdio::from(slave.try_clone().unwrap()))
             .spawn()
             .unwrap();
         Self {
             master,
+            _slave: slave,
             child,
             output: Vec::new(),
         }
@@ -729,6 +731,90 @@ fn dashboard_reset_eligibility_error_requires_dismissal_and_never_confirms_a_cre
 }
 
 #[test]
+fn setup_ctrl_c_cancels_every_screen_without_saving() {
+    for screen in 0..3 {
+        let client = Client::new();
+        let state = client.dir.path().join("standalone");
+        let mut command = client.command();
+        command.args([
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:0",
+        ]);
+        let mut dashboard = Dashboard::start(command);
+        dashboard.wait("Welcome to ExetRouter");
+        if screen >= 1 {
+            dashboard.send(b"\r");
+            dashboard.wait("Private state directory");
+        }
+        if screen >= 2 {
+            dashboard.send(b"\r");
+            dashboard.wait("Save these settings?");
+        }
+        dashboard.send(b"\x03");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while dashboard.child.try_wait().unwrap().is_none() {
+            dashboard.read();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Ctrl-C did not cancel setup"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        dashboard.read();
+        assert!(!client.dir.path().join("config.json").exists());
+        assert!(!state.exists());
+        assert!(
+            String::from_utf8_lossy(&dashboard.output).contains("\x1b[?1049l"),
+            "screen {screen}: {:?}",
+            String::from_utf8_lossy(&dashboard.output)
+        );
+    }
+}
+
+#[test]
+fn connection_settings_edit_in_the_middle_and_check_ssh_before_saving() {
+    let client = Client::configured();
+    let key = client.dir.path().join("identity");
+    let mut dashboard = Dashboard::start(client.command());
+    dashboard.wait("Overview");
+    dashboard.send(b"\x1b[D");
+    dashboard.wait("Remote Server");
+    dashboard.send(b"e");
+    dashboard.wait("Configure ExetRouter");
+    dashboard.send(b"\r");
+    dashboard.wait("SSH host");
+    dashboard.send(b"\x01route.test\x05\x1b[D\x1b[3~\x15router.test");
+    dashboard.send(b"\r");
+    dashboard.wait("Save these settings?");
+    dashboard.send(b"y");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        dashboard.read();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(client.dir.path().join("config.json")).unwrap())
+                .unwrap();
+        if saved["host"] == "router.test" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "connection was not saved after the SSH check"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    dashboard.quit();
+    assert!(String::from_utf8_lossy(&dashboard.output).contains("Checking SSH connection."));
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(client.dir.path().join("config.json")).unwrap()).unwrap();
+    assert_eq!(saved["host"], "router.test");
+    assert_eq!(saved["identity"], key.to_str().unwrap());
+    let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    assert!(requests.contains("\"action\":\"doctor\""));
+}
+
+#[test]
 fn first_run_wizard_saves_standalone_and_settings_work_without_ssh() {
     let client = Client::new();
     let state = client.dir.path().join("standalone");
@@ -831,4 +917,29 @@ fn server_config_allows_short_admin_commands_and_cli_flags_override_it() {
             .status
             .success()
     );
+}
+
+#[test]
+fn model_exports_select_native_opencode_v1_and_v2_formats() {
+    let client = Client::configured();
+    let v1 = client.run(&["models", "--json", "--format", "opencode-v1-json"]);
+    assert!(
+        v1.status.success(),
+        "{}",
+        String::from_utf8_lossy(&v1.stderr)
+    );
+    let v1: serde_json::Value = serde_json::from_slice(&v1.stdout).unwrap();
+    assert_eq!(
+        v1["provider"]["openai"]["models"]["gpt-test"]["options"]["reasoningEffort"],
+        "low"
+    );
+    let v2 = client.run(&["models", "--json", "--format", "opencode-v2-json"]);
+    assert!(v2.status.success());
+    let v2: serde_json::Value = serde_json::from_slice(&v2.stdout).unwrap();
+    assert_eq!(
+        v2["providers"]["openai"]["models"]["gpt-test"]["variants"][0]["id"],
+        "low"
+    );
+    assert!(v1.get("providers").is_none());
+    assert!(v2.get("provider").is_none());
 }

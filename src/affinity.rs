@@ -24,6 +24,23 @@ pub(crate) fn turn_digest(value: &str, key: &[u8], user: i64) -> Result<Digest> 
     Ok(mac.finalize().into_bytes().into())
 }
 
+/// Saved backend conversations are context references, separate from prompt bodies.
+pub(crate) fn conversation_digest(value: &Value, key: &[u8], user: i64) -> Result<Option<Digest>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let id = value
+        .as_str()
+        .or_else(|| value.get("id").and_then(Value::as_str))
+        .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+        .ok_or("invalid conversation reference")?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key)?;
+    mac.update(b"exetrouter/conversation-affinity/v1\0");
+    mac.update(&user.to_be_bytes());
+    mac.update(id.as_bytes());
+    Ok(Some(mac.finalize().into_bytes().into()))
+}
+
 pub(crate) fn digests(value: &Value, key: &[u8], user: i64) -> Result<Vec<Digest>> {
     fn visit(value: &Value, key: &[u8], user: i64, found: &mut BTreeSet<Digest>) -> Result<()> {
         match value {

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Export separate OpenCode V1/V2 model configuration fragments through `opencode-v1-json` and `opencode-v2-json`, with matching authenticated model routes.
+- Forward backend request options without a static capability denylist and translate Chat output caps. Preserve backend HTTP statuses with redacted HTTP/Chat errors, resource bounds and adapter checks; enforce user ownership and account pinning for saved conversation references.
+- Activate apparently inactive weekly windows with one durably guarded minimal gpt-5.6-sol request; retain nullable counters in user/model/total usage and expose the attempt status. Requires the explicit schema-7-to-8 migration plan.
+- Support Ctrl-C cancellation throughout connection setup without saving edits.
+- Add a visible cursor and editing within connection fields, including Unicode and long paths.
+- Check remote SSH settings before saving and allow verified first-time host-key confirmation in the same terminal.
+
 ## 0.2.2
 
 - Select individual models, users or API tokens with recorded usage in the dashboard; user totals include all of their tokens, while token IDs remain scoped to the authenticated user.

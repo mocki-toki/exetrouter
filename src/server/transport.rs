@@ -105,8 +105,33 @@ struct RequestLog {
 
 enum JsonReply {
     Response(Value),
+    BackendError(StatusCode, Value),
     Quota(i64),
     Authentication,
+}
+
+fn backend_event_error(event: &Value) -> Option<(StatusCode, Value)> {
+    if !matches!(event["type"].as_str(), Some("error" | "response.failed")) {
+        return None;
+    }
+    event
+        .get("error")
+        .filter(|error| error.is_object())
+        .or_else(|| {
+            event
+                .pointer("/response/error")
+                .filter(|error| error.is_object())
+        })?;
+    let status = event["status"]
+        .as_u64()
+        .and_then(|status| u16::try_from(status).ok())
+        .and_then(|status| StatusCode::from_u16(status).ok())
+        .filter(|status| status.is_client_error() || status.is_server_error())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    Some((
+        status,
+        json!({"error":{"type":"upstream_rejected","code":"upstream_rejected","message":"upstream rejected request"}}),
+    ))
 }
 
 impl RequestLog {
@@ -391,6 +416,31 @@ impl RequestLog {
         if let Some(output) = output {
             self.remember(output).await?;
         }
+        if matches!(
+            kind,
+            "response.created" | "response.completed" | "response.incomplete"
+        ) {
+            if let Some(digest) = affinity::conversation_digest(
+                &event["response"]["conversation"],
+                &self.context_key,
+                self.user_id,
+            )? {
+                let (user, account, generation) =
+                    (self.user_id, self.account_id, self.account_generation);
+                self.db
+                    .call(move |conn| {
+                        affinity::save(
+                            conn,
+                            user,
+                            account,
+                            generation,
+                            &[digest],
+                            chrono::Utc::now().timestamp(),
+                        )
+                    })
+                    .await?;
+            }
+        }
         Ok(status.is_some())
     }
 
@@ -422,16 +472,12 @@ fn normalize_messages(payload: &mut Value) {
     }
 }
 fn prepare(payload: &mut Value, compact: bool) -> Result<bool> {
-    capabilities(payload)?;
     // This backend accepts developer instructions but rejects the public API's
     // system role. Preserve message ordering and content during translation.
     normalize_messages(payload);
     let object = payload
         .as_object_mut()
         .ok_or("request must be a JSON object")?;
-    if object.contains_key("max_output_tokens") {
-        return Err("max_output_tokens is unsupported by this OAuth backend".into());
-    }
     if let Some(Value::String(text)) = object.get("input") {
         let text = text.clone();
         object.insert("input".into(), json!([{"role":"user","content":text}]));
@@ -459,34 +505,18 @@ fn prepare(payload: &mut Value, compact: bool) -> Result<bool> {
         }
         input.push(json!({"type":"compaction_trigger"}));
         object.entry("instructions").or_insert(json!(""));
-        object.insert("store".into(), json!(false));
+        object.entry("store").or_insert(json!(false));
         object.insert("stream".into(), json!(true));
         return Ok(false);
-    }
-    if object.get("store").is_some_and(|v| v != &json!(false)) {
-        return Err("store must be false".into());
     }
     let streaming = match object.get("stream") {
         None => false,
         Some(Value::Bool(value)) => *value,
         _ => return Err("stream must be a boolean".into()),
     };
-    object.insert("store".into(), json!(false));
+    object.entry("store").or_insert(json!(false));
     object.insert("stream".into(), json!(true));
     Ok(streaming)
-}
-
-fn capabilities(payload: &Value) -> Result<()> {
-    if ["stream_id", "conversation", "context_management"]
-        .iter()
-        .any(|name| payload.get(name).is_some_and(|v| !v.is_null()))
-        || payload
-            .get("background")
-            .is_some_and(|v| v != &json!(false) && !v.is_null())
-    {
-        return Err("named streams, saved conversations, context_management and background generation are unsupported by this OAuth backend".into());
-    }
-    Ok(())
 }
 
 fn lite_mode(identity: &Identity, payload: &Value) -> Result<()> {
@@ -563,8 +593,14 @@ async fn context_account(
     identity: &Identity,
     payload: &Value,
 ) -> std::result::Result<(Option<i64>, bool), ContextError> {
-    let digests = affinity::digests(&payload["input"], &state.key, identity.user_id)
+    let mut digests = affinity::digests(&payload["input"], &state.key, identity.user_id)
         .map_err(|_| ContextError::Invalid)?;
+    if let Some(digest) =
+        affinity::conversation_digest(&payload["conversation"], &state.key, identity.user_id)
+            .map_err(|_| ContextError::Invalid)?
+    {
+        digests.push(digest);
+    }
     if digests.is_empty() {
         return Ok((None, false));
     }
@@ -580,6 +616,24 @@ async fn context_account(
         affinity::Lookup::Portable(id) => Ok((Some(id), true)),
         affinity::Lookup::Missing => Err(ContextError::Missing),
         affinity::Lookup::Conflict => Err(ContextError::Conflict),
+    }
+}
+
+async fn select_context_account(
+    upstream: &crate::upstream::Upstream,
+    model: &str,
+    session: Option<&str>,
+    user: i64,
+    owner: Option<i64>,
+    payload: &Value,
+) -> std::result::Result<crate::upstream::Selection, crate::upstream::SelectError> {
+    if !payload["conversation"].is_null() {
+        let id = owner.ok_or(crate::upstream::SelectError::UpstreamUnavailable)?;
+        upstream.select_pinned_for_user(model, id, Some(user)).await
+    } else {
+        upstream
+            .select_continuation(model, session, user, owner)
+            .await
     }
 }
 
@@ -607,6 +661,9 @@ async fn transfer_context(
     payload: &mut Value,
     account: &Account,
 ) -> Result<()> {
+    if !payload["conversation"].is_null() {
+        return Err("saved conversation must remain on its owning account".into());
+    }
     let digests = affinity::digests(&payload["input"], &state.key, identity.user_id)?;
     let (user, id, generation) = (identity.user_id, account.info.id, account.info.generation);
     state
@@ -778,14 +835,15 @@ pub(super) async fn http(
         return ContextError::Conflict.response();
     }
     let owner = context.or(turn_account);
-    let selected = upstream
-        .select_continuation(
-            &model,
-            cache.preferred.then_some(cache.session.as_str()),
-            identity.user_id,
-            owner,
-        )
-        .await;
+    let selected = select_context_account(
+        &upstream,
+        &model,
+        cache.preferred.then_some(cache.session.as_str()),
+        identity.user_id,
+        owner,
+        &payload,
+    )
+    .await;
     let mut account = match selected {
         Ok(account) => account,
         Err(crate::upstream::SelectError::ModelUnavailable) => {
@@ -951,17 +1009,15 @@ pub(super) async fn http(
             if !response.status().is_success() {
                 let status = response.status();
                 let headers = response.headers().clone();
-                let body = if status.as_u16() == 429 {
-                    tokio::time::timeout(
-                        Duration::from_secs(5),
-                        crate::oauth::read_json(response, 65_536),
-                    )
-                    .await
-                    .ok()
-                    .and_then(std::result::Result::ok)
-                } else {
-                    None
-                };
+                // Backend validation evolves independently of the router. Read a
+                // bounded structured error without logging or persisting its body.
+                let body = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    crate::oauth::read_json(response, 65_536),
+                )
+                .await
+                .ok()
+                .and_then(std::result::Result::ok);
                 let quota_saved = log
                     .quota(
                         crate::quota::http(&headers, status.as_u16(), body.as_ref(), now),
@@ -976,6 +1032,7 @@ pub(super) async fn http(
                 if quota_saved.is_ok()
                     && accounted.is_ok()
                     && status.as_u16() == 429
+                    && payload["conversation"].is_null()
                     && quota_refusal(&refusal)
                     && upstream
                         .account_enabled(identity.user_id, account.info.id)
@@ -1022,10 +1079,10 @@ pub(super) async fn http(
                         }
                     }
                 }
-                let response_status = if matches!(status.as_u16(), 400 | 404 | 429) {
-                    status
-                } else {
+                let response_status = if status.as_u16() == 401 {
                     StatusCode::BAD_GATEWAY
+                } else {
+                    status
                 };
                 let mut failure = error(
                     response_status,
@@ -1164,6 +1221,12 @@ pub(super) async fn http(
                             terminal = Some(JsonReply::Quota(until));
                             return Ok(());
                         }
+                        if let Some((status, value)) = frame.event.as_ref().and_then(backend_event_error) {
+                            if chat_request || frame.event.as_ref().is_some_and(|event| event["type"] == "error") {
+                                terminal = Some(JsonReply::BackendError(status, value));
+                                return Ok(());
+                            }
+                        }
                         let value = frame
                             .event
                             .as_ref()
@@ -1189,6 +1252,9 @@ pub(super) async fn http(
                                     cooldown_frame(log.rejection_until.expect("checked"))
                                 )
                                 .into_bytes()]
+                            }
+                            (Some(_), Some(event)) if backend_event_error(event).is_some() => {
+                                vec![format!("data: {}\n\n", backend_event_error(event).expect("checked").1).into_bytes()]
                             }
                             (Some(adapter), Some(event)) => adapter.event(event)?,
                             (Some(_), None) => Vec::new(),
@@ -1257,6 +1323,7 @@ pub(super) async fn http(
         drop(receive);
         match json_receive.await {
             Ok(Ok(JsonReply::Response(value))) => Json(value).into_response(),
+            Ok(Ok(JsonReply::BackendError(status, value))) => (status, Json(value)).into_response(),
             Ok(Ok(JsonReply::Quota(until))) => cooldown_error(until),
             Ok(Ok(JsonReply::Authentication)) => error(
                 StatusCode::BAD_GATEWAY,
@@ -1547,14 +1614,6 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             .await;
             continue;
         }
-        if let Err(err) = capabilities(&payload) {
-            let _ = send_client(
-                &mut client,
-                ws_error("unsupported_capability", &err.to_string()),
-            )
-            .await;
-            continue;
-        }
         if let Err(err) = lite_mode(&identity, &payload) {
             let _ = send_client(
                 &mut client,
@@ -1588,28 +1647,9 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             .await;
             continue;
         };
-        if payload.get("max_output_tokens").is_some() {
-            let _ = send_client(
-                &mut client,
-                ws_error(
-                    "invalid_request_error",
-                    "max_output_tokens is unsupported by this OAuth backend",
-                ),
-            )
-            .await;
-            continue;
-        }
-        if payload.get("store").is_some_and(|v| v != &json!(false)) {
-            let _ = send_client(
-                &mut client,
-                ws_error("invalid_request_error", "store must be false"),
-            )
-            .await;
-            continue;
-        }
         normalize_messages(&mut payload);
         let body = payload.as_object_mut().expect("validated object");
-        body.insert("store".into(), json!(false));
+        body.entry("store").or_insert(json!(false));
         body.entry("instructions").or_insert(json!(""));
         body.remove("stream");
         let explicit_cache = payload
@@ -1771,9 +1811,15 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     .unwrap_or(false)
                     && upstream.quota_exhausted(id).await.unwrap_or(false)
                 {
-                    if let Ok(account) = upstream
-                        .select_continuation(&model, None, identity.user_id, Some(id))
-                        .await
+                    if let Ok(account) = select_context_account(
+                        &upstream,
+                        &model,
+                        None,
+                        identity.user_id,
+                        Some(id),
+                        &payload,
+                    )
+                    .await
                     {
                         if account.info.id != id {
                             if payload
@@ -1870,14 +1916,15 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 continue 'frames;
             }
             if binding.is_none() {
-                let selected = upstream
-                    .select_continuation(
-                        &model,
-                        cache.preferred.then_some(cache.session.as_str()),
-                        identity.user_id,
-                        context,
-                    )
-                    .await;
+                let selected = select_context_account(
+                    &upstream,
+                    &model,
+                    cache.preferred.then_some(cache.session.as_str()),
+                    identity.user_id,
+                    context,
+                    &payload,
+                )
+                .await;
                 let account = match selected {
                     Ok(account) => account,
                     Err(crate::upstream::SelectError::Cooldown(until)) => {
@@ -2152,7 +2199,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 };
                 let text=match message { UpstreamMessage::Text(text)=>text,UpstreamMessage::Ping(bytes)=> { send_upstream(socket, UpstreamMessage::Pong(bytes)).await?;continue; },UpstreamMessage::Pong(_)=>continue,_=> {let _=log.health(Some(crate::health::Rejection::Temporary),"transport").await;return Err("upstream closed or sent invalid frame".into());} };
                 let mut event:Value=match serde_json::from_str(&text) {Ok(event)=>event,Err(_)=> {let _=log.health(Some(crate::health::Rejection::Temporary),"protocol").await;return Err("invalid upstream frame".into());} };
-                let pre_generation_quota = safe_to_switch && !log.created && quota_refusal(&event);
+                let pre_generation_quota = safe_to_switch && payload["conversation"].is_null() && !log.created && quota_refusal(&event);
                 safe_to_switch &= matches!(event["type"].as_str(), Some("ping" | "codex.rate_limits" | "codex.response.metadata" | "response.metadata" | "responsesapi.websocket_timing"));
                 let terminal=log.observe(&event).await?;
                 if pre_generation_quota && terminal { rejected_quota = Some(text.to_string()); return Ok(()); }

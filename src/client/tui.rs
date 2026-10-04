@@ -1,7 +1,7 @@
 use super::{clipboard::Clipboard, config::Connection, render, ssh_request, Session};
 use crate::{ControlRequest, Result};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -662,6 +662,7 @@ fn account_ranges(value: &Value, width: u16) -> Vec<(u16, u16)> {
                     account,
                     chrono::Utc::now().timestamp(),
                 )) + u16::from(account["refresh_error"].is_string())
+                    + u16::from(render::weekly_activation(account).is_some())
                     + if windows.is_empty() {
                         1
                     } else {
@@ -1063,6 +1064,8 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
         y += 1;
         for line in [
             expiring.then(|| credit_warning(&account)),
+            render::weekly_activation(&account)
+                .map(|text| Line::styled(text, Style::default().fg(Color::Gray))),
             account["refresh_error"]
                 .as_str()
                 .map(|text| Line::styled(render::safe(text), Style::default().fg(Color::Gray))),
@@ -1806,6 +1809,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                             pending =
                                 Some(start(&args.connection, request(&state), SETTINGS, false));
                         }
+                        Err(error) if error.is::<super::SetupInterrupted>() => return Ok(()),
                         Err(error) => state.statuses[state.tab] = error.to_string(),
                     }
                     reset_screen(&mut terminal)?;
@@ -2071,6 +2075,9 @@ fn confirm_dialog(
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Err(super::SetupInterrupted.into());
+            }
             match key.code {
                 KeyCode::Char('y') => return Ok(true),
                 KeyCode::Esc | KeyCode::Char('n') => return Ok(false),
@@ -2094,6 +2101,138 @@ pub(super) async fn setup(connection: &mut Connection, path: &std::path::Path) -
     settings_wizard(&mut terminal, connection, path, true).await?;
     super::config::save(path, connection)
 }
+fn setup_cancelled(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+struct TextInput {
+    value: String,
+    cursor: usize,
+}
+impl TextInput {
+    fn new(value: String) -> Self {
+        let cursor = value.len();
+        Self { value, cursor }
+    }
+    fn edit(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.value.len(),
+            KeyCode::Left => {
+                self.cursor = self.value[..self.cursor]
+                    .char_indices()
+                    .next_back()
+                    .map_or(0, |(i, _)| i)
+            }
+            KeyCode::Right => {
+                if let Some(c) = self.value[self.cursor..].chars().next() {
+                    self.cursor += c.len_utf8();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some((i, _)) = self.value[..self.cursor].char_indices().next_back() {
+                    self.value.drain(i..self.cursor);
+                    self.cursor = i;
+                }
+            }
+            KeyCode::Delete => {
+                if let Some(c) = self.value[self.cursor..].chars().next() {
+                    self.value.drain(self.cursor..self.cursor + c.len_utf8());
+                }
+            }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => self.cursor = 0,
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor = self.value.len()
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.value.clear();
+                self.cursor = 0;
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && !c.is_control()
+                    && self.value.len() + c.len_utf8() <= 1024 =>
+            {
+                self.value.insert(self.cursor, c);
+                self.cursor += c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    fn visible(&self, width: usize) -> (&str, u16) {
+        let mut start = 0;
+        while Line::from(&self.value[start..self.cursor]).width() >= width.max(1) {
+            let Some(c) = self.value[start..self.cursor].chars().next() else {
+                break;
+            };
+            start += c.len_utf8();
+        }
+        (
+            &self.value[start..],
+            Line::from(&self.value[start..self.cursor]).width() as u16,
+        )
+    }
+}
+
+fn connection_fields(
+    frame: &mut Frame<'_>,
+    fields: &[(&str, TextInput)],
+    selected: usize,
+    error: &str,
+) {
+    let area = frame.area();
+    let block = panel("Connection settings");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    for (i, (label, input)) in fields.iter().enumerate() {
+        let prefix = format!("{}{label}: ", if i == selected { "▶ " } else { "  " });
+        let prefix_width = Line::from(prefix.as_str()).width() as u16;
+        let (value, offset) = input.visible(inner.width.saturating_sub(prefix_width) as usize);
+        let y = inner.y + i as u16;
+        if y >= inner.bottom() {
+            break;
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    prefix,
+                    Style::default().fg(if i == selected {
+                        Color::Cyan
+                    } else {
+                        Color::Gray
+                    }),
+                ),
+                Span::raw(render::safe(value)),
+            ])),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        if i == selected && inner.width > prefix_width {
+            frame.set_cursor_position((inner.x + prefix_width + offset, y));
+        }
+    }
+    let y = inner.y + fields.len() as u16 + 1;
+    if y < inner.bottom() {
+        frame.render_widget(Paragraph::new(format!("{}\n\n←/→: cursor   Home/End: start/end   Backspace/Delete: erase\n↑/↓: field   Enter: review   Esc/Ctrl-C: cancel\nCtrl-U: clear field\nRemote: register your public key with the operator.\nNew SSH host keys are confirmed in this terminal before saving.", render::safe(error))).wrap(Wrap {trim: false}), Rect::new(inner.x,y,inner.width,inner.bottom()-y));
+    }
+}
+
+async fn check_remote_connection(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    connection: &Connection,
+) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show)?;
+    println!("Checking SSH connection. Verify any new host fingerprint with your operator before accepting it. Ctrl-C cancels setup.");
+    let result = super::remote_request(connection, ControlRequest::Doctor, true).await;
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, crossterm::cursor::Hide)?;
+    reset_screen(terminal)?;
+    result.map(|_| ())
+}
+
 async fn settings_wizard(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     connection: &mut Connection,
@@ -2111,10 +2250,16 @@ async fn settings_wizard(
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+            if setup_cancelled(key) {
+                return Err(if key.code == KeyCode::Esc {
+                    "Setup cancelled; no settings saved".into()
+                } else {
+                    super::SetupInterrupted.into()
+                });
+            }
             match key.code {
                 KeyCode::Up | KeyCode::Down => selected = 1 - selected,
                 KeyCode::Enter => break,
-                KeyCode::Esc => return Err("Setup cancelled; no settings saved".into()),
                 _ => {}
             }
         }
@@ -2137,23 +2282,14 @@ async fn settings_wizard(
             ("Private key path", connection.identity.clone()),
         ]
     };
+    let mut fields = fields
+        .drain(..)
+        .map(|(label, value)| (label, TextInput::new(render::safe(&value))))
+        .collect::<Vec<_>>();
     let mut field = 0usize;
     let mut error = String::new();
     loop {
-        let text = fields
-            .iter()
-            .enumerate()
-            .map(|(i, (name, value))| {
-                format!(
-                    "{}{}: {}",
-                    if i == field { "▶ " } else { "  " },
-                    name,
-                    render::safe(value)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        dialog(terminal,"Connection settings",&format!("{text}\n\n{error}\nType to edit; Backspace deletes. ↑ / ↓: field   Enter: review   Esc: cancel\nRemote mode requires a public key registered by your operator and a verified known_hosts entry."))?;
+        terminal.draw(|frame| connection_fields(frame, &fields, field, &error))?;
         if !event::poll(Duration::from_millis(50))? {
             tokio::task::yield_now().await;
             continue;
@@ -2164,29 +2300,26 @@ async fn settings_wizard(
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if setup_cancelled(key) {
+            return Err(if key.code == KeyCode::Esc {
+                "Setup cancelled; no settings saved".into()
+            } else {
+                super::SetupInterrupted.into()
+            });
+        }
         match key.code {
-            KeyCode::Esc => return Err("Setup cancelled; no settings saved".into()),
             KeyCode::Up => field = (field + fields.len() - 1) % fields.len(),
             KeyCode::Down => field = (field + 1) % fields.len(),
-            KeyCode::Backspace => {
-                fields[field].1.pop();
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                fields[field].1.clear()
-            }
-            KeyCode::Char(c) if !c.is_control() && fields[field].1.len() < 1024 => {
-                fields[field].1.push(c)
-            }
             KeyCode::Enter => {
                 let validate = (|| -> Result<()> {
                     if selected == 0 {
-                        connection.state_dir = super::config::expand(fields[0].1.clone())?;
-                        connection.listen = fields[1].1.parse()?;
+                        connection.state_dir = super::config::expand(fields[0].1.value.clone())?;
+                        connection.listen = fields[1].1.value.parse()?;
                     } else {
-                        connection.host = fields[0].1.clone();
-                        connection.port = fields[1].1.parse()?;
-                        connection.ssh_user = fields[2].1.clone();
-                        connection.identity = super::config::expand(fields[3].1.clone())?;
+                        connection.host = fields[0].1.value.clone();
+                        connection.port = fields[1].1.value.parse()?;
+                        connection.ssh_user = fields[2].1.value.clone();
+                        connection.identity = super::config::expand(fields[3].1.value.clone())?;
                         let meta = std::fs::metadata(&connection.identity)?;
                         use std::os::unix::fs::PermissionsExt;
                         if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
@@ -2200,12 +2333,20 @@ async fn settings_wizard(
                     Ok(()) => {
                         let preview = settings_body(connection, None, 0);
                         if confirm_dialog(terminal, "Save these settings?", &preview)? {
-                            return Ok(());
+                            if selected == 1 {
+                                match check_remote_connection(terminal, connection).await {
+                                    Ok(()) => return Ok(()),
+                                    Err(e) if e.is::<super::SetupInterrupted>() => return Err(e),
+                                    Err(e) => error = e.to_string(),
+                                }
+                            } else {
+                                return Ok(());
+                            }
                         }
                     }
                 }
             }
-            _ => {}
+            _ => fields[field].1.edit(key),
         }
     }
 }
@@ -2256,6 +2397,45 @@ fn reset_screen(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    #[test]
+    fn connection_input_edits_unicode_at_the_cursor_and_scrolls() {
+        let mut input = TextInput::new("ab界cd".into());
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        input.edit(key(KeyCode::Home));
+        input.edit(key(KeyCode::Right));
+        input.edit(key(KeyCode::Right));
+        input.edit(key(KeyCode::Delete));
+        input.edit(key(KeyCode::Char('é')));
+        assert_eq!(input.value, "abécd");
+        input.edit(key(KeyCode::Backspace));
+        assert_eq!(input.value, "abcd");
+        input.edit(key(KeyCode::End));
+        input.edit(key(KeyCode::Left));
+        input.edit(key(KeyCode::Char('X')));
+        assert_eq!(input.value, "abcXd");
+        let (_, offset) = input.visible(3);
+        assert!(offset < 3);
+        input.edit(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(input.value, "");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn connection_editor_shows_cursor_inside_long_fields() {
+        let mut terminal = Terminal::new(TestBackend::new(72, 20)).unwrap();
+        let fields = [(
+            "Private key path",
+            TextInput::new(format!("/{}", "x".repeat(100))),
+        )];
+        terminal
+            .draw(|frame| connection_fields(frame, &fields, 0, ""))
+            .unwrap();
+        assert!(terminal.backend().cursor_visible());
+        let position = terminal.backend().cursor_position();
+        assert_eq!(position.y, 1);
+        assert!(position.x < 71);
+    }
+
     #[test]
     fn keyboard_help_only_shows_current_tab_actions() {
         let connection = Connection::default();

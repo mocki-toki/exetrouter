@@ -61,7 +61,7 @@ exr limits
 exr
 ```
 
-Replace the domain. Get the public SSH host key/fingerprint from the operator, verify it independently, and add the matching `[api.example.com]:2222` entry to known_hosts. An unverified `ssh-keyscan` is not proof of identity; never use StrictHostKeyChecking=no. Only the public user key is shared with the operator. The saved config contains a key path, not a private key or bearer token.
+Replace the domain. Get the public SSH host key/fingerprint from the operator, verify it independently, and confirm the matching key when the interactive wizard checks SSH in the same terminal. For scripted configuration, add the matching `[api.example.com]:2222` entry to known_hosts. An unverified `ssh-keyscan` is not proof of identity; never use StrictHostKeyChecking=no. Only the public user key is shared with the operator. The saved config contains a key path, not a private key or bearer token.
 
 In your interactive desktop terminal run `exr token create --name laptop`; its secret is copied to the system clipboard without being displayed. Paste it into your service's secret store, then configure the service's OpenAI base URL to the router's `/v1`. Do not use an agent/headless session to print or capture that secret. See [SDK/client configuration](compatibility.md) and [CLI/TUI](cli.md).
 

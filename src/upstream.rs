@@ -1,3 +1,4 @@
+mod activation;
 use crate::{
     oauth::{self, Account, Vault},
     store::Database,
@@ -108,6 +109,7 @@ pub struct Upstream {
     pub(crate) client: Client,
     inference_client: Client,
     catalog_lock: Mutex<()>,
+    activation_gate: Mutex<()>,
     pub(crate) resets: Mutex<crate::reset::State>,
     pool: crate::pool::Pool,
 }
@@ -121,6 +123,7 @@ impl Upstream {
             client: http_client()?,
             inference_client: client_with_read_timeout(INFERENCE_IDLE_TIMEOUT)?,
             catalog_lock: Mutex::new(()),
+            activation_gate: Mutex::new(()),
             resets: Mutex::new(crate::reset::State::default()),
             pool: crate::pool::Pool::default(),
         })

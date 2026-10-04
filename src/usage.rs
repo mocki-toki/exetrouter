@@ -295,12 +295,18 @@ fn aggregate(
     to: i64,
     user_id: Option<i64>,
 ) -> Result<Vec<UsageRow>> {
+    // Activation is initiated by an authenticated SSH/local user, without an API token.
+    let source = if group == "e.token_id" {
+        "usage_events"
+    } else {
+        "(SELECT at_utc,user_id,token_id,model,input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens FROM usage_events UNION ALL SELECT attempted_at,user_id,NULL,model,input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens FROM quota_activation_attempts)"
+    };
     let sql = format!("SELECT {group},COUNT(*),
         SUM(CASE WHEN e.input_tokens IS NULL OR e.output_tokens IS NULL THEN 1 ELSE 0 END),
         SUM(e.input_tokens),SUM(e.output_tokens),SUM(e.cached_input_tokens),SUM(e.reasoning_output_tokens),
         SUM(CASE WHEN e.input_tokens IS NOT NULL AND e.output_tokens IS NOT NULL THEN 1 ELSE 0 END),
         SUM(CASE WHEN (e.input_tokens IS NULL) != (e.output_tokens IS NULL) THEN 1 ELSE 0 END)
-        FROM usage_events e JOIN users u ON u.id=e.user_id
+        FROM {source} e JOIN users u ON u.id=e.user_id
         WHERE e.at_utc>=?1 AND e.at_utc<?2 AND (?3 IS NULL OR e.user_id=?3) GROUP BY {group} ORDER BY {group}");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt

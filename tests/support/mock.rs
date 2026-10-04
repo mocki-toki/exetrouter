@@ -274,7 +274,7 @@ async fn responses(
         .unwrap()
         .iter()
         .any(|item| item["role"] == "system"));
-    assert_eq!(body["store"], false);
+    assert!(body.get("store").is_some());
     assert_eq!(body["stream"], true);
     if is_compaction(&body) {
         assert_eq!(
@@ -330,7 +330,29 @@ async fn responses(
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [("retry-after", "17")],
-            Json(json!({"error":{"message":"private-upstream-secret"}})),
+            Json(json!({"error":{"message":"Synthetic backend failure","type":"server_error","code":"server_error"}})),
+        )
+            .into_response();
+    }
+    if mode == "backend_parameter_error" {
+        return (StatusCode::UNPROCESSABLE_ENTITY,
+            [("retry-after", "3")],
+            Json(json!({"error":{"message":"Synthetic option is invalid","type":"invalid_request_error","code":"backend_changed_validation","param":"future_option"}}))).into_response();
+    }
+    if mode == "backend_detail_error" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"detail":"Unsupported parameter: synthetic_option"})),
+        )
+            .into_response();
+    }
+    if mode == "backend_invalid_error" {
+        return (StatusCode::BAD_REQUEST, "Synthetic non-JSON backend error").into_response();
+    }
+    if mode == "backend_oversized_error" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"detail":"synthetic large backend error".repeat(4096)})),
         )
             .into_response();
     }
@@ -338,7 +360,7 @@ async fn responses(
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [("retry-after", "17")],
-            Json(json!({"error":{"message":"private upstream error"}})),
+            Json(json!({"error":{"message":"Synthetic backend quota rejection"}})),
         )
             .into_response();
     }
@@ -363,7 +385,7 @@ async fn responses(
                     .any(|item| item["type"] == "function_call_output")
             }))
     {
-        return (StatusCode::TOO_MANY_REQUESTS,Json(json!({"error":{"type":"usage_limit_reached","resets_at":chrono::Utc::now().timestamp()+300,"message":"private upstream error"}}))).into_response();
+        return (StatusCode::TOO_MANY_REQUESTS,Json(json!({"error":{"type":"usage_limit_reached","resets_at":chrono::Utc::now().timestamp()+300,"message":"Synthetic backend quota rejection"}}))).into_response();
     }
     let events = configured_events(&state, &body, &id, &mode, &account);
     let quota_headers = state.quota_headers.lock().unwrap().clone();
@@ -470,7 +492,7 @@ async fn websocket(
                     assert_eq!(body["type"], "response.create");
                     assert!(body.get("stream").is_none());
                     assert!(body["instructions"].is_string());
-                    assert_eq!(body["store"], false);
+                    assert!(body.get("store").is_some());
                     let cache = body["prompt_cache_key"].as_str().unwrap();
                     assert_eq!(cache.len(), 64);
                     state.cache_keys.lock().unwrap().push(cache.to_owned());
@@ -546,6 +568,11 @@ fn configured_events(
     mode: &str,
     account: &str,
 ) -> Vec<Value> {
+    if mode == "backend_parameter_error" {
+        return vec![
+            json!({"type":"error","status":422,"error":{"message":"Synthetic option is invalid","type":"invalid_request_error","code":"backend_changed_validation","param":"future_option"}}),
+        ];
+    }
     let mut events = if is_compaction(body) {
         let mut output = vec![
             json!({"type":"compaction","id":format!("cmp_{id}"),"encrypted_content":format!("synthetic-encrypted-state-{account}-{id}")}),
@@ -581,6 +608,13 @@ fn configured_events(
                             json!([format!("synthetic-tool-state-{account}")]);
                     }
                 }
+            }
+        }
+    }
+    if mode == "saved_conversation" {
+        for event in &mut events {
+            if event.get("response").is_some() {
+                event["response"]["conversation"] = json!({"id":"conv_synthetic_owned"});
             }
         }
     }
@@ -679,7 +713,7 @@ fn configured_events(
             terminal["type"] = json!("response.failed");
             terminal["response"]["status"] = json!("failed");
             terminal["response"]["error"] =
-                json!({"code":"server_error","message":"private-upstream-secret"});
+                json!({"code":"server_error","message":"Synthetic backend generation failure"});
         }
         "refusal" => {
             let item = json!({"id":"msg_fixture","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"Synthetic refusal"}]});

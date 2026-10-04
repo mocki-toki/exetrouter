@@ -227,7 +227,9 @@ impl Local {
                         crate::doctor::snapshot(conn, true, limits, chrono::Utc::now().timestamp())
                     })
                     .await?;
-                self.upstream.account_metadata(&mut report, live).await;
+                self.upstream
+                    .account_metadata(&mut report, live, user)
+                    .await;
                 let mut value = serde_json::to_value(report)?;
                 self.db
                     .call(move |conn| {

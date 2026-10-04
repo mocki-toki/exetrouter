@@ -139,9 +139,14 @@ enum LimitsCommand {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum ModelFormat {
-    OpenaiJson,
-    CodexJson,
-    OpencodeJsonc,
+    #[value(name = "openai-json")]
+    Openai,
+    #[value(name = "codex-json")]
+    Codex,
+    #[value(name = "opencode-v1-json")]
+    OpencodeV1,
+    #[value(name = "opencode-v2-json")]
+    OpencodeV2,
 }
 
 #[derive(Subcommand)]
@@ -413,14 +418,15 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
     };
     let mut result = ssh_request(args, request).await?;
     if let CommandLine::Models { format } = &args.command {
-        let format = format.unwrap_or(ModelFormat::OpenaiJson);
-        if !matches!(format, ModelFormat::OpenaiJson) {
+        let format = format.unwrap_or(ModelFormat::Openai);
+        if !matches!(format, ModelFormat::Openai) {
             let models: Vec<crate::catalog::Model> = serde_json::from_value(result["data"].clone())
                 .map_err(|_| "invalid model metadata reply")?;
             result = match format {
-                ModelFormat::CodexJson => crate::catalog::codex(&models)?,
-                ModelFormat::OpencodeJsonc => crate::catalog::opencode(&models)?,
-                ModelFormat::OpenaiJson => unreachable!(),
+                ModelFormat::Codex => crate::catalog::codex(&models)?,
+                ModelFormat::OpencodeV1 => crate::catalog::opencode_v1(&models)?,
+                ModelFormat::OpencodeV2 => crate::catalog::opencode_v2(&models)?,
+                ModelFormat::Openai => unreachable!(),
             };
         }
     }
@@ -489,22 +495,43 @@ async fn reset_credit(args: &Session, account: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+pub(super) struct SetupInterrupted;
+impl std::fmt::Display for SetupInterrupted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Setup cancelled; no settings saved")
+    }
+}
+impl std::error::Error for SetupInterrupted {}
+
 async fn ssh_request(args: &Session, request: ControlRequest) -> Result<Value> {
     if let Some(local) = &args.connection.local {
         return local.request(request).await;
     }
-    let destination = format!("{}@{}", args.connection.ssh_user, args.connection.host);
+    remote_request(&args.connection, request, false).await
+}
+
+fn ssh_command(connection: &config::Connection, interactive: bool) -> Command {
+    let destination = format!("{}@{}", connection.ssh_user, connection.host);
     let mut ssh = Command::new("ssh");
     ssh.args([
         "-T",
         "-p",
-        &args.connection.port.to_string(),
+        &connection.port.to_string(),
         "-o",
-        "BatchMode=yes",
+        if interactive {
+            "BatchMode=no"
+        } else {
+            "BatchMode=yes"
+        },
         "-o",
         "ClearAllForwardings=yes",
         "-o",
-        "StrictHostKeyChecking=yes",
+        if interactive {
+            "StrictHostKeyChecking=ask"
+        } else {
+            "StrictHostKeyChecking=yes"
+        },
         "-o",
         "ConnectTimeout=10",
         "-o",
@@ -514,21 +541,52 @@ async fn ssh_request(args: &Session, request: ControlRequest) -> Result<Value> {
         "-o",
         "IdentitiesOnly=yes",
         "-i",
-        &args.connection.identity,
+        &connection.identity,
     ]);
+    if interactive {
+        ssh.args([
+            "-o",
+            "PreferredAuthentications=publickey",
+            "-o",
+            "NumberOfPasswordPrompts=0",
+        ]);
+    }
     ssh.arg(destination)
         .arg("exrd-gateway")
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(if interactive {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        });
+    ssh
+}
+
+async fn remote_request(
+    connection: &config::Connection,
+    request: ControlRequest,
+    interactive: bool,
+) -> Result<Value> {
+    let mut ssh = ssh_command(connection, interactive);
     let mut child = ssh.spawn()?;
-    let (status, output) = exchange(
-        &mut child,
-        serde_json::to_vec(&request)?,
-        Duration::from_secs(45),
-    )
-    .await?;
+    let payload = serde_json::to_vec(&request)?;
+    let result = if interactive {
+        tokio::select! {
+            biased;
+            signal = tokio::signal::ctrl_c() => {
+                signal?;
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(SetupInterrupted.into());
+            }
+            result = exchange(&mut child, payload, Duration::from_secs(120)) => result,
+        }
+    } else {
+        exchange(&mut child, payload, Duration::from_secs(45)).await
+    };
+    let (status, output) = result?;
     if !status.success() {
         return Err(format!("SSH connection failed ({status}). Check the saved connection, verified known_hosts entry and loaded SSH key in ssh-agent.").into());
     }
@@ -691,6 +749,32 @@ fn request_kind(command: &CommandLine) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_setup_asks_for_host_trust_and_regular_requests_require_it() {
+        let connection = config::Connection {
+            identity: "/synthetic/key".into(),
+            ..Default::default()
+        };
+        for (interactive, host_check, batch) in [
+            (true, "StrictHostKeyChecking=ask", "BatchMode=no"),
+            (false, "StrictHostKeyChecking=yes", "BatchMode=yes"),
+        ] {
+            let command = ssh_command(&connection, interactive);
+            let args = command
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect::<Vec<_>>();
+            assert!(args.contains(&host_check));
+            assert!(args.contains(&batch));
+            assert!(args.contains(&"ClearAllForwardings=yes"));
+            assert!(!args.contains(&"StrictHostKeyChecking=no"));
+            if interactive {
+                assert!(args.contains(&"PreferredAuthentications=publickey"));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn timeout_reaps_hung_child() {

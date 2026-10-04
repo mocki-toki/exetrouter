@@ -1,5 +1,5 @@
 //! The text/image-input/function-call subset of Chat Completions. Validation is deliberately
-//! explicit: fields without an established Codex-backend mapping are rejected.
+//! explicit for translated structures; other top-level fields pass to the backend.
 use crate::{usage::Counters, Result};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -185,34 +185,6 @@ pub(crate) struct Request {
 
 pub(crate) fn prepare(value: Value) -> std::result::Result<Request, InvalidRequest> {
     let request = object(&value, "request")?;
-    fields(
-        request,
-        &[
-            "model",
-            "messages",
-            "stream",
-            "stream_options",
-            "n",
-            "tools",
-            "tool_choice",
-            "parallel_tool_calls",
-            "store",
-            "reasoning_effort",
-            "response_format",
-            "prompt_cache_key",
-        ],
-        "request",
-    )?;
-    if request
-        .get("n")
-        .filter(|v| !v.is_null())
-        .is_some_and(|v| v.as_u64() != Some(1))
-    {
-        return Err(invalid("n", "only n=1 is supported"));
-    }
-    if boolean(request, "store", false, "store")? {
-        return Err(invalid("store", "only store=false is supported"));
-    }
     let streaming = boolean(request, "stream", false, "stream")?;
     let include_usage = match request.get("stream_options").filter(|v| !v.is_null()) {
         None => false,
@@ -366,6 +338,38 @@ pub(crate) fn prepare(value: Value) -> std::result::Result<Request, InvalidReque
     }
     // Codex requires this field even when instructions live in input messages.
     let mut payload = json!({"model":request.get("model").ok_or_else(|| invalid("model", "model is required"))?,"instructions":"","input":input,"store":false,"stream":true});
+    // Translate fields owned by the adapter; forward other top-level options
+    // unchanged so the backend, rather than a static allowlist, validates them.
+    for (key, value) in request {
+        if ![
+            "model",
+            "messages",
+            "input",
+            "stream",
+            "stream_options",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "reasoning_effort",
+            "response_format",
+            "max_tokens",
+            "max_completion_tokens",
+            "n",
+        ]
+        .contains(&key.as_str())
+        {
+            payload[key] = value.clone();
+        }
+    }
+    if let Some(n) = request.get("n").filter(|n| !n.is_null() && **n != json!(1)) {
+        payload["n"] = n.clone();
+    }
+    if let Some(cap) = request
+        .get("max_completion_tokens")
+        .or_else(|| request.get("max_tokens"))
+    {
+        payload["max_output_tokens"] = cap.clone();
+    }
     if let Some(value) = request.get("prompt_cache_key") {
         payload["prompt_cache_key"] = value.clone();
     }
@@ -468,12 +472,6 @@ pub(crate) fn prepare(value: Value) -> std::result::Result<Request, InvalidReque
     }
     if let Some(effort) = request.get("reasoning_effort").filter(|v| !v.is_null()) {
         let effort = string(Some(effort), "reasoning_effort")?;
-        if !matches!(
-            effort,
-            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
-        ) {
-            return Err(invalid("reasoning_effort", "unsupported reasoning effort"));
-        }
         payload["reasoning"] = json!({"effort":effort});
     }
     if let Some(format) = request.get("response_format").filter(|v| !v.is_null()) {

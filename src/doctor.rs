@@ -1,7 +1,7 @@
 //! Read-only configuration diagnostics from local metadata. Account email labels
 //! are added by the service from encrypted credentials, without upstream requests.
 use crate::{server::LimitSnapshot, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -32,6 +32,8 @@ pub struct AccountQuota {
     pub reset_credits: Option<crate::reset::Credits>,
     #[serde(default)]
     pub refresh_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly_activation: Option<String>,
     pub quota: crate::quota::Summary,
 }
 
@@ -166,6 +168,7 @@ pub(crate) fn snapshot(
             label: "Email unavailable".into(),
             reset_credits: None,
             refresh_error: None,
+            weekly_activation: conn.query_row("SELECT CASE WHEN status='pending' AND attempted_at<=?3 THEN 'unknown' ELSE status END FROM quota_activation_attempts WHERE account_id=?1 AND attempted_at>?2 ORDER BY attempted_at DESC,id DESC LIMIT 1", rusqlite::params![id,now-604800,now-60], |row| row.get(0)).optional()?,
             quota,
         });
     }

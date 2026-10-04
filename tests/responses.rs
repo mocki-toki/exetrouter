@@ -542,29 +542,36 @@ async fn ws_turn_metadata_pins_http_and_new_ws_continuations_without_leaking_hea
 }
 
 #[tokio::test]
-async fn unsupported_public_state_and_named_lanes_fail_before_submission() {
+async fn backend_options_are_forwarded_over_http_and_websocket() {
     let fixture = Fixture::start(false).await;
     let mut socket = fixture.ws().await;
-    for (field, value) in [
-        ("stream_id", json!("parallel")),
-        ("background", json!(true)),
-        ("conversation", json!("conv_fixture")),
-        ("context_management", json!([{"type":"compaction"}])),
-    ] {
-        let mut body = request();
-        body[field] = value;
-        assert_eq!(fixture.post(body.clone()).await.status(), 400);
-        body["type"] = json!("response.create");
-        socket
-            .send(Message::Text(body.to_string().into()))
-            .await
-            .unwrap();
+    let options = json!({"max_output_tokens":64,"stream_id":"parallel","background":true,
+        "conversation":null,"context_management":[{"type":"compaction","compact_threshold":100000}],
+        "future_option":{"enabled":true},"store":true});
+    let mut body = request();
+    for (field, value) in options.as_object().unwrap() {
+        body[field] = value.clone();
+    }
+    assert_eq!(fixture.post(body.clone()).await.status(), 200);
+    body["type"] = json!("response.create");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    loop {
         let event: Value =
             serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
-        assert_eq!(event["error"]["code"], "unsupported_capability");
+        if event["type"] == "response.completed" {
+            break;
+        }
     }
-    assert!(fixture.mock.requests.lock().unwrap().is_empty());
-    assert!(fixture.rows().await.is_empty());
+    let sent = fixture.mock.requests.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    for request in sent {
+        for (field, value) in options.as_object().unwrap() {
+            assert_eq!(&request[field], value, "{field}");
+        }
+    }
     socket.close(None).await.unwrap();
     fixture.stop().await;
 }
@@ -890,7 +897,7 @@ async fn response_backoff_is_durable_and_checkpoint_remains_on_its_original_acco
         .unwrap()
         .mode = "upstream_503".into();
     let rejected = fixture.post(pinned.clone()).await;
-    assert_eq!(rejected.status(), 502);
+    assert_eq!(rejected.status(), 503);
     assert!(!rejected
         .text()
         .await
@@ -1348,7 +1355,7 @@ async fn older_success_cannot_clear_a_newer_response_backoff() {
         .contains("response.created"));
     let mut body = request();
     body["test_mode"] = json!("upstream_503");
-    assert_eq!(fixture.post(body).await.status(), 502);
+    assert_eq!(fixture.post(body).await.status(), 503);
     fixture.mock.release.notify_one();
     assert!(older.text().await.unwrap().contains("response.completed"));
     let paused = fixture.post(request()).await;
@@ -1796,7 +1803,8 @@ async fn chat_failures_never_emit_success_or_repeat_inference() {
         assert_eq!(done, 0);
         assert!(chunks
             .iter()
-            .any(|chunk| chunk["error"]["code"] == "upstream_interrupted"));
+            .any(|chunk| chunk["error"]["code"] == "upstream_interrupted"
+                || chunk["error"]["code"] == "upstream_rejected"));
         assert!(chunks.iter().all(|chunk| chunk
             .pointer("/choices/0/finish_reason")
             .is_none_or(Value::is_null)));
@@ -2071,7 +2079,6 @@ async fn chat_quota_error_reports_json_429_or_stream_error_without_a_success_ter
             assert!(!body.contains("synthetic quota rejection"));
         } else {
             assert_eq!(reply.status(), 429);
-            assert!(reply.headers().contains_key("retry-after"));
             assert_eq!(
                 reply.json::<Value>().await.unwrap()["error"]["code"],
                 "upstream_cooldown"
@@ -2153,15 +2160,9 @@ async fn websocket_handshake_quota_rejection_never_falls_back_to_generation() {
 }
 
 #[tokio::test]
-async fn chat_rejects_unmapped_fields_and_malformed_history_before_generation() {
+async fn chat_rejects_malformed_translated_structures_before_generation() {
     let fixture = Fixture::start(false).await;
     let invalids = [
-        ("max_tokens", json!(20)),
-        ("max_completion_tokens", json!(20)),
-        ("temperature", json!(0.5)),
-        ("top_p", json!(0.7)),
-        ("n", json!(2)),
-        ("store", json!(true)),
         ("stream", json!("true")),
         ("stream_options", json!({"include_usage":true})),
         ("tool_choice", json!("required")),
@@ -2319,24 +2320,136 @@ async fn native_custom_namespace_phase_images_and_opaque_items_keep_order_and_ow
 }
 
 #[tokio::test]
-async fn output_caps_fail_before_inference_instead_of_being_silently_ignored() {
+async fn chat_caps_are_translated_and_other_options_are_forwarded() {
     let fixture = Fixture::start(false).await;
+    for field in ["max_tokens", "max_completion_tokens"] {
+        let mut body = chat_request(false);
+        body[field] = json!(64);
+        body["temperature"] = json!(0.2);
+        body["future_option"] = json!({"mode":"new"});
+        body["n"] = json!(2);
+        body["reasoning_effort"] = json!("future_effort");
+        assert_eq!(fixture.chat(body).await.status(), 200);
+        let sent = fixture
+            .mock
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(sent["max_output_tokens"], 64);
+        assert!(sent.get(field).is_none());
+        assert_eq!(sent["temperature"], 0.2);
+        assert_eq!(sent["future_option"], json!({"mode":"new"}));
+        assert_eq!(sent["n"], 2);
+        assert_eq!(sent["reasoning"]["effort"], "future_effort");
+    }
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn backend_validation_status_is_retained_but_errors_are_redacted_without_retry() {
+    let fixture = Fixture::start(false).await;
+    *fixture.mock.mode.lock().unwrap() = "backend_parameter_error".into();
+    fixture.mock.reject_websocket.store(true, Ordering::SeqCst);
+    for chat in [false, true] {
+        let reply = if chat {
+            fixture.chat(chat_request(false)).await
+        } else {
+            fixture.post(request()).await
+        };
+        assert_eq!(reply.status(), 422);
+        assert_eq!(reply.headers()["retry-after"], "3");
+        assert_eq!(
+            reply.json::<Value>().await.unwrap(),
+            json!({"error":{"message":"upstream rejected the request","type":"upstream_rejected"}})
+        );
+    }
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 2);
+    let rows = fixture.rows().await;
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .all(|r| r["status"] == "upstream_rejected" && r["input"].is_null()));
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn backend_error_bodies_are_redacted_and_remain_bounded() {
+    let fixture = Fixture::start(false).await;
+    for (mode, expected) in [
+        (
+            "backend_detail_error",
+            json!({"detail":"Unsupported parameter: synthetic_option"}),
+        ),
+        (
+            "upstream_503",
+            json!({"error":{"message":"Synthetic backend failure","type":"server_error","code":"server_error"}}),
+        ),
+    ] {
+        fixture.expire_health().await;
+        let mut body = request();
+        body["test_mode"] = json!(mode);
+        let reply = fixture.post(body).await;
+        assert_eq!(
+            reply.status(),
+            if mode == "upstream_503" { 503 } else { 400 }
+        );
+        let value = reply.json::<Value>().await.unwrap();
+        assert_eq!(value["error"]["type"], "upstream_rejected");
+        assert!(!value.to_string().contains(expected.to_string().as_str()));
+        assert!(!value.to_string().contains("Synthetic"));
+    }
+    for mode in ["backend_invalid_error", "backend_oversized_error"] {
+        fixture.expire_health().await;
+        let mut body = request();
+        body["test_mode"] = json!(mode);
+        let reply = fixture.post(body).await;
+        assert_eq!(reply.status(), 400);
+        let value = reply.json::<Value>().await.unwrap();
+        assert_eq!(value["error"]["type"], "upstream_rejected");
+        assert!(!value.to_string().contains("Synthetic non-JSON"));
+        assert!(!value.to_string().contains("synthetic large"));
+    }
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 4);
+    assert_eq!(fixture.rows().await.len(), 4);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn backend_websocket_errors_survive_chat_conversion_and_native_forwarding() {
+    let fixture = Fixture::start(false).await;
+    *fixture.mock.mode.lock().unwrap() = "backend_parameter_error".into();
+    let expected = json!({"error":{"message":"Synthetic option is invalid","type":"invalid_request_error","code":"backend_changed_validation","param":"future_option"}});
+    let reply = fixture.chat(chat_request(false)).await;
+    assert_eq!(reply.status(), 422);
+    assert_eq!(
+        reply.json::<Value>().await.unwrap()["error"]["code"],
+        "upstream_rejected"
+    );
+    let body = fixture.chat(chat_request(true)).await.text().await.unwrap();
+    let (chunks, done) = chat_chunks(&body);
+    assert_eq!(done, 0);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0]["error"]["code"], "upstream_rejected");
+    assert!(!body.contains("Synthetic option"));
+    let mut ws = fixture.ws().await;
     let mut body = request();
-    body["max_output_tokens"] = json!(64);
-    let reply = fixture.post(body.clone()).await;
-    assert_eq!(reply.status(), 400);
-    assert!(reply.text().await.unwrap().contains("max_output_tokens"));
-    let mut socket = fixture.ws().await;
     body["type"] = json!("response.create");
-    socket
-        .send(Message::Text(body.to_string().into()))
+    ws.send(Message::Text(body.to_string().into()))
         .await
         .unwrap();
-    let reply = socket.next().await.unwrap().unwrap().into_text().unwrap();
-    assert!(reply.contains("max_output_tokens"));
-    assert!(fixture.rows().await.is_empty());
-    assert!(fixture.mock.requests.lock().unwrap().is_empty());
-    socket.close(None).await.unwrap();
+    let event = terminal(&mut ws).await;
+    assert_eq!(event["status"], 422);
+    assert_eq!(event["error"], expected["error"]);
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 3);
+    let rows = fixture.rows().await;
+    assert_eq!(rows.len(), 3);
+    assert!(rows
+        .iter()
+        .all(|row| row["status"] == "failed" && row["input"].is_null()));
+    ws.close(None).await.unwrap();
     fixture.stop().await;
 }
 
@@ -4344,6 +4457,22 @@ async fn model_metadata_is_authenticated_persistent_and_conservative_across_acco
         open["providers"]["openai"]["models"]["gpt-test"]["limit"],
         json!({"context":32000,"input":30400,"output":0})
     );
+    let v1 = get(
+        format!("{}/v1/models/opencode-v1", fixture.url),
+        fixture.secret.clone(),
+    )
+    .await;
+    let v2 = get(
+        format!("{}/v1/models/opencode-v2", fixture.url),
+        fixture.secret.clone(),
+    )
+    .await;
+    assert_eq!(v2, open);
+    assert_eq!(
+        v1["provider"]["openai"]["models"]["gpt-test"]["limit"],
+        open["providers"]["openai"]["models"]["gpt-test"]["limit"]
+    );
+    assert!(v1["provider"]["openai"]["models"]["gpt-test"]["variants"].is_object());
     row["shell_type"] = json!("shell_command");
     fixture
         .mock
@@ -5040,5 +5169,122 @@ async fn check_opencode_v1_http(client: &str) {
         .iter()
         .all(|row| row["status"] == "completed"));
     println!("{client}: resumed session passed");
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn saved_conversations_are_user_owned_pinned_and_never_migrate_on_quota() {
+    let mut fixture = Fixture::start(false).await;
+    fixture.add_account(&["gpt-test"], false).await;
+    *fixture.mock.mode.lock().unwrap() = "saved_conversation".into();
+    let mut initial = request();
+    initial["stream"] = json!(false);
+    let reply = fixture.post(initial).await;
+    assert_eq!(reply.status(), 200);
+    assert_eq!(
+        reply.json::<Value>().await.unwrap()["conversation"]["id"],
+        "conv_synthetic_owned"
+    );
+    let first = fixture.mock.request_accounts.lock().unwrap()[0].clone();
+    for conversation in [
+        json!("conv_synthetic_owned"),
+        json!({"id":"conv_synthetic_owned"}),
+    ] {
+        let mut body = request();
+        body["stream"] = json!(false);
+        body["conversation"] = conversation.clone();
+        let reply = fixture.post(body.clone()).await;
+        assert_eq!(reply.status(), 200);
+        assert_eq!(
+            fixture
+                .mock
+                .request_accounts
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap(),
+            &first
+        );
+        assert_eq!(
+            fixture.mock.requests.lock().unwrap().last().unwrap()["conversation"],
+            conversation
+        );
+    }
+    let mut unknown = request();
+    unknown["conversation"] = json!("conv_foreign");
+    let count = fixture.mock.requests.lock().unwrap().len();
+    assert_eq!(fixture.post(unknown.clone()).await.status(), 400);
+    let mut ws = fixture.ws().await;
+    unknown["type"] = json!("response.create");
+    ws.send(Message::Text(unknown.to_string().into()))
+        .await
+        .unwrap();
+    let error: Value =
+        serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(error["error"]["code"], "context_not_found");
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), count);
+    ws.close(None).await.unwrap();
+    let foreign_token = fixture
+        .db
+        .call(|conn| {
+            let user = exetrouter::create_user(conn, "foreign-user")?;
+            Ok(exetrouter::create_token(conn, &[1; 32], user, "foreign-device", 1)?.secret)
+        })
+        .await
+        .unwrap();
+    let mut stolen = request();
+    stolen["conversation"] = json!("conv_synthetic_owned");
+    let rejected = reqwest::Client::new()
+        .post(format!("{}/v1/responses", fixture.url))
+        .bearer_auth(foreign_token)
+        .json(&stolen)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), 400);
+    assert_eq!(
+        rejected.json::<Value>().await.unwrap()["error"]["code"],
+        "context_not_found"
+    );
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), count);
+    fixture.restart().await;
+    let mut owned = request();
+    owned["stream"] = json!(false);
+    owned["conversation"] = json!("conv_synthetic_owned");
+    assert_eq!(fixture.post(owned.clone()).await.status(), 200);
+    let mut socket = fixture.ws().await;
+    let mut frame = owned.clone();
+    frame["type"] = json!("response.create");
+    socket
+        .send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+    assert_eq!(
+        fixture
+            .mock
+            .request_accounts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap(),
+        &first
+    );
+    socket.close(None).await.unwrap();
+    // Synthetic pre-generation refusal must not send backend-owned history elsewhere.
+    *fixture.mock.mode.lock().unwrap() = "quota_http".into();
+    let count = fixture.mock.requests.lock().unwrap().len();
+    assert_eq!(fixture.post(owned).await.status(), 429);
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), count + 1);
+    assert_eq!(
+        fixture
+            .mock
+            .request_accounts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap(),
+        &first
+    );
     fixture.stop().await;
 }

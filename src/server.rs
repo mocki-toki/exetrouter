@@ -473,7 +473,9 @@ async fn process_control(
             .await
             .map_err(|_| invalid("storage_unavailable", "server diagnostics unavailable"))?;
         if let Some(upstream) = &state.upstream {
-            upstream.account_metadata(&mut report, live_limits).await;
+            upstream
+                .account_metadata(&mut report, live_limits, user_id)
+                .await;
         }
         let mut value = serde_json::to_value(report)
             .map_err(|_| invalid("storage_unavailable", "server diagnostics unavailable"))?;
@@ -504,6 +506,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/models", get(models))
         .route("/v1/models/codex", get(codex_models))
         .route("/v1/models/opencode", get(opencode_models))
+        .route("/v1/models/opencode-v1", get(opencode_v1_models))
+        .route("/v1/models/opencode-v2", get(opencode_models))
         .route("/v1/responses", get(transport::websocket).post(responses))
         .route("/v1/responses/compact", post(compact))
         .route("/v1/chat/completions", post(chat_completions))
@@ -650,18 +654,16 @@ async fn models(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-async fn client_models(state: Arc<AppState>, codex: bool) -> Response {
+async fn client_models(state: Arc<AppState>, format: &str) -> Response {
     let Some(upstream) = &state.upstream else {
         return unavailable_get().await;
     };
     let result = match upstream.models().await {
-        Ok(models) => {
-            if codex {
-                crate::catalog::codex(&models)
-            } else {
-                crate::catalog::opencode(&models)
-            }
-        }
+        Ok(models) => match format {
+            "codex" => crate::catalog::codex(&models),
+            "opencode-v1" => crate::catalog::opencode_v1(&models),
+            _ => crate::catalog::opencode_v2(&models),
+        },
         Err(err) => Err(err),
     };
     match result {
@@ -674,10 +676,13 @@ async fn client_models(state: Arc<AppState>, codex: bool) -> Response {
     }
 }
 async fn codex_models(State(state): State<Arc<AppState>>) -> Response {
-    client_models(state, true).await
+    client_models(state, "codex").await
+}
+async fn opencode_v1_models(State(state): State<Arc<AppState>>) -> Response {
+    client_models(state, "opencode-v1").await
 }
 async fn opencode_models(State(state): State<Arc<AppState>>) -> Response {
-    client_models(state, false).await
+    client_models(state, "opencode-v2").await
 }
 
 async fn unavailable_get() -> Response {

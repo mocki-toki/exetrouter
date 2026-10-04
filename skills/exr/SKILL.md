@@ -40,11 +40,11 @@ exr usage --period week --by token --json
 exr limits --json
 ```
 
-Configuration is `$XDG_CONFIG_HOME/exr/config.json`, default `~/.config/exr/config.json`. `--config PATH` overrides `EXR_CONFIG`; command-line host/port/ssh-user/identity override saved settings. Defaults: `localhost:2222`, user `routercli`. Key registration is an operator action; verify the server host key and load a protected key into ssh-agent. Never disable host-key verification.
+Configuration is `$XDG_CONFIG_HOME/exr/config.json`, default `~/.config/exr/config.json`. `--config PATH` overrides `EXR_CONFIG`; command-line host/port/ssh-user/identity override saved settings. Defaults: `localhost:2222`, user `routercli`. Key registration is an operator action. The interactive connection wizard checks SSH before saving and lets OpenSSH ask for first-time host-key confirmation in the same terminal; a human must verify the fingerprint with the operator before accepting. Normal requests still require a verified known_hosts entry. Load a protected key into ssh-agent for normal dashboard use. Never disable host-key verification.
 
 Use `--json` for parsing. Default outputs are readable text without character-art charts; `exr` without a command opens the English TUI and requires a terminal. `tokens` aliases `token`, defaulting to list; `quota` aliases `limits`.
 
-Doctor is a read-only snapshot, not a TLS/upstream/inference probe. Nonzero exit may still include a valid diagnostic JSON report. Limits fetch live usage and reset-credit availability and label accounts by email: 480-minute windows are 8-hour, 10080-minute windows weekly. Do not infer duration from primary/secondary, sum percentages across subscriptions or treat stale/reset-elapsed values as current availability. Unknown usage is not zero usage; cached/reasoning counters are subsets of input/output.
+Doctor is a read-only snapshot, not a TLS/upstream/inference probe. Nonzero exit may still include a valid diagnostic JSON report. Limits fetch live usage and reset-credit availability and label accounts by email. A fresh 100%-remaining weekly window with a reset exactly seven days ahead at minute precision may trigger one minimal gpt-5.6-sol request on that enabled account. Attempts are durably limited to once per seven days and never replayed; Doctor, catalog and update checks remain read-only. Window labels: 480-minute windows are 8-hour, 10080-minute windows weekly. Do not infer duration from primary/secondary, sum percentages across subscriptions or treat stale/reset-elapsed values as current availability. Unknown usage is not zero usage; cached/reasoning counters are subsets of input/output.
 
 ## Tokens
 

@@ -86,7 +86,7 @@ pub(super) fn response(kind: &str, v: &Value) -> String {
     match kind {
         "models" => {
             let rows = v["data"].as_array().into_iter().flatten().rev().map(|m| vec![field(m,"id"), field(m,"display_name"), field(&m["exetrouter"],"context_window")]).collect::<Vec<_>>();
-            format!("Available models\n\n{}\nExport metadata: exr models --json --format <codex-json|opencode-jsonc>", table(&["MODEL","NAME","CONTEXT"], &rows))
+            format!("Available models\n\n{}\nExport metadata: exr models --json --format <codex-json|opencode-v1-json|opencode-v2-json>", table(&["MODEL","NAME","CONTEXT"], &rows))
         }
         "tokens" => {
             let rows = v.as_array().into_iter().flatten().map(|t| vec![field(t,"id"),field(t,"name"), token_status(t),date(&t["expires_at"]),date(&t["last_used_at"])]).collect::<Vec<_>>();
@@ -295,13 +295,26 @@ pub(super) fn limits(v: &Value) -> String {
             ));
         }
         text.push_str(&format!("  {}\n", reset_credits(account)));
+        if let Some(activation) = weekly_activation(account) {
+            text.push_str(&format!("  {activation}\n"));
+        }
         if let Some(error) = account["refresh_error"].as_str() {
             text.push_str(&format!("  {}\n", safe(error)));
         }
         text.push('\n');
     }
-    text.push_str("Only windows with a reported duration appear. Stale/reset-elapsed values are historical.\nRefresh reads live subscription limits; no inference is generated.\nUse a credit: exr limits reset <email> (requires confirmation and ≤5% remaining).");
+    text.push_str("Only windows with a reported duration appear. Stale/reset-elapsed values are historical.\nLive limits may activate an unused weekly window with one minimal gpt-5.6-sol request.\nUse a credit: exr limits reset <email> (requires confirmation and ≤5% remaining).");
     text
+}
+pub(super) fn weekly_activation(account: &Value) -> Option<String> {
+    let status = match account["weekly_activation"].as_str()? {
+        "completed" => "completed",
+        "pending" => "pending",
+        "incomplete" => "incomplete",
+        "rejected" => "rejected",
+        _ => "outcome unknown",
+    };
+    Some(format!("Weekly activation: {status} · gpt-5.6-sol"))
 }
 pub(super) fn reset_credits(account: &Value) -> String {
     let credits = &account["reset_credits"];

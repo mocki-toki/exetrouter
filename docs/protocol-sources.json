@@ -57,6 +57,14 @@
         {
           "path": "packages/ai/src/protocols/open-responses-continuation.ts",
           "sha256": "5ad84c6e89641c701815e40c35d888cbfa43f9961506b3647c321d522016bf4e"
+        },
+        {
+          "path": "packages/schema/src/config/provider.ts",
+          "sha256": "1028be6f011c6c6fe654e2c4ee00785488a9dfddceb1579aaa91c2cf023f5b26"
+        },
+        {
+          "path": "packages/core/src/config/plugin/provider.ts",
+          "sha256": "c4b9cf9e174509f048bf65eebf23b13a38b334d4fcce5aee575911da724d6240"
         }
       ],
       "npm_package": "@opencode/cli"
@@ -103,6 +111,10 @@
         {
           "path": "packages/opencode/src/session/message-v2.ts",
           "sha256": "bfeb41e03e3788c83d3a031cce0aa1cf19a82c024a09e2a6aadbebb7a3d40d53"
+        },
+        {
+          "path": "packages/core/src/v1/config/provider.ts",
+          "sha256": "c496dea619e8e9d2d09b7a2353f2e62bff6a2276471c161c3988059a1b6ac303"
         }
       ],
       "npm_package": "opencode-ai"

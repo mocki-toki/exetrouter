@@ -172,43 +172,16 @@ Start `opencode` and select a model through `/models`, or run `opencode --model 
 
 ### OpenCode model metadata
 
-The minimal examples above use OpenCode's bundled metadata. It may differ from the models and limits available in your account pool. To use the router's reported context limits, capabilities and reasoning variants, export:
+Export the format matching your installed OpenCode version:
 
 ```sh
-exr models --json --format opencode-jsonc > exetrouter-models.json
+# OpenCode V1
+exr models --json --format opencode-v1-json > exetrouter-models-v1.json
+
+# OpenCode V2
+exr models --json --format opencode-v2-json > exetrouter-models-v2.json
 ```
 
-For V2, copy `providers.openai.models` from that file into your configuration's `providers.openai.models`. Refresh the export after changes to the account pool.
+Both exports are JSON configuration fragments, accepted inside `opencode.json` or `opencode.jsonc`. For V1, merge `provider.openai.models` into that same location in your configuration. For V2, merge `providers.openai.models`. Keep the connection and token settings from the matching example above and preserve your other configuration; the model export does not contain a URL or credentials.
 
-<details>
-<summary>Convert the model export for V1</summary>
-
-V1 uses a different model format. Convert the same export:
-
-```sh
-python3 - <<'PYMODELS'
-import json
-with open("exetrouter-models.json") as source:
-    models = json.load(source)["providers"]["openai"]["models"]
-result = {
-    key: {
-        "name": model["name"],
-        "limit": model["limit"],
-        "tool_call": model["capabilities"]["tools"],
-        "modalities": {
-            "input": model["capabilities"]["input"],
-            "output": model["capabilities"]["output"],
-        },
-        "reasoning": bool(model["variants"]),
-        "options": {**model["settings"], "store": False},
-        "variants": {variant["id"]: variant["settings"] for variant in model["variants"]},
-    }
-    for key, model in models.items()
-}
-print(json.dumps(result, indent=2))
-PYMODELS
-```
-
-Copy the result into `provider.openai.models`. Refresh it after changes to the account pool.
-
-</details>
+Export shapes were checked against the current V1 1.18.34 and V2 2.0.22 configuration sources on 2026-10-04, with offline CLI/API projection tests; this does not extend the inference matrix above. V1 exports model options and a reasoning-variant object; V2 exports model settings, capabilities and a variant array. Both use the account-visible context/input limits, modalities and reasoning defaults. Unknown output limits remain zero under OpenCode's convention. Refresh the export after account-pool or catalog changes. Authenticated HTTP clients can obtain the same fragments at `/v1/models/opencode-v1` and `/v1/models/opencode-v2`; `/v1/models/opencode` retains the V2 projection.

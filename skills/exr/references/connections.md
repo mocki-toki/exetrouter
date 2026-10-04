@@ -14,7 +14,7 @@ Migrate legacy `[profiles.exetrouter]`/top-level `profile="exetrouter"` from the
 
 Use the built-in provider ID `openai`, package `@opencode/ai/providers/openai/responses`, env `EXETROUTER_TOKEN`, settings `baseURL`, `transport="websocket"`, `store=false`, and `compaction={type:"native"}`. No plugin is required. Use `transport="http"` for HTTP/SSE.
 
-For optional pool-specific model metadata, export `exr models --json --format opencode-jsonc` and merge `providers.openai.models` into your configuration. Select `openai/MODEL_ID`. OpenCode retains its standard retry policy.
+For optional pool-specific model metadata, export `exr models --json --format opencode-v1-json` for V1 (`provider.openai.models`) or `exr models --json --format opencode-v2-json` for V2 (`providers.openai.models`), and merge the matching fragment into your configuration. Select `openai/MODEL_ID`. OpenCode retains its standard retry policy.
 
 ## OpenCode V1
 

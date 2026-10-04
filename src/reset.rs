@@ -1,5 +1,6 @@
 //! Live subscription limits and explicitly confirmed, single-use reset credits.
-//! Credentials and upstream credit IDs stay on the server. No inference is generated.
+//! Credentials and upstream credit IDs stay on the server. Inactive weekly windows
+//! may be activated by one durably guarded minimal inference request.
 use crate::{
     doctor::ServerReport,
     oauth::{self, Account},
@@ -207,7 +208,9 @@ impl Upstream {
             credits,
         })
     }
-    pub(crate) async fn account_metadata(&self, report: &mut ServerReport, live: bool) {
+    pub(crate) async fn account_metadata(&self, report: &mut ServerReport, live: bool, user: i64) {
+        let activated = std::sync::atomic::AtomicBool::new(false);
+        let activated = &activated;
         stream::iter(report.quota_accounts.iter_mut())
             .for_each_concurrent(Some(4), |row| async move {
                 let id = row.id;
@@ -230,6 +233,15 @@ impl Upstream {
                         Ok(current) => {
                             row.quota = current.quota;
                             row.reset_credits = current.credits.clone();
+                            if let Some(status) =
+                                self.activate_weekly_window(user, id, &row.quota).await
+                            {
+                                activated.store(true, std::sync::atomic::Ordering::Relaxed);
+                                row.weekly_activation = Some(status);
+                                if let Ok(updated) = self.live_limits(id).await {
+                                    row.quota = updated.quota;
+                                }
+                            }
                             let mut state = self.resets.lock().await;
                             if let Some(credits) = current.credits {
                                 state.credits.insert(id, credits);
@@ -249,6 +261,9 @@ impl Upstream {
                 }
             })
             .await;
+        if activated.load(std::sync::atomic::Ordering::Relaxed) {
+            report.inference = "weekly_activation_attempted".into();
+        }
         if live && report.quota_accounts.len() == 1 {
             report.quota = Some(report.quota_accounts[0].quota.clone());
         }
@@ -461,6 +476,8 @@ mod tests {
         details: Mutex<Value>,
         bodies: Mutex<Vec<Value>>,
         status: AtomicUsize,
+        activations: Mutex<Vec<Value>>,
+        activation_reply: Mutex<String>,
     }
     struct Fixture {
         upstream: Upstream,
@@ -476,6 +493,10 @@ mod tests {
     }
     async fn usage(AxumState(m): AxumState<Arc<Mock>>) -> Json<Value> {
         Json(m.usage.lock().unwrap().clone())
+    }
+    async fn activate(AxumState(m): AxumState<Arc<Mock>>, Json(body): Json<Value>) -> String {
+        m.activations.lock().unwrap().push(body);
+        m.activation_reply.lock().unwrap().clone()
     }
     async fn details(AxumState(m): AxumState<Arc<Mock>>) -> Json<Value> {
         Json(m.details.lock().unwrap().clone())
@@ -515,11 +536,14 @@ mod tests {
                 ),
                 bodies: Mutex::new(Vec::new()),
                 status: AtomicUsize::new(200),
+                activations: Mutex::new(Vec::new()),
+                activation_reply: Mutex::new("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n".into()),
             });
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let app = Router::new()
                 .route("/usage", get(usage))
+                .route("/responses", post(activate))
                 .route("/rate-limit-reset-credits", get(details))
                 .route("/rate-limit-reset-credits/consume", post(consume))
                 .with_state(mock.clone());
@@ -547,6 +571,243 @@ mod tests {
         async fn preview(&self) -> Value {
             self.upstream.prepare_reset(1, 1).await.unwrap()
         }
+    }
+    async fn inactive_fixture() -> Fixture {
+        let f = Fixture::new().await;
+        f.used(0.0);
+        f.mock.usage.lock().unwrap()["rate_limit"]["secondary_window"]["reset_at"] =
+            json!(Utc::now().timestamp() + 604800);
+        f.upstream.db.call(|conn| {
+            conn.execute("INSERT INTO oauth_models(account_id,model,display_name) VALUES(1,'gpt-5.6-sol','GPT 5.6 Sol')", [])?;
+            conn.execute("UPDATE oauth_accounts SET catalog_updated_at=?1 WHERE id=1", [Utc::now().timestamp()])?;
+            Ok(())
+        }).await.unwrap();
+        f
+    }
+    #[tokio::test]
+    async fn weekly_activation_is_pinned_minimal_and_durable_across_refreshes_and_restart() {
+        let f = inactive_fixture().await;
+        let quota = f.upstream.live_limits(1).await.unwrap().quota;
+        let (a, b) = tokio::join!(
+            f.upstream.activate_weekly_window(1, 1, &quota),
+            f.upstream.activate_weekly_window(1, 1, &quota)
+        );
+        assert_eq!(usize::from(a.is_some()) + usize::from(b.is_some()), 1);
+        let bodies = f.mock.activations.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["model"], "gpt-5.6-sol");
+        assert_eq!(bodies[0]["store"], false);
+        assert_eq!(bodies[0]["reasoning"]["effort"], "low");
+        assert!(bodies[0].get("tools").is_none());
+        assert!(f.mock.bodies.lock().unwrap().is_empty());
+        let saved = f
+            .upstream
+            .db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT status,input_tokens,output_tokens FROM quota_activation_attempts",
+                    [],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ))
+                    },
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(saved, ("completed".into(), 9, 1));
+        let restarted =
+            Upstream::new(f.upstream.db.clone(), [2; 32], f.upstream.config.clone()).unwrap();
+        assert!(restarted
+            .activate_weekly_window(1, 1, &quota)
+            .await
+            .is_none());
+        assert_eq!(f.mock.activations.lock().unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn weekly_activation_metadata_refresh_reports_attempt_and_accounts_for_all_tokens() {
+        let f = inactive_fixture().await;
+        let mut report = f
+            .upstream
+            .db
+            .call(|conn| {
+                crate::doctor::snapshot(
+                    conn,
+                    true,
+                    crate::server::local_limits(1),
+                    Utc::now().timestamp(),
+                )
+            })
+            .await
+            .unwrap();
+        f.upstream.account_metadata(&mut report, true, 1).await;
+        assert_eq!(
+            report.quota_accounts[0].weekly_activation.as_deref(),
+            Some("completed")
+        );
+        assert_eq!(report.inference, "weekly_activation_attempted");
+        f.upstream
+            .db
+            .call(|conn| {
+                let total = crate::usage::usage_report_for_user(conn, 1, "day", None, Some("UTC"))?;
+                assert_eq!(total.rows[0].total_tokens, Some(10));
+                assert_eq!(total.rows[0].requests, 1);
+                let users =
+                    crate::usage::usage_report_for_user(conn, 1, "day", Some("user"), Some("UTC"))?;
+                assert_eq!(users.rows[0].name, "test");
+                assert_eq!(users.rows[0].total_tokens, Some(10));
+                let models = crate::usage::usage_report_for_user(
+                    conn,
+                    1,
+                    "day",
+                    Some("model"),
+                    Some("UTC"),
+                )?;
+                assert_eq!(models.rows[0].name, "gpt-5.6-sol");
+                let tokens = crate::usage::usage_report_for_user(
+                    conn,
+                    1,
+                    "day",
+                    Some("token"),
+                    Some("UTC"),
+                )?;
+                assert!(tokens.rows.is_empty());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut report = f
+            .upstream
+            .db
+            .call(|conn| {
+                crate::doctor::snapshot(
+                    conn,
+                    true,
+                    crate::server::local_limits(1),
+                    Utc::now().timestamp(),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            report.quota_accounts[0].weekly_activation.as_deref(),
+            Some("completed")
+        );
+        f.upstream.account_metadata(&mut report, true, 1).await;
+        assert_eq!(report.inference, "not_checked");
+        assert_eq!(f.mock.activations.lock().unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn weekly_activation_skips_unavailable_model_and_operational_backoff() {
+        let f = inactive_fixture().await;
+        let quota = f.upstream.live_limits(1).await.unwrap().quota;
+        f.upstream
+            .db
+            .call(|conn| {
+                conn.execute("DELETE FROM oauth_models", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(f
+            .upstream
+            .activate_weekly_window(1, 1, &quota)
+            .await
+            .is_none());
+        f.upstream.db.call(|conn| {
+            conn.execute("INSERT INTO oauth_models(account_id,model,display_name) VALUES(1,'gpt-5.6-sol','GPT 5.6 Sol')", [])?;
+            let order=crate::health::next(conn)?;
+            crate::health::failure(conn,(1,0),crate::health::Scope::Responses,order,"transport",None,Utc::now().timestamp())
+        }).await.unwrap();
+        assert!(f
+            .upstream
+            .activate_weekly_window(1, 1, &quota)
+            .await
+            .is_none());
+        assert!(f.mock.activations.lock().unwrap().is_empty());
+        assert_eq!(
+            f.upstream
+                .db
+                .call(|conn| Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM quota_activation_attempts",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?))
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    #[tokio::test]
+    async fn weekly_activation_unknown_outcome_is_never_replayed_and_counters_stay_unknown() {
+        let f = inactive_fixture().await;
+        *f.mock.activation_reply.lock().unwrap() =
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic\"}}\n\n".into();
+        let quota = f.upstream.live_limits(1).await.unwrap().quota;
+        assert_eq!(
+            f.upstream
+                .activate_weekly_window(1, 1, &quota)
+                .await
+                .as_deref(),
+            Some("unknown")
+        );
+        assert!(f
+            .upstream
+            .activate_weekly_window(1, 1, &quota)
+            .await
+            .is_none());
+        let counters = f
+            .upstream
+            .db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT input_tokens,output_tokens FROM quota_activation_attempts",
+                    [],
+                    |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(counters, (None, None));
+        assert_eq!(f.mock.activations.lock().unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn weekly_activation_respects_user_deactivation_and_read_only_doctor() {
+        let f = inactive_fixture().await;
+        let mut report = f
+            .upstream
+            .db
+            .call(|conn| {
+                crate::doctor::snapshot(
+                    conn,
+                    true,
+                    crate::doctor::LimitsReport {
+                        generations: crate::server::local_limits(1).generations,
+                        websockets: crate::server::local_limits(1).websockets,
+                    },
+                    Utc::now().timestamp(),
+                )
+            })
+            .await
+            .unwrap();
+        f.upstream.account_metadata(&mut report, false, 1).await;
+        assert!(f.mock.activations.lock().unwrap().is_empty());
+        f.upstream
+            .db
+            .call(|conn| {
+                conn.execute(
+                    "INSERT INTO account_preferences(user_id,account_id,enabled) VALUES(1,1,0)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        f.upstream.account_metadata(&mut report, true, 1).await;
+        assert!(f.mock.activations.lock().unwrap().is_empty());
     }
     #[tokio::test]
     async fn credit_requires_confirmation_belongs_to_user_and_is_submitted_once_with_idempotency() {

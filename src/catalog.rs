@@ -254,7 +254,20 @@ pub fn codex(models: &[Model]) -> Result<Value> {
     Ok(json!({"models":metadata}))
 }
 
+/// Existing HTTP projection remains V2 for compatibility.
 pub fn opencode(models: &[Model]) -> Result<Value> {
+    opencode_v2(models)
+}
+
+pub fn opencode_v1(models: &[Model]) -> Result<Value> {
+    opencode_projection(models, true)
+}
+
+pub fn opencode_v2(models: &[Model]) -> Result<Value> {
+    opencode_projection(models, false)
+}
+
+fn opencode_projection(models: &[Model], v1: bool) -> Result<Value> {
     let mut entries = Map::new();
     for model in models {
         let meta = model
@@ -293,6 +306,26 @@ pub fn opencode(models: &[Model]) -> Result<Value> {
                 settings["textVerbosity"] = json!(verbosity);
             }
         }
+        if v1 {
+            let variants = levels
+                .iter()
+                .filter_map(|level| level["effort"].as_str())
+                .map(|effort| (effort.to_owned(), json!({"reasoningEffort":effort})))
+                .collect::<Map<String, Value>>();
+            let reasoning = levels
+                .iter()
+                .filter_map(|level| level["effort"].as_str())
+                .any(|effort| effort != "none");
+            settings["store"] = json!(false);
+            entries.insert(model.id.clone(),json!({
+                "name":model.display_name,
+                "limit":{"context":context,"input":input,"output":meta["max_output_tokens"].as_u64().unwrap_or(0)},
+                "tool_call":true,"reasoning":reasoning,
+                "modalities":{"input":modalities,"output":["text"]},
+                "options":settings,"variants":variants
+            }));
+            continue;
+        }
         entries.insert(model.id.clone(),json!({
             "name":model.display_name,
             "limit":{"context":context,"input":input,"output":meta["max_output_tokens"].as_u64().unwrap_or(0)},
@@ -300,12 +333,45 @@ pub fn opencode(models: &[Model]) -> Result<Value> {
             "variants":variants,"settings":settings
         }));
     }
-    Ok(json!({"providers":{"openai":{"models":entries}}}))
+    Ok(if v1 {
+        json!({"provider":{"openai":{"models":entries}}})
+    } else {
+        json!({"providers":{"openai":{"models":entries}}})
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opencode_versions_export_their_native_shapes_with_reported_defaults() {
+        let model=Model::parse(&json!({"slug":"gpt-test","display_name":"Test model","context_window":100000,
+            "effective_context_window_percent":90,"auto_compact_token_limit":85000,"supported_reasoning_levels":[{"effort":"none"},{"effort":"low"},{"effort":"high"}],
+            "default_reasoning_level":"low","default_reasoning_summary":"none","input_modalities":["text","image"],
+            "support_verbosity":true,"default_verbosity":"low"})).unwrap();
+        let v1 = opencode_v1(std::slice::from_ref(&model)).unwrap();
+        let v2 = opencode_v2(std::slice::from_ref(&model)).unwrap();
+        let one = &v1["provider"]["openai"]["models"]["gpt-test"];
+        let two = &v2["providers"]["openai"]["models"]["gpt-test"];
+        assert_eq!(
+            one["limit"],
+            json!({"context":100000,"input":85000,"output":0})
+        );
+        assert_eq!(one["limit"], two["limit"]);
+        assert_eq!(one["modalities"]["input"], json!(["text", "image"]));
+        assert_eq!(one["options"]["store"], false);
+        assert_eq!(one["options"]["reasoningEffort"], "low");
+        assert_eq!(one["options"]["textVerbosity"], "low");
+        assert_eq!(one["variants"]["high"]["reasoningEffort"], "high");
+        assert_eq!(one["reasoning"], true);
+        assert!(v1.get("providers").is_none());
+        assert!(one.get("capabilities").is_none());
+        assert!(two["variants"].is_array());
+        assert_eq!(two["capabilities"]["input"], one["modalities"]["input"]);
+        assert!(v2.get("provider").is_none());
+        assert!(two.get("options").is_none());
+        assert_eq!(opencode(&[model]).unwrap(), v2);
+    }
     #[test]
     fn projections_keep_real_limits_and_never_invent_an_output_cap() {
         let row = json!({"slug":"a","display_name":"A","visibility":"list","context_window":100_000,"effective_context_window_percent":95,"supported_reasoning_levels":[{"effort":"high","description":"High"}],"input_modalities":["text"],"private_account":"do-not-expose"});
