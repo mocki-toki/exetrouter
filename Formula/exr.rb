@@ -2,18 +2,18 @@
 class Exr < Formula
   desc "Standalone and SSH client for ExetRouter"
   homepage "https://github.com/mocki-toki/exetrouter"
-  version "0.3.0"
+  version "0.4.0"
   license "MIT"
   depends_on :macos
 
   on_macos do
     on_arm do
-      url "https://github.com/mocki-toki/exetrouter/releases/download/v0.3.0/exetrouter-aarch64-apple-darwin.tar.gz"
-      sha256 "331128f08fa39366a3c7c62213b2b1922ab1a09ab5ac02e51d8452374956f2de"
+      url "https://github.com/mocki-toki/exetrouter/releases/download/v0.4.0/exetrouter-aarch64-apple-darwin.tar.gz"
+      sha256 "77a5ad28ecb0ffe4f79f2c0b2833ee1b2e518a492d5a20d728bac605f5d9c43c"
     end
     on_intel do
-      url "https://github.com/mocki-toki/exetrouter/releases/download/v0.3.0/exetrouter-x86_64-apple-darwin.tar.gz"
-      sha256 "93d9aa6cc5e6de254efb8f7ee632da4f5dc2dd47addb1031870e9cec3cffec6c"
+      url "https://github.com/mocki-toki/exetrouter/releases/download/v0.4.0/exetrouter-x86_64-apple-darwin.tar.gz"
+      sha256 "2dabef352ecaceac7bdcda63d31876e7f47f0c340945e02e2d6f6cefbe66f060"
     end
   end
 
