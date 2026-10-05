@@ -74,7 +74,6 @@ enum Modal {
         selected: usize,
         error: String,
         summary: String,
-        priority_only: bool,
         locked: bool,
     },
     UpdateConfirm,
@@ -507,12 +506,6 @@ fn action_menu(state: &State, connection: &Connection) -> (String, Vec<(String, 
                 vec![("Review reset credit".into(), KeyCode::Char('c'))]
             };
             if row["preference"]["locked"].as_bool() != Some(true) {
-                if state.values[OVERVIEW]
-                    .as_ref()
-                    .is_some_and(|v| v["capabilities"]["account_routing_rules"] == 1)
-                {
-                    entries.push(("Set priority".into(), KeyCode::Char('P')));
-                }
                 entries.push((
                     if row["preference"]["enabled"].as_bool() == Some(false) {
                         "Activate for me"
@@ -670,7 +663,6 @@ fn account_ranges(value: &Value, width: u16) -> Vec<(u16, u16)> {
                     chrono::Utc::now().timestamp(),
                 )) + u16::from(account["refresh_error"].is_string())
                     + u16::from(render::weekly_activation(account).is_some())
-                    + u16::from(account["preference"]["rules"].is_object())
                     + if windows.is_empty() {
                         1
                     } else {
@@ -876,10 +868,10 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
         let (title,text) = match modal {
             Modal::Actions { title, entries, selected } => (title.as_str(), format!("{}\n\n↑ / ↓: select   Enter: choose   Esc: close",entries.iter().enumerate().map(|(i,(name,_))|format!("{}{}",if i==*selected {"▶ "}else{"  "},name)).collect::<Vec<_>>().join("\n"))),
             Modal::Error { title, message } => (*title, format!("{message}\n\nEnter / Esc: close")),
-            Modal::Routing { fields, selected, error, summary, priority_only, locked, .. } => {
-                let labels = if *priority_only { vec!["Priority (-255..255 / default)"] } else { vec!["Priority (-255..255 / default)", "All windows (0..100 / off / default)", "Short window (0..100 / off / default)", "Weekly window (0..100 / off / default)"] };
+            Modal::Routing { fields, selected, error, summary, locked, .. } => {
+                let labels = ["Priority (-255..255 / default)", "All windows (0..100 / off / default)", "Short window (0..100 / off / default)", "Weekly window (0..100 / off / default)"];
                 let form = labels.iter().zip(fields).enumerate().map(|(i,(label,field))|format!("{}{}: {}",if i == *selected { "▶ " } else { "  " },label,field.value)).collect::<Vec<_>>().join("\n");
-                (if *priority_only { "Set priority" } else { "Switching rules" }, if *locked { format!("{summary}\n\nLocked by server operator") } else { format!("{form}\n\n{summary}\n\nDefault inherits operator settings. Thresholds are soft.\n{error}") })
+                ("Switching rules", if *locked { format!("{summary}\n\nLocked by server operator") } else { format!("{form}\n\n{summary}\n\nDefault inherits operator settings. Thresholds are soft.\n{error}") })
             },
             Modal::UpdateConfirm => ("Update exr", "Install the latest published release in the existing installation?\nThe installation method is preserved; config, accounts and tokens stay in place.\nSource builds may take several minutes. Restart exr after completion.\n\nEnter: update   Esc: cancel.".into()),
             Modal::Name(text) => ("Create token",format!("Token name: {text}\n\nEnter: next   Esc: cancel")),
@@ -1110,20 +1102,6 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
         }
         y += 1;
         for line in [
-            account["preference"]["rules"].is_object().then(|| {
-                Line::styled(
-                    format!(
-                        "{}{}",
-                        crate::account_preferences::compact_rules(&account["preference"]),
-                        if account["threshold_reached"] == true {
-                            " · Reached"
-                        } else {
-                            ""
-                        }
-                    ),
-                    Style::default().fg(Color::Gray),
-                )
-            }),
             expiring.then(|| credit_warning(&account)),
             render::weekly_activation(&account)
                 .map(|text| Line::styled(text, Style::default().fg(Color::Gray))),
@@ -1701,7 +1679,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                         state.modal = None;
                     }
                 }
-                Modal::Routing { account, fields, selected, error, priority_only, locked, .. } => {
+                Modal::Routing { account, fields, selected, error, locked, .. } => {
                     if *locked {
                         if matches!(key.code,KeyCode::Esc|KeyCode::Enter) { state.modal = None; }
                     } else {
@@ -1709,7 +1687,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                             KeyCode::Esc => state.modal = None,
                             KeyCode::Tab | KeyCode::Down => *selected = (*selected + 1) % fields.len(),
                             KeyCode::BackTab | KeyCode::Up => *selected = (*selected + fields.len() - 1) % fields.len(),
-                            KeyCode::Enter => match routing_form(fields,*priority_only) {
+                            KeyCode::Enter => match routing_form(fields) {
                                 Ok(routing) => { mutation = Some(ControlRequest::AccountSet { account:*account, enabled:None, priority:None, routing:Some(routing) }); state.modal = None; },
                                 Err(message) => *error = message.to_string(),
                             },
@@ -1959,16 +1937,15 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     let (title, entries)=action_menu(&state,&args.connection);
                     if entries.is_empty() { state.modal=Some(Modal::Error{title:"Account unavailable",message:format!("{title}\n\nThis account is deactivated and locked by the server operator.")}); } else { state.modal=Some(Modal::Actions{title,entries,selected:0}); }
                 }
-                KeyCode::Char('P' | 'S') if state.tab == OVERVIEW => {
+                KeyCode::Char('S') if state.tab == OVERVIEW => {
                     if state.values[OVERVIEW].as_ref().is_none_or(|v| v["capabilities"]["account_routing_rules"] != 1) {
                         state.modal = Some(Modal::Error { title: "Server update required", message: "Account routing rules require an updated server and SSH gateway.".into() });
                     } else if let Some(row) = state.values[OVERVIEW].as_ref().and_then(|v|v["quota_accounts"].as_array()).and_then(|rows|rows.get(state.account_selected)) {
                         if let Some(account) = row["id"].as_i64() {
                             let preference = &row["preference"];
-                            let priority_only = key.code == KeyCode::Char('P');
-                            let names = if priority_only { vec!["priority"] } else { vec!["priority","switch_at","switch_at_short","switch_at_weekly"] };
+                            let names = ["priority","switch_at","switch_at_short","switch_at_weekly"];
                             let fields = names.iter().map(|name| TextInput::new(preference["settings"][*name].as_i64().map(|n|n.to_string()).or_else(||preference["settings"][*name].as_str().map(str::to_owned)).unwrap_or("default".into()))).collect();
-                            state.modal = Some(Modal::Routing { account, fields, selected:0, error:String::new(), summary:format!("Effective priority: {}\n{}", preference["priority"],crate::account_preferences::describe(preference)), priority_only, locked:preference["locked"] == true });
+                            state.modal = Some(Modal::Routing { account, fields, selected:0, error:String::new(), summary:format!("Effective priority: {}\n{}", preference["priority"],crate::account_preferences::describe(preference)), locked:preference["locked"] == true });
                         }
                     }
                 }
@@ -2198,18 +2175,15 @@ fn setup_cancelled(key: KeyEvent) -> bool {
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
 }
 
-fn routing_form(
-    fields: &[TextInput],
-    priority_only: bool,
-) -> Result<crate::account_preferences::RoutingArgs> {
+fn routing_form(fields: &[TextInput]) -> Result<crate::account_preferences::RoutingArgs> {
     use crate::account_preferences::{RoutingArgs, Setting};
     let parse =
         |i: usize| -> Result<Option<Setting>> { Ok(Some(fields[i].value.parse::<Setting>()?)) };
     let routing = RoutingArgs {
         priority: parse(0)?,
-        switch_at: if priority_only { None } else { parse(1)? },
-        switch_at_short: if priority_only { None } else { parse(2)? },
-        switch_at_weekly: if priority_only { None } else { parse(3)? },
+        switch_at: parse(1)?,
+        switch_at_short: parse(2)?,
+        switch_at_weekly: parse(3)?,
     };
     routing.validate()?;
     Ok(routing)
@@ -2530,7 +2504,6 @@ mod tests {
                     "Effective priority: 1\n{}",
                     crate::account_preferences::describe(&preference)
                 ),
-                priority_only: false,
                 locked: false,
             }),
             ..Default::default()
@@ -2560,15 +2533,20 @@ mod tests {
     #[test]
     fn routing_form_preserves_off_and_default_and_rejects_invalid_input() {
         let fields = ["-255", "20", "off", "default"].map(|text| TextInput::new(text.into()));
-        let patch = routing_form(&fields, false).unwrap();
+        let patch = routing_form(&fields).unwrap();
         assert_eq!(
             serde_json::to_value(patch).unwrap(),
             serde_json::json!({"priority":-255,"switch_at":20,"switch_at_short":"off","switch_at_weekly":"default"})
         );
         for invalid in ["256", "-256", "off", "1.5", ""] {
-            assert!(routing_form(&[TextInput::new(invalid.into())], true).is_err());
+            let mut invalid_fields =
+                ["-255", "20", "off", "default"].map(|text| TextInput::new(text.into()));
+            invalid_fields[0] = TextInput::new(invalid.into());
+            assert!(routing_form(&invalid_fields).is_err());
         }
-        assert!(routing_form(&[TextInput::new("default".into())], true).is_ok());
+        let mut default_fields = fields;
+        default_fields[0] = TextInput::new("default".into());
+        assert!(routing_form(&default_fields).is_ok());
     }
     #[test]
     fn connection_input_edits_unicode_at_the_cursor_and_scrolls() {

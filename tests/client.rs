@@ -1138,8 +1138,8 @@ fn dashboard_edits_rules_validates_and_cancels_without_mutating() {
     let mut dashboard = Dashboard::start(client.command());
     dashboard.wait("Priority 1");
     std::thread::sleep(std::time::Duration::from_millis(200));
-    dashboard.send(b"P");
-    dashboard.wait("Set priority");
+    dashboard.send(b"S");
+    dashboard.wait("Switching rules");
     dashboard.send(b"\x15256\r");
     dashboard.wait("Priority must be between");
     dashboard.send(b"\x1b");

@@ -72,7 +72,7 @@ Use an interactive terminal at least 72 columns × 20 rows. Press `?` for help o
 
 | View | What you can do |
 | --- | --- |
-| Overview | Inspect routing/account health and subscription limits. Enter opens account actions: reset-credit review, numeric priority, switching rules and activation. Operator locks apply. |
+| Overview | Inspect routing/account health and subscription limits. Enter opens account actions: reset-credit review, switching rules (including priority) and activation. Operator locks apply. |
 | Usage | View Today, Last 24 hours, This week or This month, grouped by total, user, model or your API tokens. |
 | Tokens | Create, rotate or revoke tokens. Revoked tokens are hidden. Enter opens actions. |
 | Models | Browse account-visible models and reported limits. Enter copies the selected model ID. |
@@ -80,7 +80,7 @@ Use an interactive terminal at least 72 columns × 20 rows. Press `?` for help o
 
 ←/→ changes tabs; ↑/↓ selects items; PageUp/PageDown scrolls; `r` refreshes; `q` or Ctrl-C exits. In Usage, `p` changes the period, `b` changes grouping and `m` switches between reported tokens and requests. Select a group with ↑/↓ to see its chart and totals. User groups combine all that user's tokens; token groups show only your own IDs.
 
-Overview: `P` opens numeric priority; `S` opens Switching rules (also accessible through Enter). The form accepts priority -255…255, thresholds 0…100, `off` and `default`. Tab/Up/Down selects a field, Enter saves all edits, Esc cancels, and invalid values remain editable without sending a mutation. Locked rules can be inspected but not changed. Controls shows contextual hints. Overview shows effective priority, thresholds and whether a threshold is reached. Thresholds are soft: without a suitable alternative, a healthy original account continues. See [selection and inheritance](account-pool.md#soft-switching-thresholds).
+Overview: `S` opens Switching rules (also accessible through Enter). The form accepts priority -255…255, thresholds 0…100, `off` and `default`. Tab/Up/Down selects a field, Enter saves all edits, Esc cancels, and invalid values remain editable without sending a mutation. Locked rules can be inspected but not changed. Controls shows contextual hints. Overview shows effective priority; switching thresholds appear only in the settings form. Thresholds are soft: without a suitable alternative, a healthy original account continues. See [selection and inheritance](account-pool.md#soft-switching-thresholds).
 
 Connection fields support Left/Right, Home/End (Ctrl-A/Ctrl-E), Backspace/Delete and Ctrl-U to clear. Up/Down selects a field. Esc cancels edits; Ctrl-C exits without saving. Remote settings are saved after a successful SSH check.
 

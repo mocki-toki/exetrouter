@@ -330,23 +330,6 @@ pub fn describe(value: &serde_json::Value) -> String {
     )
 }
 
-/// Compact one-line threshold summary for narrow dashboards.
-pub fn compact_rules(value: &serde_json::Value) -> String {
-    let threshold = |name: &str| {
-        value["rules"][name]
-            .as_i64()
-            .or_else(|| value["rules"]["switch_at"].as_i64())
-            .filter(|n| *n >= 0)
-            .map_or("off".into(), |n| format!("≤{n}%"))
-    };
-    format!(
-        "Switch at {} · Short {} · Weekly {}",
-        threshold("switch_at"),
-        threshold("switch_at_short"),
-        threshold("switch_at_weekly")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
