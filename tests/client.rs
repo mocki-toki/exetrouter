@@ -669,6 +669,25 @@ impl Dashboard {
     fn quit(&mut self) {
         self.quit_with(b"q");
     }
+    fn dismiss(&mut self, label: &str) {
+        self.send(b"\x1b");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            self.read();
+            if !terminal_text(&self.output).contains(label) {
+                return;
+            }
+            assert!(
+                self.child.try_wait().unwrap().is_none(),
+                "dashboard exited while dismissing {label}"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dashboard did not dismiss {label}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
     fn quit_with(&mut self, keys: &[u8]) {
         self.send(keys);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -740,7 +759,7 @@ fn dashboard_help_accepts_slash_and_russian_layout_punctuation() {
     ] {
         dashboard.send(shortcut);
         dashboard.wait("Keyboard help");
-        dashboard.send(b"\x1b");
+        dashboard.dismiss("Keyboard help");
         dashboard.wait("Actions Enter");
     }
     dashboard.quit_with("й".as_bytes());
@@ -1222,7 +1241,7 @@ fn unsupported_remote_rules_are_explained_without_sending_a_mutation() {
     std::thread::sleep(std::time::Duration::from_millis(200));
     dashboard.send(b"S");
     dashboard.wait("Server update required");
-    dashboard.send(b"\x1b");
+    dashboard.dismiss("Server update required");
     dashboard.wait("Priority 1");
     dashboard.quit();
     assert!(!fs::read_to_string(client.dir.path().join("requests.log"))

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- Wait for modal dismissal in terminal integration tests before sending subsequent input, preventing Escape/character races on macOS runners.
+
 ## 0.5.0
 
 - Stop writing a context binding for every output: return authenticated user/account envelopes for opaque context, turn state and saved conversation IDs, and restore original values before upstream dispatch. Require authenticated envelopes for all opaque continuations and preserve concurrent quota-transfer forks. Remove the former raw-context fallback and prune unpaired registry rows at startup. Full transfer storage fails before replacement inference instead of interrupting ordinary output.
