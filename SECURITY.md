@@ -12,7 +12,7 @@ Use [GitHub private vulnerability reporting](https://github.com/mocki-toki/exetr
 | Tool definitions, arguments/results and attachments | Forwarded in memory; never retained as payloads |
 | Bearer/authorization headers | Never logged; router bearer verification uses keyed hashes |
 | OAuth tokens | Encrypted with account-bound AEAD under a separate private key |
-| Personal metadata | Client-encrypted token names, account labels, notes, project names and dashboard preferences; user key never sent to service |
+| Personal metadata | Client-encrypted token names, account labels and dashboard preferences; user key never sent to service |
 | Usage | User/token IDs, validated model ID, numeric usage, fixed statuses, timings and request/response identifiers |
 | Conversation affinity | Client-carried authenticated envelopes and explicit digest-only transfer/portability overrides. Unwrapped client context is rejected. Bounded current WS history exists only in transient memory |
 | Subscription limits | Percentages, durations, reset/observation times and cooldowns |

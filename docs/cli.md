@@ -1,8 +1,10 @@
 # Client CLI and TUI
 
+The dashboard supports mouse clicks on tabs, account/token/model rows, action menus and bottom controls. Clicking an account or token selects it and opens its actions; clicking a model selects it and copies its ID, just like Enter. Settings actions are inline: Check updates appears first and becomes Update when an update is available; Configure connection is in Connection. Use Up/Down and Enter or click an action. Bottom buttons and action-menu entries display their shortcuts. Buttons wrap on narrow screens; Controls contains navigation hints without repeating button shortcuts. The wheel uses the same selection/scroll behavior as Up/Down. Dialog buttons retain explicit confirmation for token rotation/revocation, reset credits and updates, and block clicks on the background. Switching-rule fields support click-to-focus and cursor placement; account-label fields support cursor placement too. All keyboard controls remain available, with `1`–`5` as direct tab shortcuts. Help accepts `?` or `/` (also the Russian-layout `.`/`,` on the same key). EN/RU command shortcuts work in either layout, including action menus and confirmation dialogs; text fields are not transliterated. Other physical-key layouts cannot be inferred from ordinary terminal character events. Terminal text selection usually requires Shift while mouse capture is active, depending on the terminal. Connection setup and browser sign-in remain keyboard-driven.
+
 `exr` runs a standalone API or connects to a shared server on macOS/Linux. Run it without a command to open the dashboard. CLI reports use readable text; add `--json` for scripts.
 
-Token names and personal data are encrypted automatically by the native client. Existing token names are encrypted the next time the token list is loaded. Edit account labels from Overview and personal notes/project names from Settings. See [encrypted personal data](private-metadata.md) for key backup and recovery.
+Token names and personal data are encrypted automatically by the native client. Existing token names are encrypted the next time the token list is loaded. Edit account labels from Overview. See [encrypted personal data](private-metadata.md) for key backup and recovery.
 
 ## First run and standalone
 

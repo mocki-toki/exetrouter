@@ -21,8 +21,6 @@ use std::{
 #[serde(rename_all = "snake_case")]
 pub(super) enum Kind {
     Account,
-    Note,
-    Project,
     Settings,
 }
 
@@ -379,7 +377,7 @@ pub(super) fn seal(
     if value.len() > 8192 {
         return Err("personal text exceeds 8192 bytes".into());
     }
-    if matches!(kind, Kind::Account | Kind::Project)
+    if matches!(kind, Kind::Account)
         && !value.is_empty()
         && (value.trim().is_empty() || value.len() > 256)
     {
@@ -401,18 +399,6 @@ pub(super) fn seal(
         id: object_id,
         ciphertext,
     })
-}
-
-pub(super) async fn get(args: &Session, kind: Kind, id: &str) -> Result<Option<String>> {
-    let vault = Vault::open(&args.connection)?;
-    let object_id = vault.object_id(kind, id)?;
-    let values = raw_request(args, ControlRequest::PrivateList).await?;
-    let Some(ciphertext) = values[&object_id].as_str() else {
-        return Ok(None);
-    };
-    let value: Object = serde_json::from_slice(&vault.decrypt(&object_id, ciphertext)?)
-        .map_err(|_| "invalid personal data")?;
-    Ok(Some(value.value))
 }
 
 pub(super) async fn local_accounts(args: &Session) -> Result<Value> {
