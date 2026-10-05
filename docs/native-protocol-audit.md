@@ -58,13 +58,9 @@ Codex [common.rs](https://github.com/openai/codex/blob/a956835d020762cb2b570053a
 
 The additional pinned [responses_metadata.rs](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/core/src/responses_metadata.rs) defines duplicate session/thread identities inside serialized turn metadata, alongside tool namespace inventory. ExetRouter now projects the same scoped identities there and in WS continuations; its earlier header/frame-only projection was inconsistent. This fixes a concrete contract mismatch. It does not independently prove the cause of an observed backend stall.
 
-## Recovery is a separate contract
-
-Codex [responses_retry.rs](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/core/src/responses_retry.rs) contains a WS-to-HTTP fallback after the configured stream retry budget is exhausted, conditional on a retryable error and transport eligibility. Thus `stream_max_retries=0` is not proof that every native client recovery path submits only once. Our six current native post-submission WS fixtures now count one generation for early/partial/missing-terminal failures. The router emits a wrapped terminal 400 recognized by Codex. A lost downstream connection can still prevent delivery of that error; the router cannot control every client recovery path.
-
 ## Acceptance status
 
-Bounded compression, scoped identities, turn-state ownership, Lite/metadata negotiation and broader native item fixtures are implemented. Mock interruption cases count submissions rather than assuming retry flags prevent replay. The [development plan](development-plan.md#sustained-sessions-and-failure-behavior) tracks remaining acceptance: full model windows, large tool output, multi-hour sessions, saturation and actual upstream outages.
+Bounded compression, scoped identities, turn-state ownership, Lite/metadata negotiation and broader native item fixtures are implemented. The [development plan](development-plan.md#sustained-sessions-and-failure-behavior) tracks remaining acceptance: full model windows, large tool output, multi-hour sessions, saturation and actual upstream outages.
 
 ## Evidence and repeatable review
 

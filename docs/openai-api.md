@@ -22,7 +22,6 @@ from openai import OpenAI
 client = OpenAI(
     base_url="http://127.0.0.1:8787/v1",
     api_key=os.environ["EXETROUTER_TOKEN"],
-    max_retries=0,
 )
 model = client.models.list().data[0].id
 response = client.responses.create(model=model, input="Hello", store=False)
@@ -33,9 +32,7 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-JavaScript uses `new OpenAI({baseURL, apiKey, maxRetries: 0})`. For remote access, use the operator's HTTPS endpoint. The API-key field holds your router bearer; Platform keys are not upstream credentials.
-
-Disable client retries: a generation may have run even if its response was lost. The router never replays an accepted or ambiguous generation.
+JavaScript uses `new OpenAI({baseURL, apiKey})`. For remote access, use the operator's HTTPS endpoint. The API-key field holds your router bearer; Platform keys are not upstream credentials.
 
 ## Chat request fields
 
@@ -85,7 +82,7 @@ Supply full input as a string or array. Strings become user messages, `system` b
 
 HTTP JSON is assembled from upstream SSE/completed items; raw SSE preserves events. WS omits the HTTP `stream` field and preserves native event forwarding. Routing ownership, resource bounds and adapter checks still apply.
 
-Native WS services upstream ping/pong and control events between requests. If the upstream closes while no response is in flight, the downstream WS stays open. A separate next request may open a replacement WS on the same eligible account with the same scoped session/thread identity. Incremental input is expanded from the bounded latest completed context; an older or unavailable window returns `context_recovery_unavailable` before inference. Old upstream response IDs are not forwarded to a replacement socket. This never reconnects or replays an in-flight generation, and never switches accounts to bypass an operational pause or deactivation.
+Native WS services upstream ping/pong and control events between requests. If the upstream closes while no response is in flight, the downstream WS stays open. A separate next request may open a replacement WS on the same eligible account with the same scoped session/thread identity. Incremental input is expanded from the bounded latest completed context; an older or unavailable window returns `context_recovery_unavailable` before inference. Old upstream response IDs are not forwarded to a replacement socket.
 
 Idle metadata is retained as at most one 64 KiB transient notification and delivered after the next `response.created`, preserving native event ordering. Unexpected idle data/terminal/error frames close the downstream connection instead of attributing them to a later request. Upstream controls do not extend the 300-second downstream idle deadline.
 
@@ -98,7 +95,7 @@ Compact appends `compaction_trigger` to one Responses SSE request and projects `
 - `previous_response_id` is supported only for responses owned by the current WS. HTTP/new-socket previous IDs are unsupported. Bearer validity is checked on every `response.create`.
 - `encrypted_content` and native `encrypted_function_args` pass unchanged; empty argument arrays are valid. User-scoped domain-separated digests bind output to its account for 24 hours. Unknown/foreign/expired input returns `context_not_found`; conflicting untransferred owners return `context_account_mismatch`.
 - Saved conversation IDs must have been issued to the same router user. Digests pin them to the owning account for 24 hours. Unknown/foreign/expired IDs fail before inference. Saved conversations cannot migrate because backend-owned history is unavailable to the router.
-- Quota or configured soft-threshold transfer requires complete current context and preserves authorization across concurrent forks. Accepted or ambiguous requests are never replayed. See [account-pool recovery](account-pool.md#failure-behavior) for bounds.
+- Quota or configured soft-threshold transfer requires complete current context and preserves authorization across concurrent forks. See [account-pool recovery](account-pool.md#failure-behavior) for bounds.
 
 ## Request sizes and compression
 
@@ -123,7 +120,7 @@ Backend HTTP errors retain their status with fixed redacted HTTP/Chat bodies. Bo
 
 HTTP SSE and native WS emit content-free `ping` events after 15 seconds without a downstream event; clients should ignore unknown types. Heartbeats do not indicate generation progress or reset upstream deadlines: 900 seconds for inference, 300 for metadata.
 
-An HTTP interruption emits generic `error`, then terminal `response.failed`. WS emits a wrapped `error` with status 400, type `invalid_request_error` and code `upstream_interrupted`. Reviewed Codex treats it as terminal instead of resubmitting over HTTP. Usage may remain unknown. A lost connection or shorter client deadline can prevent error delivery; no false completion or replay is invented.
+An HTTP interruption emits generic `error`, then terminal `response.failed`. Usage may remain unknown. A lost connection or shorter client deadline can prevent error delivery; no false completion is invented.
 
 ## Native routing metadata
 

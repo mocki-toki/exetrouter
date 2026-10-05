@@ -26,7 +26,6 @@ Read the relevant contract before changing behavior: `docs/openai-api.md`, `docs
 ## Invariants
 
 - Never log or persist prompts, messages, generated content, tool arguments/results, request/response bodies, authorization headers or credentials. Errors must not echo arbitrary upstream payloads. Usage records contain model IDs and numeric counters; affinity stores keyed digests rather than content.
-- Never replay a possibly accepted inference request. Quota-only fallback requires a handshake refusal or an explicit pre-generation quota rejection with no acceptance/output evidence; ambiguous transport failures and started responses are never replayed.
 - Preserve user-scoped context ownership and normal account affinity. Automatic quota failover may change the upstream account only with a complete current context; retain downstream WS/session identity, drop old account-specific turn state and preserve concurrent forks. Never migrate to bypass deactivation, authentication or operational backoff.
 - Unknown usage stays unknown, not zero. Keep durable accounting correct on interruption and restart.
 - Preserve bounded memory, queues, concurrency and tasks. Resource protection is separate from subscription limits; do not introduce request-frequency/IP quotas without a product requirement.
@@ -44,7 +43,7 @@ Human-readable output is the default; `--json` is the explicit automation interf
 - Highlight Settings for client updates; server updates belong to the operator.
 - Check clipboard support before token issuance/rotation, then copy secrets without rendering them.
 
-Update checks and ordinary metadata refresh must not submit inference or consume reset credits. The weekly-activation exception permits one minimal `gpt-5.6-sol` request on a freshly verified 100%-remaining weekly window with reset exactly seven days ahead at minute precision. Persist the attempt before submission, suppress repeats for seven days and never replay an uncertain outcome. Respect `EXR_NO_UPDATE_CHECK`; label stale/unknown observations honestly and preserve reported durations.
+Update checks and ordinary metadata refresh must not submit inference or consume reset credits. The weekly-activation exception permits one minimal `gpt-5.6-sol` request on a freshly verified 100%-remaining weekly window with reset exactly seven days ahead at minute precision. Persist the attempt before submission, suppress repeats for seven days. Respect `EXR_NO_UPDATE_CHECK`; label stale/unknown observations honestly and preserve reported durations.
 
 ## Development and validation
 

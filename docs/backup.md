@@ -37,7 +37,7 @@ exrd admin backup restore --from /path/to/backups/new-snapshot \
 
 Restore validates the source, copies into a new private directory, validates again and records nonsecret restore.json. Existing service/state/snapshot are untouched. Stop the old service before switching its db/key/oauth-key paths to the restored files. Preserve service listen/gateway/socket configuration separately; it is not in the snapshot. Do not init restored state.
 
-Use a binary compatible with the snapshot schema, then apply normal migrations for future updates. Startup turns pending accepted/sent records into aborted_unknown, without replay. Token revocations/SSH bindings/quotas/health/catalog/context bindings reflect the snapshot moment; later changes are absent.
+Use a binary compatible with the snapshot schema, then apply normal migrations for future updates. Startup turns pending accepted/sent records into aborted_unknown. Token revocations/SSH bindings/quotas/health/catalog/context bindings reflect the snapshot moment; later changes are absent.
 
 Offline decryption does not prove upstream still accepts old credentials. Subsequent refresh/reauth can invalidate them; perform new operator login if required. Do not run two cloned instances of one OAuth state concurrently. Restore cannot recover an open upstream WS session.
 

@@ -25,7 +25,7 @@ HTTP authenticates before JSON parsing. Management resolves the forced server-si
 
 Catalogs are merged across active accounts. Selection respects the requested model, quota/health and active load. User/operator preferences apply before quota/load selection. Cache/session hints provide a soft preference; opaque context and an existing WS retain normal account affinity. [Quota-only failover](account-pool.md#failure-behavior) requires complete current context.
 
-Native WS opens upstream after the first model-bearing response.create. HTTP Responses uses upstream SSE and can return raw SSE or assembled terminal JSON. Chat first tries upstream WS, with HTTP/SSE fallback only after an ordinary handshake failure **before** inference submission. Handshake authentication/quota failures prevent fallback. A possibly submitted request is never replayed.
+Native WS opens upstream after the first model-bearing response.create. HTTP Responses uses upstream SSE and can return raw SSE or assembled terminal JSON. Chat first tries upstream WS, with HTTP/SSE fallback only after an ordinary handshake failure **before** inference submission. Handshake authentication/quota failures prevent fallback.
 
 Opaque output is fingerprinted with a user-scoped HMAC and bound to its originating account for 24 hours. Checkpoint data and prompts are not persisted. WS response IDs belong to that socket only. New sockets require full context or a known checkpoint; HTTP previous_response_id is unsupported.
 

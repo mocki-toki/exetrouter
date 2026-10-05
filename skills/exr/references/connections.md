@@ -2,7 +2,7 @@
 
 Use the endpoint shown in standalone Settings (default `http://127.0.0.1:8787/v1`) or the operator's verified HTTPS URL. Keep the standalone dashboard or `exr serve` running. Discover available models with `exr models --json`.
 
-Supply the router bearer through the consuming process's secret environment. Its API-key field takes this bearer, not a ChatGPT OAuth or Platform key. Never put the secret in generated configuration, arguments or logs. The router never replays accepted/ambiguous inference; clients have their own recovery policy.
+Supply the router bearer through the consuming process's secret environment. Its API-key field takes this bearer, not a ChatGPT OAuth or Platform key. Never put the secret in generated configuration, arguments or logs.
 
 ## Codex CLI
 
@@ -21,8 +21,6 @@ model_catalog_url = "https://api.example.com/v1/models/codex"
 wire_api = "responses"
 env_key = "EXETROUTER_TOKEN"
 supports_websockets = true
-request_max_retries = 0
-stream_max_retries = 0
 ```
 
 Replace both URLs and launch `codex --profile exetrouter` with `EXETROUTER_TOKEN` available. Discovery fetches metadata without inference; it is opt-in and under development in 0.160.0. `/model` selects a pool model. An inherited preference must exist in the pool. Provider name `OpenAI` enables native remote compaction V2.
@@ -73,7 +71,7 @@ Regenerate the configuration after account-pool or model changes. Keep this prov
 
 ## SDKs and service APIs
 
-Python: `OpenAI(base_url=URL, api_key=os.environ["EXETROUTER_TOKEN"], max_retries=0)`. JavaScript: `new OpenAI({baseURL: URL, apiKey: process.env.EXETROUTER_TOKEN, maxRetries: 0})`.
+Python: `OpenAI(base_url=URL, api_key=os.environ["EXETROUTER_TOKEN"])`. JavaScript: `new OpenAI({baseURL: URL, apiKey: process.env.EXETROUTER_TOKEN})`.
 
 Supported calls are models, Responses JSON/SSE/WS/compact and limited Chat with function tools. Use full history and `store=false`; HTTP `previous_response_id` is unsupported. Backend validates output caps and model options. Images pass through Responses `input_image`, or ordered Chat user `image_url` parts; offline forwarding evidence does not verify live vision.
 

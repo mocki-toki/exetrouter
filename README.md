@@ -147,7 +147,6 @@ from openai import OpenAI
 client = OpenAI(
     base_url="http://127.0.0.1:8787/v1",
     api_key=os.environ["EXETROUTER_TOKEN"],
-    max_retries=0,
 )
 response = client.responses.create(
     model="MODEL_ID",
@@ -165,7 +164,6 @@ import OpenAI from "openai";
 const client = new OpenAI({
   baseURL: "http://127.0.0.1:8787/v1",
   apiKey: process.env.EXETROUTER_TOKEN,
-  maxRetries: 0,
 });
 const response = await client.responses.create({
   model: "MODEL_ID",
@@ -175,14 +173,14 @@ const response = await client.responses.create({
 console.log(response.output_text);
 ```
 
-Retries are disabled because a generation may have run even if its response was lost. Responses, streaming and supported Chat Completions share the endpoint; see the [SDK/API contract](docs/openai-api.md) for parameters and limitations.
+Responses, streaming and supported Chat Completions share the endpoint; see the [SDK/API contract](docs/openai-api.md) for parameters and limitations.
 
 ## Privacy and scope
 
 - The router never logs or stores prompts, messages, outputs, tool payloads, authorization headers or request/response bodies. It retains usage counters, operational metadata and keyed context digests. See [security and privacy](SECURITY.md).
 - Content passes through server memory. A host operator can inspect memory or replace the software; this is not end-to-end encryption against that operator.
 - Supported calls use ChatGPT Codex OAuth, not upstream Platform API keys. See the [API contract](docs/openai-api.md) for endpoints and limits.
-- Conversations normally stay on their originating account. [Quota failover](docs/account-pool.md#failure-behavior) requires complete current context. Accepted or ambiguous generations are never replayed.
+- Conversations normally stay on their originating account. [Quota failover](docs/account-pool.md#failure-behavior) requires complete current context.
 - Management uses restricted SSH and an authenticated Unix socket. There is no public HTTP admin API or per-minute/IP quota.
 - Backend compatibility does not establish permission to share subscriptions. Operators remain responsible for their provider agreements.
 

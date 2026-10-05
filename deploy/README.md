@@ -91,7 +91,7 @@ The generated authorized_keys binds each key to one registered identity and forc
 
 Provision a certificate for your chosen domain using your existing ACME/ingress workflow. Replace the example domain/certificate paths in `nginx/exetrouter.conf`, include it in nginx's `http` context, validate `nginx -t` and reload gracefully. The ordinary template owns 80/443. If your existing TCP ingress sends PROXY v2 to a loopback TLS listener, use `nginx/exetrouter-proxy-protocol.conf` instead. Do not install both blindly or start a competing public ingress.
 
-Both templates expose `/v1/` only, disable access/error logs for that host, and disable body buffering, cache and upstream retries. Preserve WebSocket upgrades and SSE. Do not enable payload tracing or body capture in other ingress/APM components. See [privacy](../SECURITY.md). Plan certificate renewal and verify the renewal/reload path before relying on public access.
+Both templates expose `/v1/` only, disable access/error logs for that host, and disable body buffering and cache. Preserve WebSocket upgrades and SSE. Do not enable payload tracing or body capture in other ingress/APM components. See [privacy](../SECURITY.md). Plan certificate renewal and verify the renewal/reload path before relying on public access.
 
 Open only the reviewed API/ACME/management ports; never expose the control socket or raw loopback API. Configure your client using [the installation guide](../docs/installation.md#configure-once).
 

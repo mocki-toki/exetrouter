@@ -17,7 +17,6 @@ Do not put bearer/OAuth secrets into repository, command arguments, logs or skil
 - Run service/gateway under separate unprivileged UIDs. Use service-owned private state and root-controlled binaries/sshd/authorized_keys.
 - Keep verified SSH host keys, Ed25519 public registration, per-key forced commands and disabled shell/forwarding/PTY. See [SSH guide](ssh-management.md).
 - Resource concurrency/message/queue bounds protect process resources. No request-frequency or IP quotas are imposed.
-- Inference is never replayed after possible submission; consuming clients must configure their own retry policy.
 
 ## Host verification and maintenance
 

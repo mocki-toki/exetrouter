@@ -20,7 +20,7 @@ Remaining acceptance:
 - Actual upstream authentication/quota failures when available, without deliberately exhausting a subscription.
 - Live WS encrypted-function-argument portability and multi-hour/concurrent failover.
 
-Require bounded memory/tasks/queues, correct unknown usage, normal affinity, authorized quota-only transfers and no duplicated submission. Give explicit recovery instructions when an owned WS cannot resume. The optional two-hour idle harness is implemented but has not been run for that duration.
+Require bounded memory/tasks/queues, correct unknown usage, normal affinity, authorized quota-only transfers. Give explicit recovery instructions when an owned WS cannot resume. The optional two-hour idle harness is implemented but has not been run for that duration.
 
 Before updating compatibility claims, inspect exact current release sources and run the drift check:
 

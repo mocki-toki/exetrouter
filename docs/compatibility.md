@@ -12,7 +12,7 @@ Supply your router endpoint, bearer token and an account-visible model. The setu
 
 The [source manifest](protocol-sources.json) pins reviewed revisions. The [protocol audit](native-protocol-audit.md) records source-level contracts; [live-testing.md](live-testing.md) records measured runs, failed probes and request counts. Later versions need source review and new fixtures.
 
-Codex WS interruption fixtures counted one generation for early close, partial output and missing terminal. Both current clients passed synthetic quota-switch continuations. OpenCode keeps its own retries; the router never replays an accepted or ambiguous generation. A completed tool item may run before the response terminal, and a lost connection may prevent delivery of a terminal error.
+Codex WS interruption fixtures counted one generation for early close, partial output and missing terminal. Both current clients passed synthetic quota-switch continuations. A completed tool item may run before the response terminal, and a lost connection may prevent delivery of a terminal error.
 
 Full advertised context windows, multi-hour sessions, saturation and actual upstream authentication/quota outages remain unverified. OpenCode V1's experimental WS transport, live upstream, compaction and long context, and Codex Desktop are outside the verified execution matrix.
 
@@ -39,8 +39,6 @@ model_catalog_url = "https://api.example.com/v1/models/codex"
 wire_api = "responses"
 env_key = "EXETROUTER_TOKEN"
 supports_websockets = true
-request_max_retries = 0
-stream_max_retries = 0
 ```
 
 Replace both URLs with your router's address, then use `codex --profile exetrouter`. The discovery feature is off by default and marked under development in 0.160.0; both it and `model_catalog_url` are needed for live metadata with this bearer-authenticated custom provider. The catalog request uses the router token and does not submit inference. Codex receives the router's account-visible model IDs, context limits, reasoning options and modalities. No fixed `model` setting is required: the profile inherits a configured preference or uses a catalog default. An inherited preference must exist in the pool; `/model` selects another available model. Model availability is not identical across every ChatGPT account or the OpenAI Platform API.

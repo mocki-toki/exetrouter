@@ -14,9 +14,9 @@ Reviewed client revisions live in [protocol-sources.json](protocol-sources.json)
 | Native WS | `OpenAI-Beta: responses_websockets=2026-02-06`; sequential `response.create`, including `generate=false` warmup; service ping/pong between requests and replace known idle-closed sockets before a new submission on the same account. |
 | Compaction | One Responses SSE request ending with `compaction_trigger`; project exactly one opaque checkpoint as `response.compaction`. No separate upstream `/responses/compact`. |
 | Chat | Translate supported HTTP JSON/SSE to Responses. Try WS first; ordinary handshake fallback is allowed only before generation submission. Handshake 401/429 prevents fallback. |
-| Accounting | Create a durable event before possible submission; retain terminal counters or an explicit unknown outcome. Never replay inference. |
+| Accounting | Create a durable event before possible submission; retain terminal counters or an explicit unknown outcome. |
 
-Redirects and inference retries are disabled. Mock upstream requires explicitly enabled literal loopback HTTP. Server-owned headers never forward the client bearer, arbitrary account selection or an arbitrary upstream URL.
+Redirects are disabled. Mock upstream requires explicitly enabled literal loopback HTTP. Server-owned headers never forward the client bearer, arbitrary account selection or an arbitrary upstream URL.
 
 ## Native identity and continuation
 
@@ -34,7 +34,7 @@ Only the general Codex meter is implemented. Separate model meters/credits need 
 
 HTTP/handshake/wrapped WS 429 or recognized explicit limit errors create cooldown. Expiry uses the latest valid `Retry-After` and corresponding exhausted-window/error reset; without either, use a marked local 60-second backoff. Inspect bounded errors for reset information without persisting or exposing their contents.
 
-Owned continuations may transfer at a quota boundary or a configured soft threshold only with complete current context. A soft threshold prefers eligible alternatives but preserves a healthy original session when none can safely take over. Explicit pre-generation quota refusal permits bounded fallback; accepted/ambiguous generations and transport failures never permit replay. Without an eligible alternative, retain the original quota error. See [selection and recovery bounds](account-pool.md#failure-behavior).
+Owned continuations may transfer at a quota boundary or a configured soft threshold only with complete current context. A soft threshold prefers eligible alternatives but preserves a healthy original session when none can safely take over. Explicit pre-generation quota refusal permits bounded fallback. Without an eligible alternative, retain the original quota error. See [selection and recovery bounds](account-pool.md#failure-behavior).
 
 Observation order and credential generation reject old updates; parallel success does not erase cooldown. A quota-storage failure is logged separately from usage, and unavailable preflight storage rejects new operations. Durable pauses depend on a healthy database.
 
@@ -42,6 +42,6 @@ Observation order and credential generation reject old updates; parallel success
 
 Catalog, refresh and Responses have separate 5–300-second backoff, extended by valid `Retry-After`. Upstream 401 returns a redacted authentication error and schedules refresh for a separate next operation; repeated rejection of refreshed credentials requires reauthorization. Quota transfer never bypasses authentication, deactivation or operational backoff.
 
-Tool execution belongs to clients. OpenCode's shell tool may produce an auxiliary HTTP title request even during a WS session. Completed tool items may run before terminal completion. A lost downstream connection may prevent delivery of a non-retryable error; reviewed interruption fixtures do not cover every client recovery path.
+Tool execution belongs to clients. OpenCode's shell tool may produce an auxiliary HTTP title request even during a WS session. Completed tool items may run before terminal completion. A lost downstream connection may prevent delivery of a error; reviewed interruption fixtures do not cover every client recovery path.
 
 Image references are forwarded or translated in memory without fetching/decoding. Offline forwarding evidence does not establish live vision support. Full field, error and transport rules are in [openai-api.md](openai-api.md).
