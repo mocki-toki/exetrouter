@@ -1,9 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Configure soft per-account switching thresholds for all, short and weekly quota windows through exr, exrd and the dashboard. Prefer alternatives at or below the remaining-percentage threshold, with fallback to healthy capacity and safe context transfer before submission.
 - Replace the dashboard priority toggle with numeric priority -255…255 (default 1), inheritance and operator locks. Preserve stored priorities and credentials through the explicit schema-8-to-9 migration.
+- Keep switching thresholds in the account settings form, edit priority there, and hide completed weekly-activation notices from ordinary account views.
+- Service upstream and client WebSocket ping/pong, detect silent pre-response peers after 90 seconds, and retire recoverable upstream sockets between requests after 30 idle seconds or five minutes of age. Preserve live slow generations and same-account context recovery.
+- Correlate client and upstream WebSocket lifecycle, request timing and interruptions using content-free IDs, fixed reasons and numeric liveness counters.
+- Leave interrupted inference retry and transport fallback policy to clients instead of overriding native client defaults or wrapping WebSocket interruptions as HTTP 400 errors.
+- Publish schema-9 native gateway and container artifacts together. Existing schema-8 installations require the reviewed account-routing migration rather than an automatic packaging update.
 
 ## 0.3.0
 
