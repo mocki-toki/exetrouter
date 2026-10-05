@@ -14,7 +14,7 @@ Use [GitHub private vulnerability reporting](https://github.com/mocki-toki/exetr
 | OAuth tokens | Encrypted with account-bound AEAD under a separate private key |
 | Personal metadata | Client-encrypted token names, account labels, notes, project names and dashboard preferences; user key never sent to service |
 | Usage | User/token IDs, validated model ID, numeric usage, fixed statuses, timings and request/response identifiers |
-| Conversation affinity | Legacy user-scoped HMAC digests and explicit transfer/portability overrides; new output uses client-carried authenticated envelopes. Bounded current WS history exists only in transient memory |
+| Conversation affinity | Client-carried authenticated envelopes and explicit digest-only transfer/portability overrides. Unwrapped client context is rejected. Bounded current WS history exists only in transient memory |
 | Subscription limits | Percentages, durations, reset/observation times and cooldowns |
 | Account identity | Operator-owned account metadata and display email extracted from encrypted issuer credentials |
 

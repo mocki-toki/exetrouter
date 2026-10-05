@@ -553,7 +553,6 @@ impl RequestLog {
     }
 
     fn remember_turn(&self, value: &str) -> Result<String> {
-        affinity::turn_digest(value, &self.context_key, self.user_id)?;
         affinity::issue(
             value,
             affinity::Kind::Turn,
@@ -722,6 +721,21 @@ async fn context_account(
             .map_err(|_| ContextError::Missing)?,
         );
     }
+    if let Some(turn) = payload
+        .pointer("/client_metadata/x-codex-turn-state")
+        .filter(|v| !v.is_null())
+    {
+        refs.push(
+            affinity::reference(
+                turn.as_str().ok_or(ContextError::Invalid)?,
+                affinity::Kind::Turn,
+                &state.key,
+                identity.user_id,
+                now,
+            )
+            .map_err(|_| ContextError::Missing)?,
+        );
+    }
     if refs.is_empty() {
         return Ok((None, false));
     }
@@ -737,7 +751,6 @@ async fn context_account(
         affinity::Lookup::None => Ok((None, false)),
         affinity::Lookup::Account(id) => Ok((Some(id), false)),
         affinity::Lookup::Portable(id) => Ok((Some(id), true)),
-        affinity::Lookup::Missing => Err(ContextError::Missing),
         affinity::Lookup::Conflict => Err(ContextError::Conflict),
     }
 }

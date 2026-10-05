@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Stop writing a context binding for every output: return authenticated user/account envelopes for opaque context, turn state and saved conversation IDs, and restore original values before upstream dispatch. Preserve legacy continuations and concurrent quota-transfer forks. Full transfer storage fails before replacement inference instead of interrupting ordinary output.
+- Stop writing a context binding for every output: return authenticated user/account envelopes for opaque context, turn state and saved conversation IDs, and restore original values before upstream dispatch. Require authenticated envelopes for all opaque continuations and preserve concurrent quota-transfer forks. Remove the former raw-context fallback and prune unpaired registry rows at startup. Full transfer storage fails before replacement inference instead of interrupting ordinary output.
 
 - Encrypt native-client token names and personal account labels, notes, project names and dashboard preferences with an automatically created client-held key. Add bounded user-scoped ciphertext storage, automatic migration of existing token names, and the schema-9-to-10 migration/rollback plan.
 

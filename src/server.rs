@@ -185,7 +185,10 @@ pub async fn serve(
     let (control_listener, socket_guard) = SocketGuard::bind(config.socket)?;
     let recovered = state
         .db
-        .call(|conn| crate::usage::recover_requests(conn))
+        .call(|conn| {
+            crate::affinity::prune_transfers(conn, chrono::Utc::now().timestamp())?;
+            crate::usage::recover_requests(conn)
+        })
         .await?;
     if recovered > 0 {
         tracing::warn!(event = "requests_recovered", count = recovered);
@@ -270,7 +273,11 @@ pub(crate) async fn local_api(
         jobs: jobs.clone(),
         stopped: stopped.clone(),
     });
-    db.call(|conn| crate::usage::recover_requests(conn)).await?;
+    db.call(|conn| {
+        crate::affinity::prune_transfers(conn, chrono::Utc::now().timestamp())?;
+        crate::usage::recover_requests(conn)
+    })
+    .await?;
     let status = LocalStatus(state.clone());
     let (shutdown, signal) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {

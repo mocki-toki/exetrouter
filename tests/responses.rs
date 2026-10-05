@@ -53,7 +53,7 @@ struct Fixture {
     mock_server: JoinHandle<()>,
 }
 impl Fixture {
-    async fn bind_legacy(&self, raw: String, turn: bool) {
+    async fn bind_raw(&self, raw: String, turn: bool) {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
         let mut mac = Hmac::<Sha256>::new_from_slice(&[1; 32]).unwrap();
@@ -3031,7 +3031,7 @@ async fn pool_compaction_routes_http_and_new_ws_to_its_account_after_restart() {
 }
 
 #[tokio::test]
-async fn pool_context_is_user_scoped_and_rejects_unknown_mixed_and_expired_items() {
+async fn pool_context_is_user_scoped_and_rejects_raw_and_mixed_items() {
     let fixture = Fixture::start(false).await;
     fixture
         .add_account(&["gpt-test", "gpt-second"], false)
@@ -3104,7 +3104,7 @@ async fn pool_context_is_user_scoped_and_rejects_unknown_mixed_and_expired_items
     let _ = reply.json::<Value>().await.unwrap();
     body["input"] = upstream_value(&body["input"]);
     fixture
-        .bind_legacy(
+        .bind_raw(
             body["input"][0]["encrypted_content"]
                 .as_str()
                 .unwrap()
@@ -3112,17 +3112,6 @@ async fn pool_context_is_user_scoped_and_rejects_unknown_mixed_and_expired_items
             false,
         )
         .await;
-    fixture
-        .db
-        .call(|conn| {
-            conn.execute(
-                "UPDATE context_bindings SET expires_at=?1",
-                [chrono::Utc::now().timestamp()],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
     assert_eq!(fixture.post(body.clone()).await.status(), 400);
     body["type"] = json!("response.create");
     let mut socket = fixture.ws().await;
@@ -3336,7 +3325,7 @@ async fn streamed_opaque_output_is_bound_before_forwarding_and_survives_disconne
 }
 
 #[tokio::test]
-async fn full_legacy_registry_does_not_interrupt_new_proofs_on_any_transport() {
+async fn full_transfer_registry_does_not_interrupt_new_proofs_on_any_transport() {
     for surface in ["compact", "json", "sse", "ws"] {
         let fixture = Fixture::start(false).await;
         fixture.db.call(|conn| {
@@ -3466,6 +3455,13 @@ async fn full_transfer_registry_rejects_before_replacement_generation() {
 #[tokio::test]
 async fn context_lookup_storage_failure_rejects_before_usage_or_inference() {
     let fixture = Fixture::start(false).await;
+    let checkpoint = fixture
+        .compact(json!({"model":"gpt-test","input":[]}))
+        .await
+        .json::<Value>()
+        .await
+        .unwrap()["output"][0]
+        .clone();
     fixture
         .db
         .call(|conn| {
@@ -3475,7 +3471,7 @@ async fn context_lookup_storage_failure_rejects_before_usage_or_inference() {
         .await
         .unwrap();
     let mut body = request();
-    body["input"] = json!([{"encrypted_content":"unknown-private-context"}]);
+    body["input"] = json!([checkpoint]);
     let reply = fixture.post(body.clone()).await;
     assert_eq!(reply.status(), 503);
     assert_eq!(
@@ -3492,7 +3488,7 @@ async fn context_lookup_storage_failure_rejects_before_usage_or_inference() {
         terminal(&mut socket).await["error"]["code"],
         "storage_unavailable"
     );
-    assert!(fixture.rows().await.is_empty());
+    assert_eq!(fixture.rows().await.len(), 1);
     assert!(fixture.mock.requests.lock().unwrap().is_empty());
     fixture.stop().await;
 }
@@ -4053,6 +4049,16 @@ async fn websocket_proactively_retires_idle_upstream_without_losing_client_conte
         .send(Message::Text(body.to_string().into()))
         .await
         .unwrap();
+    let created: Value =
+        serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(created["type"], "response.created");
+    let metadata: Value =
+        serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(metadata["type"], "response.metadata");
+    let turn_state = metadata["headers"]["x-codex-turn-state"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let first = terminal(&mut socket).await;
     // Poll the client so its transport answers keepalive pings during the idle gap.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(32);
@@ -4070,10 +4076,7 @@ async fn websocket_proactively_retires_idle_upstream_without_losing_client_conte
     assert!(client_pings >= 2);
     assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
     body["previous_response_id"] = first["response"]["id"].clone();
-    fixture
-        .bind_legacy("private-synthetic-ws-turn-state".into(), true)
-        .await;
-    body["client_metadata"] = json!({"x-codex-turn-state":"private-synthetic-ws-turn-state"});
+    body["client_metadata"] = json!({"x-codex-turn-state":turn_state});
     body["input"] =
         json!([{"role":"user","content":"synthetic continuation after idle retirement"}]);
     socket
@@ -5160,26 +5163,10 @@ async fn turn_state_survives_http_continuation_and_pins_only_its_owner_account()
         assert!(error.contains("context_not_found"));
         assert!(!error.contains(&value));
     }
-    let state = upstream_value(&json!(state)).as_str().unwrap().to_owned();
-    fixture.bind_legacy(state.clone(), true).await;
-    fixture
-        .db
-        .call(|conn| {
-            assert_eq!(
-                conn.query_row(
-                    "SELECT COUNT(*) FROM context_bindings WHERE length(digest)=32",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )?,
-                1
-            );
-            conn.execute("UPDATE context_bindings SET expires_at=0", [])?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+    let raw_state = upstream_value(&json!(state)).as_str().unwrap().to_owned();
+    fixture.bind_raw(raw_state.clone(), true).await;
     assert_eq!(
-        submit(fixture.secret.clone(), state)
+        submit(fixture.secret.clone(), raw_state)
             .await
             .unwrap()
             .status(),
@@ -5187,6 +5174,33 @@ async fn turn_state_survives_http_continuation_and_pins_only_its_owner_account()
     );
     assert_eq!(fixture.rows().await.len(), 2);
     assert_eq!(fixture.mock.requests.lock().unwrap().len(), 2);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn http_frame_turn_state_requires_a_proof_before_usage_and_pins_its_account() {
+    let fixture = Fixture::start(false).await;
+    *fixture.mock.mode.lock().unwrap() = "turn_state".into();
+    let mut body = request();
+    body["stream"] = json!(false);
+    let response = fixture.post(body.clone()).await;
+    let state = response.headers()["x-codex-turn-state"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    response.json::<Value>().await.unwrap();
+    let raw = upstream_value(&json!(state)).as_str().unwrap().to_owned();
+    fixture.bind_raw(raw.clone(), true).await;
+    body["client_metadata"] = json!({"x-codex-turn-state":raw});
+    assert_eq!(fixture.post(body.clone()).await.status(), 400);
+    assert_eq!(fixture.rows().await.len(), 1);
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
+    body["client_metadata"] = json!({"x-codex-turn-state":state});
+    let response = fixture.post(body).await;
+    assert_eq!(response.status(), 200);
+    response.json::<Value>().await.unwrap();
+    let accounts = fixture.mock.request_accounts.lock().unwrap().clone();
+    assert_eq!(accounts[0], accounts[1]);
     fixture.stop().await;
 }
 

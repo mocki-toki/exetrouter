@@ -1,4 +1,4 @@
-//! Client-carried ownership proofs and bounded legacy/transfer overrides.
+//! Client-carried ownership proofs and bounded transfer overrides.
 use crate::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chacha20poly1305::{
@@ -9,11 +9,11 @@ use hmac::{Hmac, Mac};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const TTL: i64 = 24 * 60 * 60;
 const ITEMS: usize = 128;
-// Only legacy bindings and explicit quota-transfer overrides occupy the registry.
+// Only explicit quota-transfer overrides occupy the registry.
 const PER_USER: i64 = 32768;
 const TOTAL: i64 = 65536;
 pub(crate) type Digest = [u8; 32];
@@ -107,7 +107,8 @@ pub(crate) fn issue(
 #[derive(Clone)]
 pub(crate) struct Reference {
     digest: Digest,
-    owner: Option<(i64, i64)>,
+    account: i64,
+    expiry: i64,
 }
 pub(crate) fn reference(
     value: &str,
@@ -116,11 +117,12 @@ pub(crate) fn reference(
     user: i64,
     now: i64,
 ) -> Result<Reference> {
-    let (raw, owner) = open(value, kind, key, user, now)?;
+    let (raw, (account, expiry)) = open(value, kind, key, user, now)?;
     validate_value(raw, kind)?;
     Ok(Reference {
         digest: value_digest(raw, kind, key, user)?,
-        owner,
+        account,
+        expiry,
     })
 }
 fn open<'a>(
@@ -129,10 +131,10 @@ fn open<'a>(
     key: &[u8],
     user: i64,
     now: i64,
-) -> Result<(&'a str, Option<(i64, i64)>)> {
-    let Some(encoded) = value.strip_prefix(PROOF_PREFIX) else {
-        return Ok((value, None));
-    };
+) -> Result<(&'a str, (i64, i64))> {
+    let encoded = value
+        .strip_prefix(PROOF_PREFIX)
+        .ok_or("context proof required")?;
     let (header, raw) = encoded.split_once('.').ok_or("context proof invalid")?;
     if header.len() != 86 || raw.is_empty() {
         return Err("context proof invalid".into());
@@ -163,7 +165,7 @@ fn open<'a>(
     if owner != user || account <= 0 || expiry <= now {
         return Err("context proof invalid".into());
     }
-    Ok((raw, Some((account, expiry))))
+    Ok((raw, (account, expiry)))
 }
 
 fn opaque_values(
@@ -325,13 +327,12 @@ pub(crate) fn lookup_references(
     let mut owner = None;
     let mut portable_owner = None;
     for item in refs {
-        let result = lookup(conn, user, &[item.digest], now)?;
-        let (account, portable) = match result {
-            Lookup::Portable(id) => (id, true),
-            _ if item.owner.is_some() => (item.owner.expect("signed owner").0, false),
-            Lookup::Account(id) => (id, false),
-            _ => return Ok(Lookup::Missing),
-        };
+        let transferred = conn.query_row(
+            "SELECT b.account_id FROM context_bindings b JOIN context_bindings p ON p.user_id=b.user_id AND p.digest=?3 AND p.account_id=b.account_id WHERE b.user_id=?1 AND b.digest=?2 AND b.expires_at>?4 AND p.expires_at>?4",
+            params![user,item.digest.as_slice(),portability_digest(&item.digest).as_slice(),now],
+            |row| row.get::<_,i64>(0),
+        ).optional()?;
+        let (account, portable) = transferred.map_or((item.account, false), |id| (id, true));
         if portable {
             portable_owner.get_or_insert(account);
         } else if owner.is_some_and(|id| id != account) {
@@ -371,10 +372,10 @@ pub(crate) fn transfer_references(
     }
     tx.execute("DELETE FROM context_bindings WHERE expires_at<=?1", [now])?;
     for item in refs {
-        let expiry = match item.owner {
-            Some((_, expiry)) => expiry,
-            None => tx.query_row("SELECT expires_at FROM context_bindings WHERE user_id=?1 AND digest=?2 AND expires_at>?3", params![user,item.digest.as_slice(),now], |r| r.get::<_,i64>(0))?,
-        };
+        let expiry = item.expiry;
+        if expiry <= now {
+            return Err("context proof expired before transfer".into());
+        }
         for digest in [item.digest, portability_digest(&item.digest)] {
             tx.execute("INSERT INTO context_bindings(user_id,digest,account_id,expires_at) VALUES(?1,?2,?3,?4) ON CONFLICT(user_id,digest) DO UPDATE SET account_id=excluded.account_id,expires_at=MAX(expires_at,excluded.expires_at)", params![user,digest.as_slice(),account,expiry])?;
         }
@@ -389,18 +390,6 @@ pub(crate) fn transfer_references(
     }
     tx.commit()?;
     Ok(())
-}
-
-/// Hash only; the upstream routing token remains in transient header memory.
-pub(crate) fn turn_digest(value: &str, key: &[u8], user: i64) -> Result<Digest> {
-    if value.is_empty() || value.len() > 4096 || !value.bytes().all(|b| (33..=126).contains(&b)) {
-        return Err("invalid turn routing state".into());
-    }
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)?;
-    mac.update(b"exetrouter/turn-affinity/v1\0");
-    mac.update(&user.to_be_bytes());
-    mac.update(value.as_bytes());
-    Ok(mac.finalize().into_bytes().into())
 }
 
 pub(crate) fn digests(value: &Value, key: &[u8], user: i64) -> Result<Vec<Digest>> {
@@ -478,32 +467,7 @@ pub(crate) enum Lookup {
     None,
     Account(i64),
     Portable(i64),
-    Missing,
     Conflict,
-}
-
-pub(crate) fn lookup(conn: &Connection, user: i64, digests: &[Digest], now: i64) -> Result<Lookup> {
-    let mut account = None;
-    let mut portable_account = None;
-    for digest in digests {
-        let found = conn.query_row("SELECT account_id FROM context_bindings WHERE user_id=?1 AND digest=?2 AND expires_at>?3", params![user,digest.as_slice(),now], |row| row.get::<_,i64>(0)).optional()?;
-        let Some(found) = found else {
-            return Ok(Lookup::Missing);
-        };
-        let portable: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM context_bindings WHERE user_id=?1 AND digest=?2 AND expires_at>?3)", params![user, portability_digest(digest).as_slice(),now], |row|row.get(0))?;
-        if portable {
-            portable_account.get_or_insert(found);
-            continue;
-        }
-        if account.is_some_and(|account| account != found) {
-            return Ok(Lookup::Conflict);
-        }
-        account = Some(found);
-    }
-    Ok(account.map_or_else(
-        || portable_account.map_or(Lookup::None, Lookup::Portable),
-        Lookup::Account,
-    ))
 }
 
 fn portability_digest(digest: &Digest) -> Digest {
@@ -513,93 +477,45 @@ fn portability_digest(digest: &Digest) -> Digest {
     hash.finalize().into()
 }
 
-#[cfg(test)]
-pub(crate) fn save(
-    conn: &mut Connection,
-    user: i64,
-    account: i64,
-    generation: i64,
-    digests: &[Digest],
-    now: i64,
-) -> Result<()> {
-    if digests.is_empty() {
-        return Ok(());
-    }
+/// Retain only live paired transfer records. Unpaired rows from the former
+/// per-output registry cannot authorize context and should not consume capacity.
+/// Run once at service startup, before accepting requests; no schema change.
+pub(crate) fn prune_transfers(conn: &mut Connection, now: i64) -> Result<usize> {
     let tx = conn.transaction()?;
-    let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts WHERE id=?1 AND generation=?2 AND state='active')", params![account,generation], |row| row.get(0))?;
-    if !valid {
-        return Err("account changed before context binding".into());
+    let mut removed = tx.execute("DELETE FROM context_bindings WHERE expires_at<=?1", [now])?;
+    let rows: BTreeMap<(i64, Digest), i64> = {
+        let mut statement =
+            tx.prepare("SELECT user_id,digest,account_id FROM context_bindings LIMIT ?1")?;
+        let rows = statement
+            .query_map([TOTAL + 1], |r| {
+                Ok((
+                    (r.get::<_, i64>(0)?, r.get::<_, Digest>(1)?),
+                    r.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        rows
+    };
+    if rows.len() > TOTAL as usize {
+        return Err("context transfer registry exceeds capacity".into());
     }
-    tx.execute("DELETE FROM context_bindings WHERE expires_at<=?1", [now])?;
-    let mut added = 0;
-    for digest in digests {
-        let old = tx
-            .query_row(
-                "SELECT account_id FROM context_bindings WHERE user_id=?1 AND digest=?2",
-                params![user, digest.as_slice()],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        match old {
-            Some(old) if old != account => {
-                let portable: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM context_bindings WHERE user_id=?1 AND digest=?2 AND expires_at>?3)", params![user,portability_digest(digest).as_slice(),now], |row|row.get(0))?;
-                if !portable {
-                    return Err("opaque context account conflict".into());
-                }
-            }
-            None => added += 1,
-            _ => {}
+    let mut keep = BTreeSet::new();
+    for (&(user, digest), &account) in &rows {
+        let marker = portability_digest(&digest);
+        if rows.get(&(user, marker)) == Some(&account) {
+            keep.insert((user, digest));
+            keep.insert((user, marker));
         }
     }
-    let (own, total): (i64, i64) = tx.query_row(
-        "SELECT COALESCE(SUM(user_id=?1),0),COUNT(*) FROM context_bindings",
-        [user],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    if own + added > PER_USER || total + added > TOTAL {
-        return Err("context binding capacity reached".into());
-    }
-    for digest in digests {
-        tx.execute("INSERT INTO context_bindings(user_id,digest,account_id,expires_at) VALUES(?1,?2,?3,?4) ON CONFLICT(user_id,digest) DO UPDATE SET account_id=excluded.account_id,expires_at=MAX(expires_at,excluded.expires_at)",params![user,digest.as_slice(),account,now.saturating_add(TTL)])?;
-        tx.execute("UPDATE context_bindings SET expires_at=MAX(expires_at,?1) WHERE user_id=?2 AND digest=?3", params![now.saturating_add(TTL),user,portability_digest(digest).as_slice()])?;
-    }
-    tx.commit()?;
-    Ok(())
-}
-
-/// Move already authorized input after a quota-only selection. Merely reading
-/// context must neither create a binding nor extend its lifetime.
-#[cfg(test)]
-pub(crate) fn transfer(
-    conn: &mut Connection,
-    user: i64,
-    account: i64,
-    generation: i64,
-    digests: &[Digest],
-    now: i64,
-) -> Result<()> {
-    let tx = conn.transaction()?;
-    let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts WHERE id=?1 AND generation=?2 AND state='active')", params![account,generation], |row| row.get(0))?;
-    if !valid {
-        return Err("account changed before context transfer".into());
-    }
-    tx.execute("DELETE FROM context_bindings WHERE expires_at<=?1", [now])?;
-    for digest in digests {
-        if tx.execute("UPDATE context_bindings SET account_id=?1 WHERE user_id=?2 AND digest=?3 AND expires_at>?4", params![account,user,digest.as_slice(),now])? != 1 {
-            return Err("context unavailable for transfer".into());
+    let mut delete = tx.prepare("DELETE FROM context_bindings WHERE user_id=?1 AND digest=?2")?;
+    for &(user, digest) in rows.keys() {
+        if !keep.contains(&(user, digest)) {
+            removed += delete.execute(params![user, digest.as_slice()])?;
         }
-        tx.execute("INSERT INTO context_bindings(user_id,digest,account_id,expires_at) SELECT user_id,?1,account_id,expires_at FROM context_bindings WHERE user_id=?2 AND digest=?3 ON CONFLICT(user_id,digest) DO UPDATE SET account_id=excluded.account_id,expires_at=MAX(expires_at,excluded.expires_at)",params![portability_digest(digest).as_slice(),user,digest.as_slice()])?;
     }
-    let (own, total): (i64, i64) = tx.query_row(
-        "SELECT COALESCE(SUM(user_id=?1),0),COUNT(*) FROM context_bindings",
-        [user],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    if own > PER_USER || total > TOTAL {
-        return Err("context binding capacity reached".into());
-    }
+    drop(delete);
     tx.commit()?;
-    Ok(())
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -622,7 +538,7 @@ mod tests {
         );
         assert_eq!(
             open(&proof, Kind::Content, &key, 1, 1999).unwrap(),
-            ("opaque.value", Some((2, 2000)))
+            ("opaque.value", (2, 2000))
         );
         assert!(open(&proof, Kind::Content, &key, 1, 2000).is_err());
         assert!(open(&proof, Kind::Content, &key, 2, 1000).is_err());
@@ -664,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn proof_transfer_preserves_expiry_legacy_context_and_independent_forks() {
+    fn proof_transfer_preserves_expiry_and_independent_forks() {
         let mut conn = database();
         let key = [7; 32];
         let ancestor = issue("ancestor", Kind::Content, &key, 1, 1, 2000).unwrap();
@@ -692,59 +608,9 @@ mod tests {
                 .unwrap(),
             2000
         );
-        let legacy = reference("old-raw-value", Kind::Content, &key, 1, 1000).unwrap();
-        save(&mut conn, 1, 1, 0, &[legacy.digest], 1000).unwrap();
-        assert_eq!(
-            lookup_references(&conn, 1, &[legacy], 1001).unwrap(),
-            Lookup::Account(1)
-        );
         assert!(reference(&ancestor, Kind::Content, &key, 1, 2000).is_err());
     }
 
-    #[test]
-    fn quota_transfer_requires_live_user_ownership_and_preserves_expiry_atomically() {
-        let mut conn = database();
-        let first = [[1; 32]];
-        save(&mut conn, 1, 1, 0, &first, 1000).unwrap();
-        assert!(transfer(&mut conn, 2, 2, 0, &first, 1001).is_err());
-        assert!(transfer(&mut conn, 1, 2, 0, &[first[0], [2; 32]], 1001).is_err());
-        assert_eq!(lookup(&conn, 1, &first, 1001).unwrap(), Lookup::Account(1));
-        transfer(&mut conn, 1, 2, 0, &first, 1001).unwrap();
-        assert_eq!(lookup(&conn, 1, &first, 1001).unwrap(), Lookup::Portable(2));
-        assert_eq!(
-            lookup(&conn, 1, &first, 1000 + TTL).unwrap(),
-            Lookup::Missing
-        );
-        assert!(transfer(&mut conn, 1, 1, 0, &first, 1000 + TTL).is_err());
-        assert!(transfer(&mut conn, 1, 2, 1, &first, 1001).is_err());
-    }
-    #[test]
-    fn transferred_shared_checkpoint_does_not_move_concurrent_fork_outputs() {
-        let mut conn = database();
-        save(&mut conn, 1, 1, 0, &[[1; 32]], 1000).unwrap();
-        transfer(&mut conn, 1, 2, 0, &[[1; 32]], 1001).unwrap();
-        save(&mut conn, 1, 2, 0, &[[2; 32]], 1001).unwrap();
-        transfer(&mut conn, 1, 1, 0, &[[1; 32]], 1002).unwrap();
-        save(&mut conn, 1, 1, 0, &[[3; 32]], 1002).unwrap();
-        assert_eq!(
-            lookup(&conn, 1, &[[1; 32], [2; 32]], 1003).unwrap(),
-            Lookup::Account(2)
-        );
-        assert_eq!(
-            lookup(&conn, 1, &[[1; 32], [3; 32]], 1003).unwrap(),
-            Lookup::Account(1)
-        );
-        assert_eq!(
-            lookup(&conn, 1, &[[2; 32], [3; 32]], 1003).unwrap(),
-            Lookup::Conflict
-        );
-        save(&mut conn, 1, 2, 0, &[[1; 32]], 1004).unwrap();
-        assert_eq!(
-            lookup(&conn, 1, &[[1; 32]], 1005).unwrap(),
-            Lookup::Portable(2)
-        );
-        assert_eq!(lookup(&conn, 2, &[[1; 32]], 1005).unwrap(), Lookup::Missing);
-    }
     #[test]
     fn nested_content_is_scoped_deduplicated_and_bounded() {
         let input = json!([{"type":"reasoning","encrypted_content":"private-checkpoint"},{"type":"message","content":[{"type":"encrypted_content","encrypted_content":"private-checkpoint"}]}]);
@@ -778,10 +644,14 @@ mod tests {
         )
         .unwrap();
         assert_ne!(a, reasoning);
-        let mut conn = database();
-        save(&mut conn, 1, 2, 0, &a, 1000).unwrap();
-        assert_eq!(lookup(&conn, 1, &a, 1001).unwrap(), Lookup::Account(2));
-        assert_eq!(lookup(&conn, 2, &a, 1001).unwrap(), Lookup::Missing);
+        let mut signed = input.clone();
+        wrap_output(&mut signed, &[1; 32], 1, 2, 2000).unwrap();
+        let refs = references(&signed, &[1; 32], 1, 1000).unwrap();
+        assert_eq!(
+            lookup_references(&database(), 1, &refs, 1000).unwrap(),
+            Lookup::Account(2)
+        );
+        assert!(references(&signed, &[1; 32], 2, 1000).is_err());
         for bad in [json!([10]), json!("private-tool-state"), json!([""])] {
             assert!(digests(&json!({"encrypted_function_args":bad}), &[1; 32], 1).is_err());
         }
@@ -791,72 +661,55 @@ mod tests {
     }
 
     #[test]
-    fn bindings_expire_at_the_boundary_and_cannot_mix_or_move_accounts() {
-        let mut conn = database();
-        let a = [[1; 32]];
-        let b = [[2; 32]];
-        save(&mut conn, 1, 1, 0, &a, 1000).unwrap();
-        save(&mut conn, 1, 2, 0, &b, 1000).unwrap();
-        assert_eq!(lookup(&conn, 1, &a, 1001).unwrap(), Lookup::Account(1));
-        assert_eq!(lookup(&conn, 2, &a, 1001).unwrap(), Lookup::Missing);
-        assert_eq!(
-            lookup(&conn, 1, &[a[0], b[0]], 1001).unwrap(),
-            Lookup::Conflict
-        );
-        assert!(save(&mut conn, 1, 2, 0, &a, 1001).is_err());
-        assert_eq!(lookup(&conn, 1, &a, 1000 + TTL).unwrap(), Lookup::Missing);
-        save(&mut conn, 1, 2, 0, &a, 1000 + TTL).unwrap();
-        assert_eq!(
-            lookup(&conn, 1, &a, 1000 + TTL).unwrap(),
-            Lookup::Account(2)
-        );
-        conn.execute("UPDATE oauth_accounts SET generation=1 WHERE id=2", [])
+    fn raw_context_is_rejected_even_when_its_digest_is_registered() {
+        let conn = database();
+        for kind in [
+            Kind::Content,
+            Kind::Arguments,
+            Kind::Turn,
+            Kind::Conversation,
+        ] {
+            let digest = value_digest("old-raw-value", kind, &[7; 32], 1).unwrap();
+            conn.execute(
+                "INSERT INTO context_bindings VALUES(1,?1,1,2000)",
+                [digest.as_slice()],
+            )
             .unwrap();
-        assert!(save(&mut conn, 1, 2, 0, &[[3; 32]], 1000 + TTL).is_err());
-        assert_eq!(
-            lookup(&conn, 1, &[[3; 32]], 1000 + TTL).unwrap(),
-            Lookup::Missing
-        );
-    }
-    #[test]
-    fn busy_sessions_can_bind_beyond_the_old_daily_limit() {
-        let mut conn = database();
-        conn.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<4096) INSERT INTO context_bindings SELECT 1,CAST(printf('%032d',x) AS BLOB),1,999999 FROM n;").unwrap();
-        let turn = turn_digest("new-turn", b"test-key", 1).unwrap();
-        save(&mut conn, 1, 1, 0, &[turn, [3; 32]], 1000).unwrap();
-        assert_eq!(
-            lookup(&conn, 1, &[turn, [3; 32]], 1001).unwrap(),
-            Lookup::Account(1)
-        );
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM context_bindings", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            4098
-        );
+            assert!(reference("old-raw-value", kind, &[7; 32], 1, 1000).is_err());
+            assert!(open("old-raw-value", kind, &[7; 32], 1, 0).is_err());
+        }
     }
 
     #[test]
-    fn capacity_and_conflicting_batches_roll_back_without_evicting_live_context() {
+    fn startup_prunes_unpaired_and_expired_rows_but_preserves_live_transfers() {
         let mut conn = database();
-        conn.execute(
-            "INSERT INTO context_bindings VALUES(1,?1,1,?2)",
-            params![[1_u8; 32].as_slice(), 1000 + TTL],
+        let proof = issue("transferred", Kind::Content, &[7; 32], 1, 1, 2000).unwrap();
+        let refs = references(&json!({"encrypted_content":proof}), &[7; 32], 1, 1000).unwrap();
+        transfer_references(&mut conn, 1, 2, 0, &refs, 1000).unwrap();
+        conn.execute_batch(
+            "INSERT INTO context_bindings VALUES(1,zeroblob(32),1,2000),(2,zeroblob(32),2,1000);",
         )
         .unwrap();
-        assert!(save(&mut conn, 1, 2, 0, &[[2; 32], [1; 32]], 1000).is_err());
-        assert_eq!(lookup(&conn, 1, &[[2; 32]], 1000).unwrap(), Lookup::Missing);
-        conn.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO context_bindings SELECT 1,CAST(printf('%032d',x) AS BLOB),1,999999 FROM n", [PER_USER - 1]).unwrap();
-        assert!(save(&mut conn, 1, 1, 0, &[[3; 32]], 1000).is_err());
-        save(&mut conn, 1, 1, 0, &[[1; 32]], 1001).unwrap();
+        assert_eq!(prune_transfers(&mut conn, 1000).unwrap(), 2);
+        assert_eq!(prune_transfers(&mut conn, 1000).unwrap(), 0);
         assert_eq!(
-            lookup(&conn, 1, &[[1; 32]], 1000 + TTL).unwrap(),
-            Lookup::Account(1)
+            lookup_references(&conn, 1, &refs, 1000).unwrap(),
+            Lookup::Portable(2)
         );
-        assert_eq!(lookup(&conn, 1, &[[3; 32]], 1000).unwrap(), Lookup::Missing);
+        assert_eq!(prune_transfers(&mut conn, 2000).unwrap(), 2);
+    }
+
+    #[test]
+    fn transfer_checks_generation_and_expiry_atomically() {
         let mut conn = database();
-        conn.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<65536) INSERT INTO context_bindings SELECT 2,CAST(printf('%032d',x) AS BLOB),1,999999 FROM n;").unwrap();
-        assert!(save(&mut conn, 1, 1, 0, &[[3; 32]], 1000).is_err());
-        assert_eq!(lookup(&conn, 1, &[[3; 32]], 1000).unwrap(), Lookup::Missing);
+        let refs = references(&json!({"encrypted_content":issue("state", Kind::Content, &[7;32], 1, 1, 2000).unwrap()}), &[7;32], 1, 1000).unwrap();
+        assert!(transfer_references(&mut conn, 1, 2, 1, &refs, 1000).is_err());
+        assert!(transfer_references(&mut conn, 1, 2, 0, &refs, 2000).is_err());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM context_bindings", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 }

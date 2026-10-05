@@ -95,8 +95,8 @@ Compact appends `compaction_trigger` to one Responses SSE request and projects `
 ### Context ownership
 
 - `previous_response_id` is supported only for responses owned by the current WS. HTTP/new-socket previous IDs are unsupported. Bearer validity is checked on every `response.create`.
-- `encrypted_content` and native `encrypted_function_args` carry authenticated opaque envelopes; empty argument arrays are valid. The upstream receives the original values after verification. Proofs bind values to their user and issuing account for 24 hours without per-output database rows. Legacy raw values retain digest-based validation. Unknown/foreign/tampered/expired input returns `context_not_found`; conflicting untransferred owners return `context_account_mismatch`.
-- Saved conversation IDs must have been issued to the same router user. Authenticated envelopes pin them to the owning account for 24 hours; legacy IDs retain digest validation. Unknown/foreign/expired IDs fail before inference. Saved conversations cannot migrate because backend-owned history is unavailable to the router.
+- `encrypted_content` and native `encrypted_function_args` carry authenticated opaque envelopes; empty argument arrays are valid. The upstream receives the original values after verification. Proofs bind values to their user and issuing account for 24 hours without per-output database rows. Raw values without a router proof are rejected even when their digests remain stored. Unknown/foreign/tampered/expired input returns `context_not_found`; conflicting untransferred owners return `context_account_mismatch`.
+- Saved conversation IDs must have been issued to the same router user. Authenticated envelopes pin them to the owning account for 24 hours. Unknown/foreign/expired IDs fail before inference. Saved conversations cannot migrate because backend-owned history is unavailable to the router.
 - Quota or configured soft-threshold transfer requires complete current context and preserves authorization across concurrent forks. See [account-pool recovery](account-pool.md#failure-behavior) for bounds.
 
 ## Request sizes and compression
@@ -131,7 +131,7 @@ An HTTP interruption emits generic `error`, then terminal `response.failed`. Usa
 
 HTTP returns bounded authenticated `x-codex-turn-state`, unwrapped before upstream dispatch. WS sends handshake `response.metadata` after the first `response.created`, as required by the reviewed OpenCode driver; upstream selection happens after the downstream upgrade. Event metadata also binds issued state before forwarding.
 
-WS accepts issued state in `client_metadata["x-codex-turn-state"]` or the upgrade header, projecting accepted header state into frame metadata. Both transports validate ownership/account. Only state issued to the same user is accepted; its digest pins the account for 24 hours in the bounded context registry. Unknown/foreign/expired state and conflicting untransferred opaque context fail before inference.
+HTTP accepts issued state in its header or `client_metadata["x-codex-turn-state"]`; native WS accepts frame metadata or the upgrade header, projecting accepted header state into frame metadata. Both transports validate ownership/account before recording a generation. Only state issued to the same user is accepted; its authenticated envelope pins the account for 24 hours without a registry entry. Unknown/foreign/expired state and conflicting untransferred opaque context fail before inference.
 
 Quota or configured soft-threshold transfer drops old account-specific state and returns the replacement connection's metadata. Raw values stay transient. An HTTP header that cannot be bound is omitted while the accepted response is drained/accounted; an unbindable metadata event interrupts forwarding.
 
