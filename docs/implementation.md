@@ -20,10 +20,15 @@ SQLite currently uses schema 8. Migrations are transactional; versions 7 and 8 h
 | Control IO / gateway exchange / client SSH | 10 / 15 / 45 seconds |
 | Graceful shutdown | 15 seconds |
 | Upstream connect / idle receive / slow send | 10 / 900 inference (300 metadata) / 10 seconds |
+| Native WS pre-response silence / ping interval | 90 / 15 seconds |
+| Recoverable upstream WS idle / maximum age | 30 / 300 seconds; retired only between requests |
+| Client WS peer silence / application idle | 90 / 300 seconds |
 
 Inference wire-input, upstream WS/SSE event, translated-output and SSE-queue defaults are shared in `src/payload.rs`. Input and output bounds remain independent: accepting a larger image does not expand output buffering. Limits are fixed defaults, not a configurable aggregate memory budget; parsed JSON copies and total in-flight bytes are not measured or separately admitted yet.
 
 Concurrency is shared by all tokens of a user and all generation surfaces. Rejection before inference creates no usage. There is no request-per-minute/IP quota for the current private use case.
+
+Native WS sends upstream and downstream control pings while waiting for a response. Received upstream frames/pongs renew peer liveness; local heartbeats never do. Before the first non-control response event, 90 seconds of complete upstream silence interrupts the request; afterward the existing 900-second receive budget applies. Live pongs preserve slow prefill/reasoning without claiming generation progress. Between requests, client control pings detect silent peers within 90 seconds, while control traffic does not extend the 300-second application-idle deadline. Upstream sockets with a recoverable completed context are retired after 30 idle seconds or five minutes of total age; expiry never interrupts active work. The next request uses the existing same-account context recovery path. Client retry/fallback policy remains responsible for interrupted generations; proactive retirement does not submit inference.
 
 ## State recovery
 

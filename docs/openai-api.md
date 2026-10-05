@@ -86,6 +86,8 @@ Native WS services upstream ping/pong and control events between requests. If th
 
 Idle metadata is retained as at most one 64 KiB transient notification and delivered after the next `response.created`, preserving native event ordering. Unexpected idle data/terminal/error frames close the downstream connection instead of attributing them to a later request. Upstream controls do not extend the 300-second downstream idle deadline.
 
+When the latest completed context is recoverable, an upstream WS is proactively retired after 30 seconds between requests or five minutes of connection age. An active response is never retired by these limits. The downstream connection remains open; its next request recovers complete context on the same eligible account, without forwarding old socket-specific response IDs or turn state. If no recoverable snapshot exists, proactive retirement is skipped.
+
 Responses Lite preserves its ordered `additional_tools` prefix and custom/namespace definitions. An explicit Lite header needs a recognized native prefix or frame-mode metadata; arbitrary caller headers are not forwarded.
 
 Compact appends `compaction_trigger` to one Responses SSE request and projects `response.compaction` with exactly one opaque checkpoint. Independent requests may select another eligible account; normal checkpoint/socket affinity takes precedence over cache preference.
@@ -119,6 +121,8 @@ Unsupported/multiple codings return 415 `unsupported_content_encoding`; corrupt/
 Backend HTTP errors retain their status with fixed redacted HTTP/Chat bodies. Bounded upstream error content is never logged, stored or echoed by these adapters. Non-JSON, oversized or unreadable errors use a fixed fallback at the backend status. Native WS events retain their forwarding contract. Upstream authentication errors are distinct from client bearer rejection.
 
 HTTP SSE and native WS emit content-free `ping` events after 15 seconds without a downstream event; clients should ignore unknown types. Heartbeats do not indicate generation progress or reset upstream deadlines: 900 seconds for inference, 300 for metadata.
+
+Native WS additionally sends control pings every 15 seconds to upstream during active requests and to downstream during active/idle periods. Any received upstream frame, including pong, proves peer liveness. Complete upstream silence before the first non-control event is bounded to 90 seconds; after the response starts, the 900-second receive budget applies. A client that sends no frames/pongs while idle is closed after 90 seconds. These liveness controls do not produce model output or renew the application-idle deadline.
 
 An HTTP interruption emits generic `error`, then terminal `response.failed`. Usage may remain unknown. A lost connection or shorter client deadline can prevent error delivery; no false completion is invented.
 

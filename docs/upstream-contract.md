@@ -11,7 +11,7 @@ Reviewed client revisions live in [protocol-sources.json](protocol-sources.json)
 | OAuth | `https://auth.openai.com`, public client ID `app_EMoamEEZ73f0CkXaXp7hrann`; device usercode/token flow, PKCE `/oauth/token` exchange and refresh-token grant. Credentials use a separate AEAD key. |
 | Catalog | `/models?client_version=0.159.3`, selected bearer and `chatgpt-account-id`; 60-second cache and allowlisted metadata. |
 | Responses | `/responses` over HTTP SSE or native WS. `store` defaults false; explicit options pass through for backend validation. |
-| Native WS | `OpenAI-Beta: responses_websockets=2026-02-06`; sequential `response.create`, including `generate=false` warmup; service ping/pong between requests and replace known idle-closed sockets before a new submission on the same account. |
+| Native WS | `OpenAI-Beta: responses_websockets=2026-02-06`; sequential `response.create`, including `generate=false` warmup; service ping/pong, bound pre-response peer silence to 90 seconds and retire recoverable idle sockets after 30 seconds/five minutes of age before a new submission on the same account. |
 | Compaction | One Responses SSE request ending with `compaction_trigger`; project exactly one opaque checkpoint as `response.compaction`. No separate upstream `/responses/compact`. |
 | Chat | Translate supported HTTP JSON/SSE to Responses. Try WS first; ordinary handshake fallback is allowed only before generation submission. Handshake 401/429 prevents fallback. |
 | Accounting | Create a durable event before possible submission; retain terminal counters or an explicit unknown outcome. |
