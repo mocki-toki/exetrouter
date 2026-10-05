@@ -13,6 +13,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/007_account_preferences.sql"),
     include_str!("migrations/008_quota_activation.sql"),
     include_str!("migrations/009_account_routing.sql"),
+    include_str!("migrations/010_private_metadata.sql"),
 ];
 pub const SCHEMA_VERSION: usize = MIGRATIONS.len();
 const QUEUE_CAPACITY: usize = 32;

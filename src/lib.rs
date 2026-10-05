@@ -15,6 +15,7 @@ mod local;
 pub mod oauth;
 mod payload;
 mod pool;
+mod private_metadata;
 pub mod quota;
 pub mod reset;
 pub mod server;

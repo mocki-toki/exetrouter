@@ -140,6 +140,16 @@ fn digest(key: &[u8], secret: &str) -> Result<Vec<u8>> {
     Ok(mac.finalize().into_bytes().to_vec())
 }
 
+pub(crate) fn validate_token_name(name: &str) -> Result<()> {
+    if name.starts_with(crate::private_metadata::PREFIX) {
+        return crate::private_metadata::validate_envelope(name, 512);
+    }
+    if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
+        return Err("invalid token name".into());
+    }
+    Ok(())
+}
+
 pub fn create_token(
     conn: &Connection,
     key: &[u8],
@@ -147,9 +157,7 @@ pub fn create_token(
     name: &str,
     days: i64,
 ) -> Result<IssuedToken> {
-    if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
-        return Err("invalid token name".into());
-    }
+    validate_token_name(name)?;
     if !(1..=365).contains(&days) {
         return Err("expires_days must be 1..=365".into());
     }
