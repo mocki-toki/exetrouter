@@ -18,6 +18,51 @@ use std::collections::HashSet;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 
+const WS_PING_INTERVAL: Duration = Duration::from_secs(15);
+const WS_PRE_RESPONSE_SILENCE: Duration = Duration::from_secs(90);
+const WS_UPSTREAM_IDLE: Duration = Duration::from_secs(30);
+const WS_UPSTREAM_MAX_AGE: Duration = Duration::from_secs(300);
+const WS_CLIENT_IDLE: Duration = Duration::from_secs(300);
+
+fn ws_retirement_deadline(connected: Instant, idle_since: Instant) -> Instant {
+    (connected + WS_UPSTREAM_MAX_AGE).min(idle_since + WS_UPSTREAM_IDLE)
+}
+
+// Pongs and control frames prove life, not acceptance or semantic progress.
+struct WsLiveness {
+    last_frame: Instant,
+    response_started: bool,
+    pings: u64,
+    pongs: u64,
+}
+
+impl WsLiveness {
+    fn new(now: Instant) -> Self {
+        Self {
+            last_frame: now,
+            response_started: false,
+            pings: 0,
+            pongs: 0,
+        }
+    }
+
+    fn deadline(&self) -> Instant {
+        self.last_frame
+            + if self.response_started {
+                crate::upstream::INFERENCE_IDLE_TIMEOUT
+            } else {
+                WS_PRE_RESPONSE_SILENCE
+            }
+    }
+
+    fn received(&mut self, now: Instant, pong: bool) {
+        self.last_frame = now;
+        if pong {
+            self.pongs = self.pongs.saturating_add(1);
+        }
+    }
+}
+
 // Never retain an error payload or a WebSocket close reason in diagnostics.
 #[derive(Debug)]
 struct WsInterruption {
@@ -1637,6 +1682,7 @@ struct WsBinding {
     pending_metadata: Option<String>,
     connection_id: RequestId,
     connected: Instant,
+    idle_since: Instant,
     finished: u64,
     responses: HashSet<String>,
 }
@@ -1654,6 +1700,7 @@ impl WsBinding {
             pending_metadata: None,
             connection_id: RequestId::new(),
             connected: Instant::now(),
+            idle_since: Instant::now(),
             finished: 0,
             responses: HashSet::new(),
         }
@@ -1700,9 +1747,17 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
     let mut upstream_thread: Option<String> = None;
     let mut upstream_identity_session: Option<String> = None;
     let stopped = state.stopped.clone();
+    let mut idle_deadline = Instant::now() + WS_CLIENT_IDLE;
+    let mut client_seen = Instant::now();
+    let mut keepalive = tokio::time::interval(WS_PING_INTERVAL);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    keepalive.tick().await;
     'frames: loop {
-        let idle_deadline = tokio::time::Instant::now() + Duration::from_secs(300);
         let message = loop {
+            let retirement = binding
+                .as_ref()
+                .filter(|bound| bound.socket.is_some() && window.is_some())
+                .map(|bound| ws_retirement_deadline(bound.connected, bound.idle_since));
             tokio::select! {
                 // Consume queued upstream closure before a simultaneously ready new request.
                 biased;
@@ -1710,9 +1765,32 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     client_log.reason = "service_stopping";
                     break 'frames;
                 },
-                _ = tokio::time::sleep_until(idle_deadline) => {
+                _ = tokio::time::sleep_until(idle_deadline.into()) => {
                     client_log.reason = "client_idle_timeout";
                     break 'frames;
+                },
+                _ = tokio::time::sleep_until((client_seen + WS_PRE_RESPONSE_SILENCE).into()) => {
+                    client_log.reason = "client_liveness_timeout";
+                    break 'frames;
+                },
+                _ = async {
+                    match retirement {
+                        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let bound = binding.as_mut().expect("retirement binding");
+                    let reason = if bound.connected.elapsed() >= WS_UPSTREAM_MAX_AGE {
+                        "connection_max_age"
+                    } else { "connection_idle_expired" };
+                    bound.idle_closed(&WsInterruption::new(reason));
+                    bound.close().await;
+                },
+                _ = keepalive.tick() => {
+                    if send_client_message(&mut client, Message::Ping(Bytes::new())).await.is_err() {
+                        client_log.reason = "client_ping_write_failed";
+                        break 'frames;
+                    }
                 },
                 incoming = async {
                     match binding.as_mut().and_then(|bound| bound.socket.as_mut()) {
@@ -1770,7 +1848,10 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     }
                 }
                 incoming = client.next() => match incoming {
-                    Some(Ok(message)) => break message,
+                    Some(Ok(message)) => {
+                        client_seen = Instant::now();
+                        break message;
+                    },
                     Some(Err(_)) => {
                         client_log.reason = "client_read_error";
                         break 'frames;
@@ -1809,6 +1890,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             }
         };
         client_log.frames = client_log.frames.saturating_add(1);
+        idle_deadline = Instant::now() + WS_CLIENT_IDLE;
         let frame_received = Instant::now();
         tracing::info!(event="client_websocket_frame_received",client_connection_id=%client_log.id.0,
             frame_sequence=client_log.frames,frame_bytes=text.len());
@@ -2391,6 +2473,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 pending_metadata,
                 connection_id,
                 connected,
+                idle_since,
                 finished,
                 responses: upstream_responses,
             } = binding.as_mut().expect("initialized binding");
@@ -2490,6 +2573,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         *pending_metadata = None;
                         *connection_id = RequestId::new();
                         *connected = Instant::now();
+                        *idle_since = Instant::now();
                         *finished = 0;
                         upstream_responses.clear();
                         tracing::info!(event="upstream_websocket_reconnected", connection_id=%connection_id.0);
@@ -2544,6 +2628,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             let mut safe_to_switch = true;
             let mut recovered = None;
             let mut recovery_output = Some(super::output::CompletionOutput::default());
+            let mut liveness = WsLiveness::new(Instant::now());
             let result: std::result::Result<(), WsInterruption> = async {
                 let mut handshake_metadata = None;
                 if let Some(headers) = metadata.take() {
@@ -2576,26 +2661,41 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 }
                 tracing::info!(event="upstream_websocket_request_sent",request_id=%log.id,
                     connection_id=%connection_id.0,duration_ms=write_started.elapsed().as_millis() as u64);
-                let mut upstream_deadline = tokio::time::Instant::now() + crate::upstream::INFERENCE_IDLE_TIMEOUT;
-                let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+                liveness.last_frame = Instant::now();
+                let mut heartbeat = tokio::time::interval(WS_PING_INTERVAL);
                 heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 heartbeat.tick().await;
                 loop {
                     let message = tokio::select! {
                         _ = heartbeat.tick() => {
+                            send_upstream(socket, UpstreamMessage::Ping(Bytes::new())).await
+                                .map_err(|failure| failure.at("upstream_ping_write"))?;
+                            liveness.pings = liveness.pings.saturating_add(1);
+                            send_client_message(&mut client, Message::Ping(Bytes::new())).await
+                                .map_err(|failure| failure.at("client_ping_write"))?;
                             send_client(&mut client, json!({"type":"ping"}).to_string()).await
                                 .map_err(|failure| failure.at("heartbeat_write"))?;
                             continue;
                         },
                         _ = wait_for_stop(stopped.clone()) => return Err(WsInterruption::new("service_stopping")),
-                        message = tokio::time::timeout_at(upstream_deadline, socket.next()) => match message {
+                        message = tokio::time::timeout_at(liveness.deadline().into(), socket.next()) => match message {
                             Ok(Some(Ok(message))) => {
-                                upstream_deadline = tokio::time::Instant::now() + crate::upstream::INFERENCE_IDLE_TIMEOUT;
+                                if matches!(message, UpstreamMessage::Pong(_)) && liveness.pongs == 0 {
+                                    tracing::info!(event="upstream_websocket_peer_alive",request_id=%log.id,
+                                        connection_id=%connection_id.0,pings=liveness.pings,
+                                        duration_ms=write_started.elapsed().as_millis() as u64);
+                                }
+                                liveness.received(Instant::now(), matches!(message, UpstreamMessage::Pong(_)));
                                 message
                             },
                             result => {
                                 let failure = match result {
-                                    Err(_) => WsInterruption::new("read_timeout"),
+                                    Err(_) => {
+                                        tracing::info!(event="upstream_websocket_silence_timeout",request_id=%log.id,
+                                            response_started=liveness.response_started,pings=liveness.pings,pongs=liveness.pongs,
+                                            last_frame_age_ms=liveness.last_frame.elapsed().as_millis() as u64);
+                                        WsInterruption::new(if liveness.response_started { "read_timeout" } else { "pre_response_silence_timeout" })
+                                    },
                                     Ok(None) => WsInterruption::new("upstream_eof"),
                                     Ok(Some(Err(error))) => WsInterruption::transport("upstream_read_error", &error),
                                     Ok(Some(Ok(_))) => unreachable!(),
@@ -2604,7 +2704,9 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                 return Err(failure);
                             }
                         },
-                        incoming = client.next() => match incoming {
+                        incoming = client.next() => {
+                            client_seen = Instant::now();
+                            match incoming {
                             Some(Ok(Message::Ping(bytes))) => {
                                 send_client_message(&mut client, Message::Pong(bytes)).await
                                     .map_err(|failure| failure.at("client_pong_write"))?;
@@ -2621,6 +2723,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                             Some(Err(_)) => return Err(WsInterruption::new("client_read_error")),
                             Some(Ok(Message::Text(_))) => return Err(WsInterruption::new("client_concurrent_request")),
                             Some(Ok(Message::Binary(_))) => return Err(WsInterruption::new("client_invalid_frame")),
+                            }
                         },
                     };
                     let text = match message {
@@ -2652,6 +2755,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     };
                     let pre_generation_quota = safe_to_switch && payload["conversation"].is_null() && !log.created && quota_refusal(&event);
                     safe_to_switch &= matches!(event["type"].as_str(), Some("ping" | "codex.rate_limits" | "codex.response.metadata" | "response.metadata" | "responsesapi.websocket_timing"));
+                    liveness.response_started |= !safe_to_switch;
                     let terminal = log.observe(&event).await
                         .map_err(|error| {
                             error.downcast::<WsInterruption>()
@@ -2700,7 +2804,9 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 tracing::info!(event="websocket_request_interrupted",request_id=%log.id,
                     client_connection_id=%client_log.id.0,frame_sequence=client_log.frames,
                     connection_id=%connection_id.0,connection_age_ms=connected.elapsed().as_millis() as u64,
-                    finished_requests=*finished,reason=failure.reason,stage=failure.stage);
+                    finished_requests=*finished,reason=failure.reason,stage=failure.stage,
+                    pings=liveness.pings,pongs=liveness.pongs,response_started=liveness.response_started,
+                    last_frame_age_ms=liveness.last_frame.elapsed().as_millis() as u64);
                 log.ws_interrupted(&failure);
                 let _ = log.finish("interrupted", Counters::default()).await;
                 let _ = send_client(
@@ -2795,6 +2901,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 break 'frames;
             }
             *finished = finished.saturating_add(1);
+            *idle_since = Instant::now();
             if let Some(response) = log.response_id.clone() {
                 if responses.len() >= 1024 {
                     break 'frames;
@@ -2806,6 +2913,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             break 'attempt;
         }
         drop(permit);
+        idle_deadline = Instant::now() + WS_CLIENT_IDLE;
     }
     if let Some(mut binding) = binding {
         binding.close().await;
@@ -2827,6 +2935,38 @@ async fn next_sse_chunk(receive: &mut mpsc::Receiver<Bytes>, interval: Duration)
 #[cfg(test)]
 mod heartbeat_tests {
     use super::*;
+
+    #[test]
+    fn websocket_liveness_distinguishes_silence_from_live_slow_generation() {
+        let start = Instant::now();
+        let mut live = WsLiveness::new(start);
+        assert_eq!(live.deadline(), start + Duration::from_secs(90));
+        live.received(start + Duration::from_secs(80), true);
+        assert!(!live.response_started);
+        assert_eq!(live.pongs, 1);
+        assert_eq!(live.deadline(), start + Duration::from_secs(170));
+        live.response_started = true;
+        assert_eq!(live.deadline(), start + Duration::from_secs(980));
+        live.pings += 1;
+        assert_eq!(live.deadline(), start + Duration::from_secs(980));
+    }
+
+    #[test]
+    fn upstream_retirement_uses_idle_time_and_never_renews_total_age() {
+        let start = Instant::now();
+        assert_eq!(
+            ws_retirement_deadline(start, start),
+            start + Duration::from_secs(30)
+        );
+        assert_eq!(
+            ws_retirement_deadline(start, start + Duration::from_secs(290)),
+            start + Duration::from_secs(300)
+        );
+        assert!(
+            ws_retirement_deadline(start, start + Duration::from_secs(400))
+                < start + Duration::from_secs(400)
+        );
+    }
 
     #[test]
     fn websocket_transport_diagnostics_discard_error_payloads() {

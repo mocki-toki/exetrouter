@@ -3878,7 +3878,8 @@ async fn websocket_reconnects_idle_closed_upstream_before_submitting_continuatio
         .send(Message::Text(body.to_string().into()))
         .await
         .unwrap();
-    assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+    let resumed = terminal(&mut socket).await;
+    assert_eq!(resumed["type"], "response.completed", "{resumed}");
     let requests = fixture.mock.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 2);
     assert!(requests[1].get("previous_response_id").is_none());
@@ -3906,6 +3907,96 @@ async fn websocket_reconnects_idle_closed_upstream_before_submitting_continuatio
         "context_recovery_unavailable"
     );
     assert_eq!(fixture.mock.requests.lock().unwrap().len(), 2);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_proactively_retires_idle_upstream_without_losing_client_context() {
+    let fixture = Fixture::start(false).await;
+    *fixture.mock.mode.lock().unwrap() = "turn_state".into();
+    let mut socket = fixture.ws().await;
+    let mut body = request();
+    body["type"] = json!("response.create");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    let first = terminal(&mut socket).await;
+    // Poll the client so its transport answers keepalive pings during the idle gap.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(32);
+    let mut client_pings = 0;
+    loop {
+        match tokio::time::timeout_at(deadline, socket.next()).await {
+            Err(_) => break,
+            Ok(Some(Ok(Message::Ping(bytes)))) => {
+                client_pings += 1;
+                socket.send(Message::Pong(bytes)).await.unwrap();
+            }
+            other => panic!("unexpected idle client event: {other:?}"),
+        }
+    }
+    assert!(client_pings >= 2);
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
+    body["previous_response_id"] = first["response"]["id"].clone();
+    body["client_metadata"] = json!({"x-codex-turn-state":"private-synthetic-ws-turn-state"});
+    body["input"] =
+        json!([{"role":"user","content":"synthetic continuation after idle retirement"}]);
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+    let requests = fixture.mock.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].get("previous_response_id").is_none());
+    assert!(requests[1]
+        .pointer("/client_metadata/x-codex-turn-state")
+        .is_none());
+    assert_eq!(requests[1]["input"][0], requests[0]["input"][0]);
+    assert_eq!(
+        fixture.mock.handshakes.lock().unwrap().as_slice(),
+        &["upstream-account", "upstream-account"]
+    );
+    let sessions = fixture.mock.sessions.lock().unwrap().clone();
+    assert_eq!(sessions[0].1, sessions[1].1);
+    assert!(fixture
+        .rows()
+        .await
+        .iter()
+        .all(|row| row["status"] == "completed"));
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn websocket_pings_live_slow_upstream_without_retiring_or_repeating_active_turn() {
+    let fixture = Fixture::start(false).await;
+    let mut socket = fixture.ws().await;
+    let mut body = request();
+    body["type"] = json!("response.create");
+    body["test_mode"] = json!("liveness_wait");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(35), async {
+        while fixture.mock.received_pings.load(Ordering::SeqCst) < 2 {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+                message = socket.next() => {
+                    if let Message::Ping(bytes) = message.unwrap().unwrap() {
+                        socket.send(Message::Pong(bytes)).await.unwrap();
+                    }
+                },
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
+    assert_eq!(fixture.mock.handshakes.lock().unwrap().len(), 1);
+    fixture.mock.release.notify_one();
+    assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
     fixture.stop().await;
 }
 

@@ -47,6 +47,7 @@ pub struct Mock {
     pub release: Notify,
     pub idle_pongs: AtomicUsize,
     pub idle_closes: AtomicUsize,
+    pub received_pings: AtomicUsize,
     next_response: AtomicUsize,
 }
 
@@ -505,6 +506,21 @@ async fn websocket(
                         state.next_response.fetch_add(1, Ordering::SeqCst) + 1
                     );
                     let mode = mode(&state, &body, &account);
+                    if mode == "liveness_wait" {
+                        loop {
+                            tokio::select! {
+                                _ = state.release.notified() => break,
+                                message = socket.next() => match message {
+                                    Some(Ok(Message::Ping(bytes))) => {
+                                        state.received_pings.fetch_add(1, Ordering::SeqCst);
+                                        if socket.send(Message::Pong(bytes)).await.is_err() { return; }
+                                    },
+                                    Some(Ok(Message::Pong(_))) => {},
+                                    _ => return,
+                                },
+                            }
+                        }
+                    }
                     let events = configured_events(&state, &body, &id, &mode, &account);
                     for (index, event) in events.into_iter().enumerate() {
                         if (mode == "wait" && index == 1)
