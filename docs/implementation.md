@@ -2,7 +2,7 @@
 
 The same Rust service powers standalone `exr` and shared `exrd`. This reference covers resource limits and accounting; see [architecture](architecture.md) for components, [server commands](server-cli.md) for setup and [development plan](development-plan.md) for remaining work.
 
-SQLite currently uses schema 8. Migrations are transactional; versions 7 and 8 have separate [account-preference](account-preferences-migration.md) and [weekly-activation](quota-activation-migration.md) rollback plans. Credentials and bearer keys are independent private files. Startup recovers unfinished requests as `aborted_unknown`.
+SQLite currently uses schema 9. Migrations are transactional; versions 7, 8 and 9 have separate [account-preference](account-preferences-migration.md), [weekly-activation](quota-activation-migration.md) and [account-routing](account-routing-migration.md) rollback plans. Credentials and bearer keys are independent private files. Startup recovers unfinished requests as `aborted_unknown`.
 
 ## Resource bounds
 
