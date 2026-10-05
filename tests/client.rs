@@ -344,17 +344,29 @@ fn real_terminal_dashboard_copies_secrets_without_rendering_and_restores_screen(
         }
         panic!("dashboard did not show expected text: {needle}");
     }
+    fn clear_history(output: &mut Vec<u8>) {
+        // Keep the current screen: the next ratatui frame only sends changed cells.
+        // Discarding all bytes would also discard unchanged characters in new dialogs.
+        let screen = terminal_text(output);
+        output.clear();
+        for (row, line) in screen.lines().enumerate() {
+            output.extend_from_slice(format!("\x1b[{};1H{line}", row + 1).as_bytes());
+        }
+    }
     wait(&mut master, &mut output, "Overview");
-    master.write_all(b"\x1b[C\x1b[C").unwrap();
+    assert!(String::from_utf8_lossy(&output).contains("\x1b[?1006h"));
+    // SGR mouse press/release on Tokens, using terminal's one-based coordinates.
+    master.write_all(b"\x1b[<0;31;3M\x1b[<0;31;3m").unwrap();
     wait(&mut master, &mut output, "Laptop");
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Create token");
-    master.write_all(b"\x1b[B\x1b[B\r").unwrap();
+    // Russian-layout physical n invokes the displayed Create token shortcut.
+    master.write_all("т".as_bytes()).unwrap();
     wait(&mut master, &mut output, "Token name");
     master.write_all(b"Test service\r").unwrap();
     wait(&mut master, &mut output, "Expires");
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Secret copied to clipboard");
     assert_eq!(
@@ -364,7 +376,7 @@ fn real_terminal_dashboard_copies_secrets_without_rendering_and_restores_screen(
     wait(&mut master, &mut output, "Laptop");
     assert!(!String::from_utf8_lossy(&output).contains("SYNTHETIC_TEST_SECRET"));
     // Cancellation must not send a mutation; confirmation sends it once.
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Rotate token");
     master.write_all(b"\r").unwrap();
@@ -374,18 +386,18 @@ fn real_terminal_dashboard_copies_secrets_without_rendering_and_restores_screen(
     assert!(!fs::read_to_string(client.dir.path().join("requests.log"))
         .unwrap()
         .contains("token_rotate"));
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Rotate token");
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Rotate");
-    output.clear();
+    clear_history(&mut output);
     fs::write(client.dir.path().join("clipboard-failure"), "").unwrap();
     master.write_all(b"y").unwrap();
     wait(&mut master, &mut output, "Clipboard unavailable");
     assert!(!String::from_utf8_lossy(&output).contains("SYNTHETIC_ROTATED_SECRET"));
     fs::remove_file(client.dir.path().join("clipboard-failure")).unwrap();
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"c").unwrap();
     wait(&mut master, &mut output, "Secret copied to clipboard");
     assert_eq!(
@@ -394,15 +406,15 @@ fn real_terminal_dashboard_copies_secrets_without_rendering_and_restores_screen(
     );
     assert!(!String::from_utf8_lossy(&output).contains("SYNTHETIC_ROTATED_SECRET"));
     wait(&mut master, &mut output, "Laptop");
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Revoke token");
     master.write_all(b"\x1b[B\r").unwrap();
     wait(&mut master, &mut output, "Revoke");
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"y").unwrap();
     wait(&mut master, &mut output, "revoked");
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"\x1b[D\x1b[D").unwrap();
     wait(&mut master, &mut output, "8h");
     wait(&mut master, &mut output, "week");
@@ -423,7 +435,7 @@ fn real_terminal_dashboard_copies_secrets_without_rendering_and_restores_screen(
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Review reset credit");
     master.write_all(b"\r").unwrap();
@@ -436,17 +448,18 @@ fn real_terminal_dashboard_copies_secrets_without_rendering_and_restores_screen(
     assert!(!fs::read_to_string(client.dir.path().join("requests.log"))
         .unwrap()
         .contains("reset_confirm"));
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Review reset credit");
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "recommend saving");
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"y").unwrap();
     wait(&mut master, &mut output, "Reset credit used");
-    output.clear();
+    clear_history(&mut output);
     master.write_all(b"q").unwrap();
     wait(&mut master, &mut output, "\x1b[?1049l");
+    assert!(String::from_utf8_lossy(&output).contains("\x1b[?1006l"));
     assert!(child.wait().unwrap().success());
     let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
     assert_eq!(requests.matches("token_create").count(), 1);
@@ -654,7 +667,10 @@ impl Dashboard {
         );
     }
     fn quit(&mut self) {
-        self.send(b"q");
+        self.quit_with(b"q");
+    }
+    fn quit_with(&mut self, keys: &[u8]) {
+        self.send(keys);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
         loop {
             self.read();
@@ -684,7 +700,7 @@ fn dashboard_enter_copies_the_selected_model_and_usage_requests_last_24_hours() 
     dashboard.wait("Overview");
     dashboard.send(b"\x1b[C\x1b[C\x1b[C");
     dashboard.wait("Other model");
-    dashboard.wait("Enter: copy model ID");
+    dashboard.wait("Copy ID Enter");
     dashboard.send(b"\x1b[B\r");
     dashboard.wait("Copied gpt-test to clipboard.");
     assert_eq!(
@@ -712,6 +728,25 @@ fn dashboard_enter_copies_the_selected_model_and_usage_requests_last_24_hours() 
 }
 
 #[test]
+fn dashboard_help_accepts_slash_and_russian_layout_punctuation() {
+    let client = Client::configured();
+    let mut dashboard = Dashboard::start(client.command());
+    dashboard.wait("Actions Enter");
+    for shortcut in [
+        b"/".as_slice(),
+        b"?".as_slice(),
+        b".".as_slice(),
+        b",".as_slice(),
+    ] {
+        dashboard.send(shortcut);
+        dashboard.wait("Keyboard help");
+        dashboard.send(b"\x1b");
+        dashboard.wait("Actions Enter");
+    }
+    dashboard.quit_with("й".as_bytes());
+}
+
+#[test]
 fn dashboard_reset_eligibility_error_requires_dismissal_and_never_confirms_a_credit() {
     let client = Client::configured();
     let ssh = client.dir.path().join("ssh");
@@ -728,9 +763,9 @@ fn dashboard_reset_eligibility_error_requires_dismissal_and_never_confirms_a_cre
     dashboard.wait("test@example.com");
     dashboard.send(b"c");
     dashboard.wait("Reset credit unavailable");
-    dashboard.wait("Enter / Esc: close");
+    dashboard.wait("Close Esc");
     dashboard.send(b"y\r\x1b[C\x1b[C\x1b[C");
-    dashboard.wait("Enter: copy model ID");
+    dashboard.wait("Copy ID Enter");
     let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
     assert_eq!(requests.matches("\"action\":\"reset_prepare\"").count(), 1);
     assert!(!requests.contains("\"action\":\"reset_confirm\""));
@@ -853,12 +888,9 @@ fn first_run_wizard_saves_standalone_and_settings_work_without_ssh() {
     dashboard.send(b"\r");
     dashboard.wait("Save these settings?");
     dashboard.send(b"y");
-    dashboard.wait("SOFTWARE");
+    dashboard.wait("[ Check updates ]");
     dashboard.send(b"\r");
-    dashboard.wait("Update exr");
-    dashboard.send(b"\r");
-    dashboard.wait("Update exr");
-    dashboard.send(b"n");
+    dashboard.wait("is up to date");
     dashboard.quit();
     let saved: serde_json::Value =
         serde_json::from_slice(&fs::read(client.dir.path().join("config.json")).unwrap()).unwrap();

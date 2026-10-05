@@ -35,7 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 zstd = { version = "0.13", default-features = false }
 
 crossterm = "0.29"
-ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 
 [dev-dependencies]
 tempfile = "3"

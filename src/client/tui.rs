@@ -1,7 +1,10 @@
 use super::{clipboard::Clipboard, config::Connection, render, ssh_request, Session};
 use crate::{ControlRequest, Result};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -37,9 +40,244 @@ const MODELS: usize = 3;
 const SETTINGS: usize = 4;
 const TABS: [&str; 5] = ["Overview", "Usage", "Tokens", "Models", "Settings"];
 const HEADER_HEIGHT: u16 = 3;
-const CONTROLS_HEIGHT: u16 = 3;
+
+// Terminals normally report characters, not physical keys. Keep text input untouched;
+// translate Russian ЙЦУКЕН characters only while interpreting command shortcuts.
+fn shortcut_key(mut key: KeyEvent) -> KeyEvent {
+    if let KeyCode::Char(ch) = key.code {
+        let russian = "йцукенгшщзхъфывапролджэячсмитьбюё";
+        let english = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
+        let lower = ch.to_lowercase().next().unwrap_or(ch);
+        if let Some(index) = russian.chars().position(|candidate| candidate == lower) {
+            let mapped = english
+                .chars()
+                .nth(index)
+                .expect("matching keyboard layouts");
+            key.code = KeyCode::Char(if ch.is_uppercase() {
+                mapped.to_ascii_uppercase()
+            } else {
+                mapped
+            });
+        } else if matches!(ch, '/' | '.' | ',') {
+            key.code = KeyCode::Char('?');
+        }
+    }
+    key
+}
+
+fn command_input(state: &State) -> bool {
+    !matches!(
+        state.modal,
+        Some(
+            Modal::Name(_)
+                | Modal::Days { .. }
+                | Modal::Personal { .. }
+                | Modal::Routing { locked: false, .. }
+        )
+    )
+}
+
+fn input_key(state: &State, key: KeyEvent) -> KeyEvent {
+    if command_input(state) || key.modifiers.contains(KeyModifiers::CONTROL) {
+        shortcut_key(key)
+    } else {
+        key
+    }
+}
+
+fn shortcut_label(key: KeyCode) -> String {
+    match key {
+        KeyCode::Enter => "Enter".into(),
+        KeyCode::Esc => "Esc".into(),
+        KeyCode::Char('?') => "? /".into(),
+        KeyCode::Char(ch) => ch.to_string(),
+        _ => format!("{key:?}"),
+    }
+}
+
+fn button_text(label: &str, key: KeyCode) -> String {
+    format!(" {label} {} ", shortcut_label(key))
+}
+
+fn dashboard_buttons(state: &State) -> Vec<(&'static str, KeyCode)> {
+    let mut entries = match state.tab {
+        USAGE => vec![
+            (USAGE_PERIODS[state.period].1, KeyCode::Char('p')),
+            (
+                ["Total", "By user", "By model", "By token"][state.group],
+                KeyCode::Char('b'),
+            ),
+            (
+                if state.request_metric {
+                    "Requests"
+                } else {
+                    "Tokens"
+                },
+                KeyCode::Char('m'),
+            ),
+        ],
+        MODELS => vec![("Copy ID", KeyCode::Enter)],
+        TOKENS => vec![
+            ("Actions", KeyCode::Enter),
+            ("Create token", KeyCode::Char('n')),
+        ],
+        SETTINGS => vec![],
+        _ => vec![("Actions", KeyCode::Enter)],
+    };
+    entries.extend([
+        ("Refresh", KeyCode::Char('r')),
+        ("Help", KeyCode::Char('?')),
+        ("Quit", KeyCode::Char('q')),
+    ]);
+    entries
+}
+
+fn button_rows(entries: &[(&str, KeyCode)], width: u16) -> u16 {
+    let mut rows = 1;
+    let mut used = 0;
+    for (label, key) in entries {
+        let size = Line::from(button_text(label, *key)).width() as u16;
+        if used > 0 && used + size > width {
+            rows += 1;
+            used = 0;
+        }
+        used += size + 1;
+    }
+    rows
+}
+
+fn controls_height(state: &State, busy: bool, width: u16) -> u16 {
+    status_lines(state, busy, width).len() as u16
+        + button_rows(&dashboard_buttons(state), width.saturating_sub(4))
+        + 1
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MouseAction {
+    Key(KeyCode),
+    Tab(usize),
+    Select(usize),
+    Menu(usize),
+    Field(usize),
+    Cursor,
+}
+#[derive(Clone, Copy, Debug)]
+struct Hit {
+    area: Rect,
+    action: MouseAction,
+}
+
+fn mouse_key(mouse: MouseEvent, hits: &[Hit], state: &mut State) -> Option<KeyEvent> {
+    if hits.is_empty() {
+        return None;
+    }
+    let key = match mouse.kind {
+        MouseEventKind::ScrollDown => KeyCode::Down,
+        MouseEventKind::ScrollUp => KeyCode::Up,
+        MouseEventKind::Down(MouseButton::Left) => {
+            let hit = hits
+                .iter()
+                .rev()
+                .find(|hit| hit.area.contains((mouse.column, mouse.row).into()))?;
+            match hit.action {
+                MouseAction::Key(key) => {
+                    if state.tab == SETTINGS && state.modal.is_none() {
+                        match key {
+                            KeyCode::Char('v' | 'U') => state.settings_selected = 0,
+                            KeyCode::Char('e') => state.settings_selected = 1,
+                            KeyCode::Char('a') => state.settings_selected = 2,
+                            KeyCode::Char('u') => state.settings_selected = 3,
+                            _ => {}
+                        }
+                    }
+                    key
+                }
+                MouseAction::Tab(tab) => KeyCode::Char(char::from(b'1' + tab as u8)),
+                MouseAction::Select(index) => {
+                    match state.tab {
+                        OVERVIEW => state.account_selected = index,
+                        MODELS => state.model_selected = index,
+                        USAGE => state.usage_selected = index,
+                        SETTINGS => {
+                            state.selected = index;
+                            state.settings_selected = 4 + index;
+                        }
+                        _ => state.selected = index,
+                    }
+                    if matches!(state.tab, OVERVIEW | SETTINGS | TOKENS | MODELS) {
+                        KeyCode::Enter
+                    } else {
+                        return None;
+                    }
+                }
+                MouseAction::Menu(index) => {
+                    if let Some(Modal::Actions { selected, .. }) = &mut state.modal {
+                        *selected = index;
+                    }
+                    KeyCode::Enter
+                }
+                MouseAction::Field(index) => {
+                    if let Some(Modal::Routing {
+                        selected, fields, ..
+                    }) = &mut state.modal
+                    {
+                        *selected = index;
+                        let labels = [
+                            "Priority (-255..255 / default)",
+                            "All windows (0..100 / off / default)",
+                            "Short window (0..100 / off / default)",
+                            "Weekly window (0..100 / off / default)",
+                        ];
+                        let start = hit.area.x + labels[index].len() as u16 + 4;
+                        fields[index].place_cursor(mouse.column.saturating_sub(start) as usize);
+                    }
+                    return None;
+                }
+                MouseAction::Cursor => {
+                    if let Some(Modal::Personal { input, .. }) = &mut state.modal {
+                        input.place_cursor(mouse.column.saturating_sub(hit.area.x) as usize);
+                    }
+                    return None;
+                }
+            }
+        }
+        _ => return None,
+    };
+    Some(KeyEvent::new(key, KeyModifiers::NONE))
+}
+
+fn buttons(frame: &mut Frame<'_>, area: Rect, entries: &[(&str, KeyCode)], hits: &mut Vec<Hit>) {
+    let mut x = area.x;
+    let mut y = area.y;
+    for (label, key) in entries {
+        let text = button_text(label, *key);
+        let width = Line::from(text.as_str()).width() as u16;
+        if x.saturating_add(width) > area.right() {
+            x = area.x;
+            y += 1;
+        }
+        if y >= area.bottom() || width > area.width {
+            break;
+        }
+        let rect = Rect::new(x, y, width, 1);
+        frame.render_widget(
+            Paragraph::new(text).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            rect,
+        );
+        hits.push(Hit {
+            area: rect,
+            action: MouseAction::Key(*key),
+        });
+        x += width + 1;
+    }
+}
 #[derive(Default)]
 struct State {
+    settings_selected: usize,
     tab: usize,
     values: [Option<Value>; 5],
     selected: usize,
@@ -50,7 +288,6 @@ struct State {
     group: usize,
     usage_selected: usize,
     request_metric: bool,
-    personal: [String; 2],
     statuses: [String; 5],
     notices: [Option<String>; 5],
     forecasts: super::quota_forecast::Forecasts,
@@ -148,7 +385,12 @@ struct Screen;
 impl Drop for Screen {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        let _ = execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
     }
 }
 struct Pending {
@@ -193,16 +435,7 @@ fn start(connection: &Connection, req: ControlRequest, tab: usize, mutation: boo
                 } else {
                     ssh_request(&session, ControlRequest::Doctor).await?
                 };
-                let personal = match (
-                    super::privacy::get(&session, super::privacy::Kind::Note, "personal").await,
-                    super::privacy::get(&session, super::privacy::Kind::Project, "personal").await,
-                ) {
-                    (Ok(note), Ok(project)) => {
-                        Some([note.unwrap_or_default(), project.unwrap_or_default()])
-                    }
-                    _ => None,
-                };
-                return Ok(serde_json::json!({"accounts": accounts, "personal": personal}));
+                return Ok(accounts);
             }
             ssh_request(&session, req).await
         }),
@@ -324,13 +557,13 @@ fn header(frame: &mut Frame<'_>, area: Rect, state: &State, connection: &Connect
         Tabs::new(TABS.iter().enumerate().map(|(index, title)| {
             if index == SETTINGS && state.update.as_ref().is_some_and(|r| r.available) {
                 Line::styled(
-                    " Settings ↑ ",
+                    " Settings ↑ 5 ",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                Line::from(format!(" {title} "))
+                Line::from(format!(" {title} {} ", index + 1))
             }
         }))
         .select(state.tab)
@@ -376,13 +609,12 @@ fn status_lines(state: &State, busy: bool, width: u16) -> Vec<String> {
     lines
 }
 fn overview_viewport(height: u16, width: u16, state: &State, busy: bool) -> u16 {
-    height.saturating_sub(
-        HEADER_HEIGHT + CONTROLS_HEIGHT + status_lines(state, busy, width).len() as u16,
-    )
+    height.saturating_sub(HEADER_HEIGHT + controls_height(state, busy, width) + 1)
 }
 fn selection_style() -> Style {
     Style::default()
-        .fg(Color::Green)
+        .fg(Color::White)
+        .bg(Color::DarkGray)
         .add_modifier(Modifier::BOLD)
 }
 fn section_style() -> Style {
@@ -420,6 +652,24 @@ fn token_lines(state: &State, width: u16) -> Vec<Line<'static>> {
         })
         .collect()
 }
+fn settings_actions(state: &State, connection: &Connection) -> Vec<(&'static str, KeyCode)> {
+    let mut actions = vec![
+        if state.update.as_ref().is_some_and(|report| report.available) {
+            ("Update", KeyCode::Char('U'))
+        } else {
+            ("Check updates", KeyCode::Char('v'))
+        },
+        ("Configure connection", KeyCode::Char('e')),
+    ];
+    if connection.local.is_some() {
+        actions.extend([
+            ("Add account", KeyCode::Char('a')),
+            ("Reauthorize account", KeyCode::Char('u')),
+        ]);
+    }
+    actions
+}
+
 fn settings_lines(connection: &Connection, state: &State, width: u16) -> Vec<Line<'static>> {
     let heading = |text: &str| section_heading(text, width);
     let field = |label: &str, value: String| {
@@ -428,7 +678,32 @@ fn settings_lines(connection: &Connection, state: &State, width: u16) -> Vec<Lin
             Span::styled(render::safe(&value), Style::default().fg(Color::White)),
         ])
     };
+    let actions = settings_actions(state, connection);
+    let button = |index: usize| {
+        Line::styled(
+            format!(
+                "{}[ {} ]",
+                if state.settings_selected == index {
+                    "▶ "
+                } else {
+                    "  "
+                },
+                actions[index].0
+            ),
+            if state.settings_selected == index {
+                selection_style()
+            } else {
+                Style::default().fg(Color::White)
+            },
+        )
+    };
     let mut lines = vec![
+        button(0),
+        Line::from(format!(
+            "  {}",
+            update_text(state).trim().trim_start_matches("Updates · ")
+        )),
+        Line::default(),
         Line::from(vec![Span::raw("  "), mode_badge(connection)]),
         Line::default(),
         heading("CONNECTION"),
@@ -440,8 +715,13 @@ fn settings_lines(connection: &Connection, state: &State, width: u16) -> Vec<Lin
             .map_or(connection.listen, |local| local.address);
         lines.push(field("API endpoint", format!("http://{address}/v1")));
         lines.push(field("Private state", connection.state_dir.clone()));
+        lines.push(button(1));
         lines.push(Line::default());
         lines.push(heading("LOCAL ACCOUNTS"));
+        if connection.local.is_some() {
+            lines.push(button(2));
+            lines.push(button(3));
+        }
         let accounts = state.values[SETTINGS].as_ref().and_then(Value::as_array);
         if accounts.is_none_or(Vec::is_empty) {
             lines.push(Line::styled(
@@ -450,7 +730,7 @@ fn settings_lines(connection: &Connection, state: &State, width: u16) -> Vec<Lin
             ));
         }
         for (i, account) in accounts.into_iter().flatten().enumerate() {
-            let selected = i == state.selected;
+            let selected = i == state.selected && state.settings_selected >= actions.len();
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(
@@ -484,44 +764,8 @@ fn settings_lines(connection: &Connection, state: &State, width: u16) -> Vec<Lin
         lines.push(field("Port", connection.port.to_string()));
         lines.push(field("SSH username", connection.ssh_user.clone()));
         lines.push(field("Private key", connection.identity.clone()));
+        lines.push(button(1));
     }
-    lines.push(Line::default());
-    lines.push(heading("PERSONAL DATA · ENCRYPTED"));
-    lines.push(field(
-        "Local key",
-        connection
-            .privacy_key
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "Unavailable".into()),
-    ));
-    lines.push(field(
-        "Notes",
-        if state.personal[0].is_empty() {
-            "None".into()
-        } else {
-            state.personal[0].clone()
-        },
-    ));
-    lines.push(field(
-        "Projects",
-        if state.personal[1].is_empty() {
-            "None".into()
-        } else {
-            state.personal[1].clone()
-        },
-    ));
-    lines.push(Line::default());
-    lines.push(heading("SOFTWARE"));
-    let updates = update_text(state);
-    lines.push(Line::styled(
-        format!("  {}", updates.trim().trim_start_matches("Updates · ")),
-        Style::default().fg(if state.update.as_ref().is_some_and(|r| r.available) {
-            Color::Yellow
-        } else {
-            Color::Green
-        }),
-    ));
     lines
 }
 fn model_rows(value: &Value) -> Vec<&Value> {
@@ -539,7 +783,7 @@ fn selected_model_id(state: &State) -> Option<&str> {
         .and_then(|row| row["id"].as_str())
         .filter(|id| !id.is_empty() && !id.chars().any(char::is_control))
 }
-fn action_menu(state: &State, connection: &Connection) -> (String, Vec<(String, KeyCode)>) {
+fn action_menu(state: &State, _connection: &Connection) -> (String, Vec<(String, KeyCode)>) {
     let entries = match state.tab {
         OVERVIEW => {
             let Some(row) = state.values[OVERVIEW]
@@ -597,24 +841,7 @@ fn action_menu(state: &State, connection: &Connection) -> (String, Vec<(String, 
             }
             entries
         }
-        _ => {
-            let mut entries = vec![
-                ("Update exr".into(), KeyCode::Char('U')),
-                ("Check updates".into(), KeyCode::Char('v')),
-                ("Configure connection".into(), KeyCode::Char('e')),
-            ];
-            if connection.local.is_some() {
-                entries.extend([
-                    ("Add account".into(), KeyCode::Char('a')),
-                    ("Reauthorize account".into(), KeyCode::Char('u')),
-                ]);
-            }
-            entries.extend([
-                ("Personal notes".into(), KeyCode::Char('N')),
-                ("Project names".into(), KeyCode::Char('P')),
-            ]);
-            entries
-        }
+        _ => vec![],
     };
     (
         if state.tab == TOKENS {
@@ -776,14 +1003,14 @@ fn keep_selected_account_visible(state: &mut State, viewport: u16, width: u16) {
         }
     }
 }
-fn models(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
+fn models(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) -> usize {
     let rows = model_rows(value);
     if rows.is_empty() {
         frame.render_widget(
             Paragraph::new("No models available. Press r to refresh.").block(content_panel()),
             area,
         );
-        return;
+        return 0;
     }
     let rows = rows.into_iter().enumerate().map(|(index, row)| {
         Row::new(vec![
@@ -816,8 +1043,20 @@ fn models(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
     .block(content_panel());
     let mut selection = TableState::default().with_selected(Some(state.model_selected));
     frame.render_stateful_widget(table, area, &mut selection);
+    selection.offset()
 }
+#[cfg(test)]
 fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: bool) {
+    render_hits(frame, state, connection, busy);
+}
+
+fn render_hits(
+    frame: &mut Frame<'_>,
+    state: &State,
+    connection: &Connection,
+    busy: bool,
+) -> Vec<Hit> {
+    let mut hits = Vec::new();
     if frame.area().width < 72 || frame.area().height < 20 {
         frame.render_widget(
             Paragraph::new(
@@ -826,16 +1065,28 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
             .wrap(Wrap { trim: false }),
             frame.area(),
         );
-        return;
+        return hits;
     }
     let notice_lines = status_lines(state, busy, frame.area().width);
     let chunks = Layout::vertical([
         Constraint::Length(HEADER_HEIGHT),
         Constraint::Min(3),
-        Constraint::Length(CONTROLS_HEIGHT + notice_lines.len().saturating_sub(1) as u16),
+        Constraint::Length(controls_height(state, busy, frame.area().width)),
     ])
     .split(frame.area());
     header(frame, chunks[0], state, connection);
+    let mut x = chunks[0].x + 1;
+    for (index, title) in TABS.iter().enumerate() {
+        let width = title.len() as u16
+            + 4
+            + u16::from(index == SETTINGS && state.update.as_ref().is_some_and(|r| r.available))
+                * 2;
+        hits.push(Hit {
+            area: Rect::new(x, chunks[0].y + 2, width, 1),
+            action: MouseAction::Tab(index),
+        });
+        x += width + 2;
+    }
     let content = chunks[1];
     match (state.tab, &state.values[state.tab]) {
         (SETTINGS, _) => frame.render_widget(
@@ -858,7 +1109,19 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
         ),
         (USAGE, Some(value)) => usage_chart(frame, content, state, value),
         (OVERVIEW, Some(value)) => overview(frame, content, state, value),
-        (MODELS, Some(value)) => models(frame, content, state, value),
+        (MODELS, Some(value)) => {
+            let offset = models(frame, content, state, value);
+            let inner = content_panel().inner(content);
+            for (row, index) in (offset..model_rows(value).len())
+                .take(inner.height.saturating_sub(1) as usize)
+                .enumerate()
+            {
+                hits.push(Hit {
+                    area: Rect::new(inner.x, inner.y + 1 + row as u16, inner.width, 1),
+                    action: MouseAction::Select(index),
+                });
+            }
+        }
         _ => frame.render_widget(
             Paragraph::new(styled_text(&body(state)))
                 .wrap(Wrap { trim: false })
@@ -876,80 +1139,176 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
             )
         })
         .collect();
-    footer.push(keys(&[
-        ("← / →", "view"),
-        ("r", "refresh"),
-        ("?", "help"),
-        ("q", "quit"),
-    ]));
+    let entries = dashboard_buttons(state);
+    let toolbar_rows = button_rows(&entries, chunks[2].width.saturating_sub(4));
+    for _ in 0..toolbar_rows {
+        footer.push(Line::default());
+    }
     footer.push(match state.tab {
-        TOKENS => keys(&[("↑ / ↓", "select"), ("Enter", "actions")]),
+        TOKENS => keys(&[("← / →", "view"), ("↑ / ↓", "select")]),
         OVERVIEW => keys(&[
+            ("← / →", "view"),
             ("↑ / ↓", "select"),
-            ("Enter", "account actions"),
-            ("L", "personal label"),
             ("PgUp / PgDn", "page"),
         ]),
-        USAGE if state.group != 0 => keys(&[
-            ("p", "period"),
-            ("b", "group"),
-            ("m", "requests / tokens"),
-            ("↑/↓", "select"),
-        ]),
-        USAGE => keys(&[("p", "period"), ("b", "group"), ("m", "requests / tokens")]),
+        USAGE if state.group != 0 => keys(&[("← / →", "view"), ("↑ / ↓", "select")]),
+        USAGE => keys(&[("← / →", "view")]),
         MODELS => keys(&[
+            ("← / →", "view"),
             ("↑ / ↓", "select"),
-            ("Enter", "copy model ID"),
             ("PgUp / PgDn", "page"),
         ]),
-        SETTINGS if connection.local.is_some() => keys(&[
-            ("↑ / ↓", "select"),
-            ("Enter", "actions"),
-            ("N", "notes"),
-            ("P", "projects"),
-        ]),
+        SETTINGS if connection.local.is_some() => keys(&[("← / →", "view"), ("↑ / ↓", "select")]),
         SETTINGS => keys(&[
-            ("Enter", "settings actions"),
-            ("N", "notes"),
-            ("P", "projects"),
+            ("← / →", "view"),
+            ("↑ / ↓", "select"),
+            ("Enter", "activate"),
         ]),
         _ => keys(&[("↑ / ↓", "scroll"), ("PgUp / PgDn", "page")]),
     });
 
-    if let Some(Modal::Routing { locked, .. }) = &state.modal {
-        footer = vec![keys(if *locked {
-            &[("Esc / Enter", "close")]
-        } else {
-            &[
-                ("Tab / ↑ / ↓", "field"),
-                ("Enter", "save"),
-                ("Esc", "cancel"),
-            ]
-        })];
+    if let Some(modal) = &state.modal {
+        footer = vec![match modal {
+            Modal::Actions { .. } => keys(&[("↑ / ↓", "select")]),
+            Modal::Routing { locked: false, .. } => keys(&[("Tab / ↑ / ↓", "field")]),
+            Modal::Personal { .. } => keys(&[("← / →", "cursor"), ("Ctrl-U", "clear")]),
+            _ => Line::default(),
+        }];
     }
     frame.render_widget(
         Paragraph::new(footer).block(Block::default().padding(Padding::horizontal(2))),
         chunks[2],
     );
+    let toolbar = Rect::new(
+        chunks[2].x + 2,
+        chunks[2].bottom() - 1 - toolbar_rows,
+        chunks[2].width.saturating_sub(4),
+        toolbar_rows,
+    );
+    if state.modal.is_none() {
+        buttons(frame, toolbar, &entries, &mut hits);
+    }
+    if state.tab == OVERVIEW {
+        if let Some(value) = &state.values[OVERVIEW] {
+            let inner = content_panel()
+                .padding(Padding::new(2, 2, 1, 0))
+                .inner(content);
+            for (index, (start, end)) in account_ranges(value, inner.width).into_iter().enumerate()
+            {
+                let top = (inner.y as i32 + start as i32 - state.scroll as i32).max(inner.y as i32);
+                let bottom =
+                    (inner.y as i32 + end as i32 - state.scroll as i32).min(inner.bottom() as i32);
+                if bottom > top {
+                    hits.push(Hit {
+                        area: Rect::new(inner.x, top as u16, inner.width, (bottom - top) as u16),
+                        action: MouseAction::Select(index),
+                    });
+                }
+            }
+        }
+    }
+    if state.tab == TOKENS {
+        let inner = content_panel().inner(content);
+        let first = state.selected / 8 * 8;
+        let count = state.values[TOKENS]
+            .as_ref()
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let mut y = inner.y as i32 - state.scroll as i32;
+        for line in token_lines(state, inner.width)
+            .into_iter()
+            .take(count.saturating_sub(first).min(8))
+            .enumerate()
+        {
+            let height = Paragraph::new(line.1)
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width) as i32;
+            let top = y.max(inner.y as i32);
+            let bottom = (y + height).min(inner.bottom() as i32);
+            if bottom > top {
+                hits.push(Hit {
+                    area: Rect::new(inner.x, top as u16, inner.width, (bottom - top) as u16),
+                    action: MouseAction::Select(first + line.0),
+                });
+            }
+            y += height;
+        }
+    }
+    if state.tab == SETTINGS {
+        let inner = content_panel().inner(content);
+        let count = state.values[SETTINGS]
+            .as_ref()
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let mut y = inner.y as i32 - state.scroll as i32;
+        for (index, line) in settings_lines(connection, state, inner.width)
+            .into_iter()
+            .enumerate()
+        {
+            let action =
+                settings_actions(state, connection)
+                    .into_iter()
+                    .find_map(|(label, key)| {
+                        line.to_string()
+                            .contains(&format!("[ {label} ]"))
+                            .then_some(key)
+                    });
+            let height = Paragraph::new(line)
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width) as i32;
+            let top = y.max(inner.y as i32);
+            let bottom = (y + height).min(inner.bottom() as i32);
+            if connection.mode == super::config::Mode::Standalone
+                && (11 + 2 * usize::from(connection.local.is_some())
+                    ..11 + 2 * usize::from(connection.local.is_some()) + count)
+                    .contains(&index)
+                && bottom > top
+            {
+                hits.push(Hit {
+                    area: Rect::new(inner.x, top as u16, inner.width, (bottom - top) as u16),
+                    action: MouseAction::Select(
+                        index - 11 - 2 * usize::from(connection.local.is_some()),
+                    ),
+                });
+            }
+            if let Some(key) = action {
+                if bottom > top {
+                    hits.push(Hit {
+                        area: Rect::new(inner.x, top as u16, inner.width, (bottom - top) as u16),
+                        action: MouseAction::Key(key),
+                    });
+                }
+            }
+            y += height;
+        }
+    }
     if let Some(modal) = &state.modal {
+        hits.clear();
         let (title,text) = match modal {
-            Modal::Actions { title, entries, selected } => (title.as_str(), format!("{}\n\n↑ / ↓: select   Enter: choose   Esc: close",entries.iter().enumerate().map(|(i,(name,_))|format!("{}{}",if i==*selected {"▶ "}else{"  "},name)).collect::<Vec<_>>().join("\n"))),
-            Modal::Error { title, message } => (*title, format!("{message}\n\nEnter / Esc: close")),
+            Modal::Actions { title, entries, selected } => (title.as_str(), entries.iter().enumerate().map(|(i,(name,key))|format!("{}{} {}",if i==*selected {"▶ "}else{"  "},name,shortcut_label(*key))).collect::<Vec<_>>().join("\n")),
+            Modal::Error { title, message } => (*title, message.clone()),
             Modal::Routing { fields, selected, error, summary, locked, .. } => {
                 let labels = ["Priority (-255..255 / default)", "All windows (0..100 / off / default)", "Short window (0..100 / off / default)", "Weekly window (0..100 / off / default)"];
                 let form = labels.iter().zip(fields).enumerate().map(|(i,(label,field))|format!("{}{}: {}",if i == *selected { "▶ " } else { "  " },label,field.value)).collect::<Vec<_>>().join("\n");
                 ("Switching rules", if *locked { format!("{summary}\n\nLocked by server operator") } else { format!("{form}\n\n{summary}\n\nDefault inherits operator settings. Thresholds are soft.\n{error}") })
             },
-            Modal::UpdateConfirm => ("Update exr", "Install the latest published release in the existing installation?\nThe installation method is preserved; config, accounts and tokens stay in place.\nSource builds may take several minutes. Restart exr after completion.\n\nEnter: update   Esc: cancel.".into()),
-            Modal::Name(text) => ("Create token",format!("Token name: {text}\n\nEnter: next   Esc: cancel")),
-            Modal::Personal {kind,input,..} => (match kind {super::privacy::Kind::Account=>"Account label",super::privacy::Kind::Note=>"Personal note",super::privacy::Kind::Project=>"Project names",super::privacy::Kind::Settings=>"Preferences"},format!("{}\n\nEnter: save   Esc: cancel",input.value)),
-            Modal::Days { name,text } => ("Create token",format!("Name: {name}\nExpires in days (1–365): {text}\n\nEnter: create   Esc: cancel")),
-            Modal::Confirm { id,rotate } => (if *rotate {"Rotate token"}else{"Revoke token"}, format!("Token: {id}\n{}\n\nPress y to confirm, Esc to cancel.",if *rotate {"The old secret will stop working. The new secret will be copied to the clipboard."}else{"This token will stop working immediately."})),
-            Modal::ClipboardRetry { .. } => ("Clipboard unavailable", "The token was issued, but copying failed.\nThe secret stays hidden. No token request will be repeated.\n\nc: retry copying   Esc: discard and rotate the token later".into()),
-            Modal::ResetConfirm(value) => ("Use reset credit?",format!("{}\n\ny: use one credit   Esc / n: cancel",render::reset_confirmation(value))),
+            Modal::UpdateConfirm => ("Update exr", "Install the latest published release in the existing installation?\nThe installation method is preserved; config, accounts and tokens stay in place.\nSource builds may take several minutes. Restart exr after completion.".into()),
+            Modal::Name(text) => ("Create token",format!("Token name: {text}")),
+            Modal::Personal {kind,input,..} => (match kind {super::privacy::Kind::Account=>"Account label",super::privacy::Kind::Settings=>"Preferences"},input.value.clone()),
+            Modal::Days { name,text } => ("Create token",format!("Name: {name}\nExpires in days (1–365): {text}")),
+            Modal::Confirm { id,rotate } => (if *rotate {"Rotate token"}else{"Revoke token"}, format!("Token: {id}\n{}",if *rotate {"The old secret will stop working. The new secret will be copied to the clipboard."}else{"This token will stop working immediately."})),
+            Modal::ClipboardRetry { .. } => ("Clipboard unavailable", "The token was issued, but copying failed.\nThe secret stays hidden. No token request will be repeated.\nDiscarding it requires rotating the token later.".into()),
+            Modal::ResetConfirm(value) => ("Use reset credit?",render::reset_confirmation(value)),
             Modal::Help => ("Keyboard help", keyboard_help(state, connection)),
         };
         let mut area = popup(frame.area());
+        let needed = Paragraph::new(styled_text(&text))
+            .wrap(Wrap { trim: false })
+            .line_count(area.width.saturating_sub(2))
+            .saturating_add(4)
+            .clamp(6, usize::from(area.height));
+        area.height = needed as u16;
+        area.y = frame.area().y + (frame.area().height - area.height) / 2;
         if matches!(modal, Modal::Routing { .. }) {
             area.height = area.height.min(chunks[2].y);
             area.y = area.y.min(chunks[2].y.saturating_sub(area.height));
@@ -975,6 +1334,92 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
                 ),
             area,
         );
+        match modal {
+            Modal::Actions { entries, .. } => {
+                let mut y = area.y + 1;
+                for (index, (label, key)) in entries.iter().enumerate() {
+                    let height = Paragraph::new(format!("  {label} {}", shortcut_label(*key)))
+                        .wrap(Wrap { trim: false })
+                        .line_count(area.width.saturating_sub(2))
+                        as u16;
+                    if y + height <= area.bottom().saturating_sub(2) {
+                        hits.push(Hit {
+                            area: Rect::new(area.x + 1, y, area.width - 2, height),
+                            action: MouseAction::Menu(index),
+                        });
+                    }
+                    y += height;
+                }
+            }
+            Modal::Routing {
+                locked: false,
+                fields,
+                ..
+            } => {
+                for index in 0..fields.len() {
+                    hits.push(Hit {
+                        area: Rect::new(area.x + 1, area.y + 1 + index as u16, area.width - 2, 1),
+                        action: MouseAction::Field(index),
+                    });
+                }
+            }
+            Modal::Personal { input, .. }
+                if Line::from(input.value.as_str()).width()
+                    <= area.width.saturating_sub(2) as usize =>
+            {
+                hits.push(Hit {
+                    area: Rect::new(area.x + 1, area.y + 1, area.width - 2, 1),
+                    action: MouseAction::Cursor,
+                });
+            }
+            _ => {}
+        }
+        let controls: &[(&str, KeyCode)] = match modal {
+            Modal::Confirm { rotate: true, .. } => &[
+                ("Rotate token", KeyCode::Char('y')),
+                ("Cancel", KeyCode::Esc),
+            ],
+            Modal::Confirm { rotate: false, .. } => &[
+                ("Revoke token", KeyCode::Char('y')),
+                ("Cancel", KeyCode::Esc),
+            ],
+            Modal::ResetConfirm(_) => {
+                &[("Use credit", KeyCode::Char('y')), ("Cancel", KeyCode::Esc)]
+            }
+            Modal::ClipboardRetry { .. } => &[
+                ("Retry copy", KeyCode::Char('c')),
+                ("Discard", KeyCode::Esc),
+            ],
+            Modal::Error { .. } | Modal::Help | Modal::Routing { locked: true, .. } => {
+                &[("Close", KeyCode::Esc)]
+            }
+            Modal::Actions { .. } => &[("Close", KeyCode::Esc)],
+            Modal::UpdateConfirm => &[("Update", KeyCode::Enter), ("Cancel", KeyCode::Esc)],
+            Modal::Personal { .. } | Modal::Routing { .. } => {
+                &[("Save", KeyCode::Enter), ("Cancel", KeyCode::Esc)]
+            }
+            Modal::Days { .. } => &[("Create token", KeyCode::Enter), ("Cancel", KeyCode::Esc)],
+            _ => &[("Continue", KeyCode::Enter), ("Cancel", KeyCode::Esc)],
+        };
+        buttons(
+            frame,
+            Rect::new(
+                area.x + 2,
+                area.bottom() - 2,
+                area.width.saturating_sub(4),
+                1,
+            ),
+            controls,
+            &mut hits,
+        );
+        if let Modal::Personal { input, .. } = modal {
+            if Line::from(input.value.as_str()).width() <= area.width.saturating_sub(2) as usize {
+                frame.set_cursor_position((
+                    area.x + 1 + Line::from(&input.value[..input.cursor]).width() as u16,
+                    area.y + 1,
+                ));
+            }
+        }
         if let Modal::Routing {
             fields,
             selected,
@@ -997,6 +1442,7 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
             ));
         }
     }
+    hits
 }
 
 fn panel(title: &str) -> Block<'static> {
@@ -1040,6 +1486,9 @@ fn keys(items: &[(&str, &str)]) -> Line<'static> {
 fn styled_text(text: &str) -> Vec<Line<'static>> {
     text.lines()
         .map(|line| {
+            if line.starts_with("▶ ") {
+                return Line::styled(line.to_owned(), selection_style());
+            }
             let color = if line.starts_with("Free reset is less than 3 days away.") {
                 Color::Rgb(245, 165, 75)
             } else if line.contains("reauth_required")
@@ -1524,10 +1973,10 @@ fn keyboard_help(state: &State, connection: &Connection) -> String {
         USAGE => "↑/↓: select user, model or token with recorded usage\np: change period\nb: change grouping\nm: switch tokens / requests",
         TOKENS => "↑/↓: select token\nEnter: token actions\nn: create; o: rotate; x: revoke\nRotation and revocation require confirmation.",
         MODELS => "↑/↓: select model\nPgUp/PgDn: page\nEnter: copy selected model ID",
-        SETTINGS if connection.local.is_some() => "↑/↓: select account\nEnter: settings actions (including update)\ne: configure connection; v: check updates\na: add account; u: reauthorize; d: disable",
-        _ => "Enter: settings actions (including update)\ne: configure connection\nv: check updates",
+        SETTINGS if connection.local.is_some() => "↑/↓: select settings actions or account\nEnter: activate selected action; reauthorize selected account\ne: configure connection; v: check updates; U: update\na: add account; u: reauthorize; d: disable",
+        _ => "↑/↓: select settings actions\nEnter: activate selected action\ne: configure connection; v: check updates; U: update",
     };
-    format!("{}\n\n←/→: switch views\nr: refresh this view\nq / Ctrl-C: quit\n\n{actions}\n\nEnter/Esc: close help", TABS[state.tab])
+    format!("{}\n\n←/→ or 1–5: switch views\nr: refresh this view\n? or /: help\nq / Ctrl-C: quit\n\nClick accounts to open actions. Wheel selects items.\nEN/RU shortcuts work without changing typed text.\nShift + drag usually selects terminal text.\n\n{actions}", TABS[state.tab])
 }
 
 fn popup(area: Rect) -> Rect {
@@ -1554,7 +2003,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
     }
     enable_raw_mode()?;
     let _screen = Screen;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let result = async {
     let mut state = State::default();
@@ -1563,15 +2012,6 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
         Ok(Some(settings)) => { state.tab=settings.tab; state.period=settings.period; state.group=settings.group; state.request_metric=settings.request_metric; },
         Ok(None) => {},
         Err(_) => {private_settings_available=false; state.statuses[SETTINGS]="Private settings unavailable; restore the original privacy key and check server compatibility.".into();},
-    }
-    if private_settings_available {
-        match (
-            super::privacy::get(&args, super::privacy::Kind::Note, "personal").await,
-            super::privacy::get(&args, super::privacy::Kind::Project, "personal").await,
-        ) {
-            (Ok(note), Ok(project)) => state.personal = [note.unwrap_or_default(), project.unwrap_or_default()],
-            _ => private_settings_available = false,
-        }
     }
     let mut next_limits_refresh = Instant::now() + LIMIT_REFRESH_INTERVAL;
     let mut pending = Some(start(&args.connection, request(&state), state.tab, false));
@@ -1645,17 +2085,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                         pending = Some(start(&args.connection,request,refresh_tab,false));
                     }
                 }
-                Ok(mut value) => {
-                    if job.tab == SETTINGS {
-                        if let Some(personal) = value.get("personal") {
-                            if personal.is_null() {
-                                state.notices[SETTINGS] = Some("Personal data could not be refreshed; displayed values may be stale.".into());
-                            } else {
-                                state.personal = serde_json::from_value(personal.clone())?;
-                            }
-                            value = value["accounts"].take();
-                        }
-                    }
+                Ok(value) => {
                     if job.tab == OVERVIEW {
                         state.forecasts.observe(&value, chrono::Utc::now().timestamp());
                     }
@@ -1719,17 +2149,24 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
             ));
             next_limits_refresh = Instant::now() + LIMIT_REFRESH_INTERVAL;
         }
-        terminal.draw(|frame| render(frame, &state, &args.connection, pending.as_ref().is_some_and(|job| job.tab == state.tab) || (state.tab == SETTINGS && updater.is_some())))?;
+        let mut hits = Vec::new();
+        terminal.draw(|frame| { hits = render_hits(frame, &state, &args.connection, pending.as_ref().is_some_and(|job| job.tab == state.tab) || (state.tab == SETTINGS && updater.is_some())); })?;
         if !event::poll(Duration::from_millis(50))? {
             tokio::task::yield_now().await;
             continue;
         }
-        let Event::Key(mut key) = event::read()? else {
-            continue;
+        let mut key = match event::read()? {
+            Event::Key(key) => key,
+            Event::Mouse(mouse) if !pending.as_ref().is_some_and(|p| p.mutation) && !updater.as_ref().is_some_and(|job| job.installing) => {
+                let Some(key) = mouse_key(mouse, &hits, &mut state) else { continue; };
+                key
+            }
+            _ => continue,
         };
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        key = input_key(&state, key);
         if updater.as_ref().is_some_and(|job| job.installing) { continue; }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if pending.as_ref().is_some_and(|p| p.mutation) {
@@ -1758,18 +2195,29 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     | KeyCode::PageUp
                     | KeyCode::PageDown
                     | KeyCode::Char('?')
+                    | KeyCode::Char('1'..='5')
             )
             && !(state.tab == SETTINGS && matches!(key.code, KeyCode::Enter | KeyCode::Char('e' | 'v')))
         {
             continue;
         }
         let mut menu_action=false;
+        if state.tab == SETTINGS && state.modal.is_none() && key.code == KeyCode::Enter {
+            let actions = settings_actions(&state, &args.connection);
+            if let Some((_, action)) = actions.get(state.settings_selected) {
+                key.code = *action;
+                menu_action = true;
+            } else {
+                key.code = KeyCode::Char('u');
+            }
+        }
         if let Some(Modal::Actions { entries, selected, .. }) = &mut state.modal {
             match key.code {
                 KeyCode::Up => { *selected=selected.saturating_sub(1);continue; }
                 KeyCode::Down => { *selected=(*selected+1).min(entries.len().saturating_sub(1));continue; }
                 KeyCode::Esc => { state.modal=None;continue; }
                 KeyCode::Enter => { key.code=entries[*selected].1;state.modal=None;menu_action=true; }
+                code if entries.iter().any(|(_, shortcut)| *shortcut == code) => { state.modal=None;menu_action=true; }
                 _ => continue,
             }
         }
@@ -1930,11 +2378,12 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                 KeyCode::Char('?') => state.modal = Some(Modal::Help),
                 KeyCode::Right => state.tab = (state.tab + 1) % TABS.len(),
                 KeyCode::Left => state.tab = (state.tab + TABS.len() - 1) % TABS.len(),
+                KeyCode::Char(c @ '1'..='5') => state.tab = (c as u8 - b'1') as usize,
                 KeyCode::Char('v') if state.tab == SETTINGS && updater.is_none() => {
                     updater = Some(update_job(false)); state.update_checked = true;
                     state.statuses[state.tab] = "Checking GitHub releases…".into();
                 }
-                KeyCode::Char('U') if menu_action && state.tab == SETTINGS && updater.is_none() => { state.modal = Some(Modal::UpdateConfirm); }
+                KeyCode::Char('U') if (menu_action || state.modal.is_none()) && state.tab == SETTINGS && updater.is_none() && state.update.as_ref().is_some_and(|report| report.available) => { state.modal = Some(Modal::UpdateConfirm); }
                 KeyCode::Char('e') if state.tab == SETTINGS => {
                     pending = None;
                     let mut changed = args.connection.clone();
@@ -2040,15 +2489,23 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                         .as_ref()
                         .and_then(Value::as_array)
                         .map_or(0, Vec::len);
-                    state.selected = (state.selected + 1).min(count.saturating_sub(1));
+                    let actions = settings_actions(&state, &args.connection).len();
+                    state.settings_selected = (state.settings_selected + 1).min((actions + count).saturating_sub(1));
+                    if state.settings_selected >= actions {
+                        state.selected = state.settings_selected - actions;
+                    }
                 }
                 KeyCode::Up if state.tab == SETTINGS => {
-                    state.selected = state.selected.saturating_sub(1)
+                    state.settings_selected = state.settings_selected.saturating_sub(1);
+                    let actions = settings_actions(&state, &args.connection).len();
+                    if state.settings_selected >= actions {
+                        state.selected = state.settings_selected - actions;
+                    }
                 }
                 KeyCode::Char('r') => {
                     pending = Some(start(&args.connection, request(&state), state.tab, false))
                 }
-                KeyCode::Enter if matches!(state.tab,OVERVIEW|TOKENS|SETTINGS) => {
+                KeyCode::Enter if matches!(state.tab,OVERVIEW|TOKENS) => {
                     let (title, entries)=action_menu(&state,&args.connection);
                     if entries.is_empty() { state.modal=Some(Modal::Error{title:"Account unavailable",message:format!("{title}\n\nThis account is deactivated and locked by the server operator.")}); } else { state.modal=Some(Modal::Actions{title,entries,selected:0}); }
                 }
@@ -2081,8 +2538,6 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                         }
                     }
                 }
-                KeyCode::Char('N') if state.tab == SETTINGS => state.modal=Some(Modal::Personal {kind:super::privacy::Kind::Note,id:"personal".into(),input:TextInput::new(state.personal[0].clone())}),
-                KeyCode::Char('P') if state.tab == SETTINGS => state.modal=Some(Modal::Personal {kind:super::privacy::Kind::Project,id:"personal".into(),input:TextInput::new(state.personal[1].clone())}),
                 KeyCode::Char('c') if state.tab == OVERVIEW => {
                     if let Some(req) = selected_reset_request(&state) {
                         pending = Some(start(&args.connection, req, OVERVIEW, false));
@@ -2273,6 +2728,7 @@ fn confirm_dialog(
             continue;
         }
         if let Event::Key(key) = event::read()? {
+            let key = shortcut_key(key);
             if key.kind != KeyEventKind::Press {
                 continue;
             }
@@ -2303,6 +2759,7 @@ pub(super) async fn setup(connection: &mut Connection, path: &std::path::Path) -
     super::config::save(path, connection)
 }
 fn setup_cancelled(key: KeyEvent) -> bool {
+    let key = shortcut_key(key);
     key.code == KeyCode::Esc
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
 }
@@ -2331,6 +2788,11 @@ impl TextInput {
         Self { value, cursor }
     }
     fn edit(&mut self, key: KeyEvent) {
+        let key = if key.modifiers.contains(KeyModifiers::CONTROL) {
+            shortcut_key(key)
+        } else {
+            key
+        };
         match key.code {
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = self.value.len(),
@@ -2376,6 +2838,16 @@ impl TextInput {
             }
             _ => {}
         }
+    }
+    fn place_cursor(&mut self, column: usize) {
+        self.cursor = self
+            .value
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(self.value.len()))
+            .take_while(|index| Line::from(&self.value[..*index]).width() <= column)
+            .last()
+            .unwrap_or(0);
     }
     fn visible(&self, width: usize) -> (&str, u16) {
         let mut start = 0;
@@ -2439,11 +2911,21 @@ async fn check_remote_connection(
     connection: &Connection,
 ) -> Result<()> {
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show)?;
+    execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    )?;
     println!("Checking SSH connection. Verify any new host fingerprint with your operator before accepting it. Ctrl-C cancels setup.");
     let result = super::remote_request(connection, ControlRequest::Doctor, true).await;
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, crossterm::cursor::Hide)?;
+    execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        crossterm::cursor::Hide
+    )?;
     reset_screen(terminal)?;
     result.map(|_| ())
 }
@@ -2620,53 +3102,341 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
 
-    #[tokio::test]
-    async fn settings_refresh_reads_confirmed_personal_data() {
-        let dir = tempfile::tempdir().unwrap();
-        let local = crate::local::Local::open(
-            &dir.path().join("state"),
-            "127.0.0.1:0".parse().unwrap(),
-            false,
-        )
-        .await
-        .unwrap();
-        let connection = Connection {
-            mode: super::super::config::Mode::Standalone,
-            privacy_key: Some(dir.path().join("privacy-key")),
-            local: Some(local.clone()),
+    #[test]
+    fn shortcuts_accept_russian_layout_and_both_help_keys_without_changing_text() {
+        let state = State::default();
+        for (typed, expected) in [
+            ('й', 'q'),
+            ('к', 'r'),
+            ('т', 'n'),
+            ('н', 'y'),
+            ('с', 'c'),
+            ('Ы', 'S'),
+            ('В', 'D'),
+            ('Д', 'L'),
+            ('Т', 'N'),
+            ('З', 'P'),
+            ('Г', 'U'),
+            ('/', '?'),
+            ('?', '?'),
+            ('.', '?'),
+            (',', '?'),
+        ] {
+            assert_eq!(
+                input_key(
+                    &state,
+                    KeyEvent::new(KeyCode::Char(typed), KeyModifiers::NONE)
+                )
+                .code,
+                KeyCode::Char(expected)
+            );
+        }
+        for modal in [
+            Modal::Name(String::new()),
+            Modal::Personal {
+                kind: super::super::privacy::Kind::Account,
+                id: "fixture".into(),
+                input: TextInput::new(String::new()),
+            },
+        ] {
+            let state = State {
+                modal: Some(modal),
+                ..Default::default()
+            };
+            for typed in ['н', 'т', '/', '.', ','] {
+                let key = KeyEvent::new(KeyCode::Char(typed), KeyModifiers::NONE);
+                assert_eq!(input_key(&state, key), key);
+            }
+            assert_eq!(
+                input_key(
+                    &state,
+                    KeyEvent::new(KeyCode::Char('с'), KeyModifiers::CONTROL)
+                )
+                .code,
+                KeyCode::Char('c')
+            );
+        }
+    }
+
+    #[test]
+    fn every_dashboard_button_shows_its_shortcut_and_wraps_without_duplicate_hints() {
+        for tab in 0..TABS.len() {
+            for width in [72, 120] {
+                let state = State {
+                    tab,
+                    period: 1,
+                    group: 3,
+                    ..Default::default()
+                };
+                let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+                let mut hits = Vec::new();
+                terminal
+                    .draw(|frame| {
+                        hits = render_hits(frame, &state, &Connection::default(), false);
+                    })
+                    .unwrap();
+                let text = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                for (label, key) in dashboard_buttons(&state) {
+                    assert!(
+                        text.contains(button_text(label, key).trim()),
+                        "missing {label} {} on tab {tab} width {width}",
+                        shortcut_label(key)
+                    );
+                    assert!(hits.iter().any(|hit| hit.action == MouseAction::Key(key)));
+                }
+                for duplicate in [
+                    "Enter: actions",
+                    "Enter: account actions",
+                    "L: personal label",
+                    "Enter: copy model ID",
+                    "p: period",
+                    "b: group",
+                    "m: requests / tokens",
+                ] {
+                    assert!(!text.contains(duplicate), "duplicate {duplicate}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn settings_actions_are_inline() {
+        let connection = Connection::default();
+        let mut state = State {
+            tab: SETTINGS,
             ..Default::default()
         };
-        let sealed = super::super::privacy::seal(
-            &connection,
-            super::super::privacy::Kind::Note,
-            "personal",
-            "Confirmed note",
-        )
-        .unwrap();
-        let mut write = start(&connection, sealed, SETTINGS, true);
-        assert_eq!((&mut write.task).await.unwrap().unwrap()["updated"], true);
-        let mut refresh = start(&connection, ControlRequest::Doctor, SETTINGS, false);
-        assert_eq!(
-            (&mut refresh.task).await.unwrap().unwrap()["personal"][0],
-            "Confirmed note"
-        );
-        let mut failed = start(
-            &connection,
-            ControlRequest::PrivatePut {
-                id: "invalid".into(),
-                ciphertext: None,
-            },
-            SETTINGS,
-            true,
-        );
-        assert!((&mut failed.task).await.unwrap().is_err());
-        let mut refresh = start(&connection, ControlRequest::Doctor, SETTINGS, false);
-        assert_eq!(
-            (&mut refresh.task).await.unwrap().unwrap()["personal"][0],
-            "Confirmed note"
-        );
-        local.stop().await.unwrap();
+        let lines = settings_lines(&connection, &state, 80);
+        assert!(lines[0].to_string().contains("[ Check updates ]"));
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("[ Configure connection ]"));
+        assert!(action_menu(&state, &connection).1.is_empty());
+        let hits = dashboard_hits(&state, 100, 30);
+        for key in ['v', 'e'] {
+            let hit = hits
+                .iter()
+                .find(|hit| hit.action == MouseAction::Key(KeyCode::Char(key)))
+                .unwrap();
+            assert_eq!(
+                mouse_key(click(hit), &hits, &mut state).unwrap().code,
+                KeyCode::Char(key)
+            );
+        }
+        assert_eq!(state.settings_selected, 1);
     }
+
+    #[test]
+    fn mouse_account_and_token_clicks_select_and_activate() {
+        let hits = [Hit {
+            area: Rect::new(5, 5, 10, 1),
+            action: MouseAction::Select(2),
+        }];
+        for tab in [OVERVIEW, SETTINGS] {
+            let mut state = State {
+                tab,
+                ..Default::default()
+            };
+            assert_eq!(
+                mouse_key(click(&hits[0]), &hits, &mut state).unwrap().code,
+                KeyCode::Enter
+            );
+            assert_eq!(
+                if tab == OVERVIEW {
+                    state.account_selected
+                } else {
+                    state.selected
+                },
+                2
+            );
+        }
+        let mut state = State {
+            tab: TOKENS,
+            ..Default::default()
+        };
+        assert_eq!(
+            mouse_key(click(&hits[0]), &hits, &mut state).unwrap().code,
+            KeyCode::Enter
+        );
+        assert_eq!(state.selected, 2);
+    }
+
+    fn click(hit: &Hit) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.area.x,
+            row: hit.area.y,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_token_rows_follow_wrapping_pagination_and_scroll() {
+        let mut state = State {
+            tab: TOKENS,
+            selected: 8,
+            scroll: 1,
+            ..Default::default()
+        };
+        state.values[TOKENS] = Some(serde_json::json!((0..12).map(|index| serde_json::json!({"id": format!("tok-{index}"), "name": "Long token name ".repeat(8)})).collect::<Vec<_>>()));
+        let hits = dashboard_hits(&state, 72, 20);
+        for index in 8..12 {
+            let hit = hits
+                .iter()
+                .find(|hit| hit.action == MouseAction::Select(index))
+                .unwrap();
+            assert_eq!(
+                mouse_key(click(hit), &hits, &mut state).unwrap().code,
+                KeyCode::Enter
+            );
+            assert_eq!(state.selected, index);
+        }
+        assert!(!hits.iter().any(|hit| hit.action == MouseAction::Select(0)));
+    }
+
+    #[test]
+    fn mouse_cursor_placement_respects_unicode_width_and_byte_boundaries() {
+        let mut input = TextInput::new("a界é".into());
+        input.place_cursor(2);
+        assert_eq!(input.cursor, 1);
+        input.place_cursor(3);
+        assert_eq!(input.cursor, 4);
+        input.place_cursor(100);
+        assert_eq!(input.cursor, input.value.len());
+    }
+
+    fn dashboard_hits(state: &State, width: u16, height: u16) -> Vec<Hit> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut hits = Vec::new();
+        terminal
+            .draw(|frame| {
+                hits = render_hits(frame, state, &Connection::default(), false);
+            })
+            .unwrap();
+        hits
+    }
+
+    #[test]
+    fn mouse_tabs_buttons_and_model_rows_follow_rendered_geometry() {
+        for (width, height) in [(72, 20), (120, 35)] {
+            let mut state = State {
+                tab: MODELS,
+                model_selected: 25,
+                ..Default::default()
+            };
+            state.values[MODELS] = Some(
+                serde_json::json!({"data": (0..30).map(|i| serde_json::json!({"id": format!("model-{i:02}")})).collect::<Vec<_>>() }),
+            );
+            let hits = dashboard_hits(&state, width, height);
+            let tab = hits
+                .iter()
+                .find(|hit| hit.action == MouseAction::Tab(SETTINGS))
+                .unwrap();
+            assert_eq!(
+                mouse_key(click(tab), &hits, &mut state).unwrap().code,
+                KeyCode::Char('5')
+            );
+            let row = hits
+                .iter()
+                .find(|hit| hit.action == MouseAction::Select(25))
+                .unwrap();
+            state.model_selected = 0;
+            assert_eq!(
+                mouse_key(click(row), &hits, &mut state).unwrap().code,
+                KeyCode::Enter
+            );
+            assert_eq!(state.model_selected, 25);
+            let copy = hits
+                .iter()
+                .find(|hit| hit.action == MouseAction::Key(KeyCode::Enter))
+                .unwrap();
+            assert_eq!(
+                mouse_key(click(copy), &hits, &mut state).unwrap().code,
+                KeyCode::Enter
+            );
+        }
+    }
+
+    #[test]
+    fn mouse_dialogs_block_background_and_require_separate_confirmation() {
+        let mut state = State {
+            tab: TOKENS,
+            modal: Some(Modal::Confirm {
+                id: "fixture".into(),
+                rotate: false,
+            }),
+            ..Default::default()
+        };
+        let hits = dashboard_hits(&state, 72, 20);
+        assert!(!hits
+            .iter()
+            .any(|hit| matches!(hit.action, MouseAction::Tab(_) | MouseAction::Select(_))));
+        let confirm = hits
+            .iter()
+            .find(|hit| hit.action == MouseAction::Key(KeyCode::Char('y')))
+            .unwrap();
+        assert_eq!(
+            mouse_key(click(confirm), &hits, &mut state).unwrap().code,
+            KeyCode::Char('y')
+        );
+        let outside = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(mouse_key(outside, &hits, &mut state).is_none());
+        assert!(state.modal.is_some());
+        assert!(dashboard_hits(&state, 50, 10).is_empty());
+    }
+
+    #[test]
+    fn mouse_menu_activates_only_clicked_entry_and_wheel_uses_keyboard_navigation() {
+        let mut state = State {
+            modal: Some(Modal::Actions {
+                title: "Actions".into(),
+                entries: vec![
+                    ("First".into(), KeyCode::Char('a')),
+                    ("Second".into(), KeyCode::Char('b')),
+                ],
+                selected: 0,
+            }),
+            ..Default::default()
+        };
+        let hits = dashboard_hits(&state, 72, 20);
+        let second = hits
+            .iter()
+            .find(|hit| hit.action == MouseAction::Menu(1))
+            .unwrap();
+        assert_eq!(
+            mouse_key(click(second), &hits, &mut state).unwrap().code,
+            KeyCode::Enter
+        );
+        assert!(matches!(
+            state.modal,
+            Some(Modal::Actions { selected: 1, .. })
+        ));
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            mouse_key(wheel, &hits, &mut state).unwrap().code,
+            KeyCode::Down
+        );
+    }
+
     #[test]
     fn routing_dialog_shows_all_fields_error_controls_and_cursor_on_minimum_terminal() {
         let mut terminal = Terminal::new(TestBackend::new(72, 20)).unwrap();
@@ -2703,8 +3473,8 @@ mod tests {
             "Weekly window",
             "between 0 and 100",
             "Tab / ↑ / ↓",
-            "Enter: save",
-            "Esc: cancel",
+            "Save Enter",
+            "Cancel Esc",
         ] {
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
@@ -3039,7 +3809,8 @@ mod tests {
         select_item(&mut state, false, 10, 66);
         assert_eq!(state.scroll, 0);
         select_item(&mut state, true, 10, 66);
-        assert!(text.contains("Enter: account actions"));
+        assert!(text.contains("Actions Enter"));
+        assert!(!text.contains("Enter: account actions"));
         assert!(!text.contains("Subscription limits"));
         let mut refreshed = state.values[OVERVIEW].clone().unwrap();
         refreshed["quota_accounts"]
@@ -3084,7 +3855,7 @@ mod tests {
             .map(|c| c.symbol())
             .collect::<String>();
         assert!(text.contains("▶ model-09"));
-        assert!(text.contains("Enter: copy model ID"));
+        assert!(text.contains("Copy ID Enter"));
         let mut refreshed = state.values[MODELS].clone().unwrap();
         refreshed["data"].as_array_mut().unwrap().reverse();
         preserve_selection(&mut state, MODELS, &refreshed);
@@ -3134,7 +3905,9 @@ mod tests {
                 .collect::<String>();
             assert!(first_row.starts_with(&format!("  ExetRouter {}", env!("CARGO_PKG_VERSION"))));
             assert!(first_row.ends_with("  "));
-            assert!(second_row.contains("Overview    Usage    Tokens    Models    Settings"));
+            assert!(
+                second_row.contains("Overview 1    Usage 2    Tokens 3    Models 4    Settings 5")
+            );
             assert!(!second_row.contains('│'));
             for x in 1..11 {
                 assert_eq!(buffer[(x, 2)].bg, Color::Cyan);
@@ -3196,8 +3969,8 @@ mod tests {
             .map(|c| c.symbol())
             .collect::<String>();
         assert!(text.contains("less than 3 days"));
-        assert!(text.contains("y: use one credit"));
-        assert!(text.contains("Esc / n: cancel"));
+        assert!(text.contains("Use credit y"));
+        assert!(text.contains("Cancel Esc"));
     }
     #[test]
     fn quota_backgrounds_follow_percentages_with_contrasting_text() {
@@ -3250,7 +4023,7 @@ mod tests {
         assert!(text.contains("week"));
         assert!(text.contains("8h"));
         assert!(!TABS.contains(&"Limits"));
-        assert!(text.contains("← / →: view"));
+        assert!(text.contains("Refresh"));
     }
     #[test]
     fn long_status_wraps_without_hiding_controls() {
@@ -3273,8 +4046,9 @@ mod tests {
             .collect();
         assert!(rows[16].contains("connection was interrupted"));
         assert!(rows[17].contains("refresh this view."));
-        assert!(rows[18].contains("q: quit"));
-        assert!(rows[19].contains("Enter: actions"));
+        assert!(rows[18].contains("Quit"));
+        assert!(rows[18].contains("Actions Enter"));
+        assert!(!rows[19].contains("Enter: actions"));
         assert_eq!(overview_viewport(20, 72, &state, false), 12);
     }
     #[test]
@@ -3299,8 +4073,8 @@ mod tests {
                     .map(|c| c.symbol())
                     .collect::<String>()
             };
-            assert!(row_text(height as usize - 3, height as usize).contains("Enter: actions"));
-            assert!(!row_text(0, height as usize - 3).contains("Enter: actions"));
+            assert!(row_text(height as usize - 3, height as usize).contains("Actions Enter"));
+            assert!(!row_text(0, height as usize - 3).contains("Actions Enter"));
             state.tab = USAGE;
             let now = chrono::Utc::now().timestamp();
             state.values[USAGE] = Some(
@@ -3316,8 +4090,8 @@ mod tests {
                 .map(|c| c.symbol())
                 .collect::<String>();
             assert!(text.contains("Reported tokens · Today"));
-            assert!(text.contains("p: period"));
-            assert!(text.contains("m: requests / tokens"));
+            assert!(text.contains("Today p"));
+            assert!(text.contains("Tokens m"));
             assert!(buffer
                 .content
                 .iter()
@@ -3363,7 +4137,7 @@ mod tests {
         assert!(text.contains("Overview"));
         assert!(text.contains("Tokens"));
         assert!(!text.contains("│ Limits"));
-        assert!(text.contains("← / →: view"));
-        assert!(text.contains("q: quit"));
+        assert!(text.contains("Refresh"));
+        assert!(text.contains("Quit"));
     }
 }
