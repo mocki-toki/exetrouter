@@ -8,7 +8,6 @@ const { default: OpenAI } = await import(moduleURL.href);
 const client = new OpenAI({
   apiKey: process.env.EXETROUTER_TOKEN,
   baseURL: process.env.EXETROUTER_TEST_URL + '/v1',
-  maxRetries: 0,
   timeout: 10000,
 });
 const messages = [{ role: 'user', content: 'synthetic SDK fixture' }];

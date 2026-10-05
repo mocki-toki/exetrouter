@@ -81,7 +81,6 @@ impl Run<'_> {
         );
         let catalog: Value = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
             .timeout(Duration::from_secs(20))
             .build()?
             .get(catalog_url)
@@ -122,7 +121,7 @@ impl Run<'_> {
                 // Codex currently gates remote V2 by provider display name.
                 // Keep the custom provider ID and router bearer/base URL.
                 let name = "OpenAI";
-                fs::write(config.join("config.toml"), format!("model = {}\nmodel_provider = \"exetrouter\"\nmodel_catalog_json = {}\napproval_policy = \"never\"\n{compaction}[model_providers.exetrouter]\nname = {}\nbase_url = {}\nenv_key = \"EXETROUTER_TOKEN\"\nwire_api = \"responses\"\nsupports_websockets = {}\nrequest_max_retries = 0\nstream_max_retries = 0\n",json!(self.model),json!(catalog_path),json!(name), json!(format!("{}/v1",self.url)),self.websocket))?;
+                fs::write(config.join("config.toml"), format!("model = {}\nmodel_provider = \"exetrouter\"\nmodel_catalog_json = {}\napproval_policy = \"never\"\n{compaction}[model_providers.exetrouter]\nname = {}\nbase_url = {}\nenv_key = \"EXETROUTER_TOKEN\"\nwire_api = \"responses\"\nsupports_websockets = {}\n",json!(self.model),json!(catalog_path),json!(name), json!(format!("{}/v1",self.url)),self.websocket))?;
                 command.env("CODEX_HOME", &config).args([
                     "exec",
                     "--ignore-rules",

@@ -577,65 +577,6 @@ async fn backend_options_are_forwarded_over_http_and_websocket() {
 }
 
 #[tokio::test]
-#[ignore = "requires the reviewed isolated Codex/OpenCode runtimes; no real upstream"]
-async fn codex_does_not_replay_submitted_ws_interruptions() {
-    for client in ["codex"] {
-        let binary = std::env::var(if client == "codex" {
-            "EXETROUTER_CODEX_BIN"
-        } else {
-            "EXETROUTER_OPENCODE_BIN"
-        })
-        .unwrap();
-        native::version(&binary, &native::reviewed_version(client))
-            .await
-            .unwrap();
-        for mode in ["early_close", "disconnect", "missing_terminal"] {
-            let fixture = Fixture::start(false).await;
-            *fixture.mock.mode.lock().unwrap() = mode.into();
-            fixture.mock.tools.store(true, Ordering::SeqCst);
-            let probe = probe::Probe::bounded(&fixture.url, 12).await.unwrap();
-            let output = native::Run {
-                binary: &binary,
-                client,
-                url: &probe.url,
-                model: "gpt-test",
-                bearer: &fixture.secret,
-                websocket: true,
-                directory: fixture.dir.path(),
-                prompt: "Run the local compatibility fixture and report the result.",
-            }
-            .execute()
-            .await
-            .unwrap();
-            if mode != "missing_terminal" {
-                assert!(!native::tool_result(&output.stdout));
-            }
-            // Native clients may execute a completed tool item before the response
-            // terminal arrives. Assert no duplicate generation, not no local work.
-            let calls = fixture.mock.requests.lock().unwrap().clone();
-            let primary = calls
-                .iter()
-                .filter(|call| {
-                    call["generate"] != false
-                        && call
-                            .get("tools")
-                            .and_then(Value::as_array)
-                            .is_some_and(|tools| !tools.is_empty())
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(primary.len(), 1, "{client} {mode}: expected exactly one submission; requests={}, diagnostic={}, stderr={}", calls.len(), native::diagnostic(&output.stdout), String::from_utf8_lossy(&output.stderr));
-            assert_eq!(primary[0]["type"], "response.create");
-            let rows = fixture.rows().await;
-            assert!(rows
-                .iter()
-                .any(|row| row["status"] == "interrupted" && row["input"].is_null()));
-            println!("{client} {mode}: one submitted generation, no HTTP replay");
-            fixture.stop().await;
-        }
-    }
-}
-
-#[tokio::test]
 #[ignore = "requires the reviewed isolated Codex runtime; no real upstream"]
 async fn codex_completes_ws_tool_cycles_with_idle_ping_and_idle_reconnection() {
     let binary = std::env::var("EXETROUTER_CODEX_BIN").unwrap();
@@ -3646,7 +3587,7 @@ async fn pool_cooldown_only_filters_matching_models_and_returns_the_earliest_res
 }
 
 #[tokio::test]
-async fn pool_429_never_replays_inference_and_a_separate_new_request_uses_a_healthy_account() {
+async fn pool_quota_cooldown_routes_a_separate_request_to_a_healthy_account() {
     let fixture = Fixture::start(false).await;
     fixture.first_profile(&["gpt-test"], "rate_limit");
     fixture.add_account(&["gpt-test"], false).await;
@@ -4352,36 +4293,6 @@ async fn current_clients_complete_tool_cycles_over_http_and_websocket() {
         );
         fixture.stop().await;
     }
-    for (client, binary) in [("codex", &codex)] {
-        let fixture = Fixture::start(false).await;
-        fixture.add_account(&["gpt-test"], false).await;
-        *fixture.mock.mode.lock().unwrap() = "upstream_503".into();
-        for account in fixture.mock.accounts.lock().unwrap().values_mut() {
-            account.mode = "upstream_503".into();
-        }
-        let probe = probe::Probe::bounded(&fixture.url, 12).await.unwrap();
-        let output = native::Run {
-            binary,
-            client,
-            url: &probe.url,
-            model: "gpt-test",
-            bearer: &fixture.secret,
-            websocket: false,
-            directory: fixture.dir.path(),
-            prompt: "Run the local compatibility fixture and report the result.",
-        }
-        .execute()
-        .await
-        .unwrap();
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("EXETROUTER_SMOKE_OK"));
-        assert_eq!(
-            probe.observed.lock().unwrap().metadata()["primary_requests"],
-            1,
-            "{client} repeated a primary request after 503"
-        );
-        println!("{client}: HTTP 503 caused one primary request and no client replay");
-        fixture.stop().await;
-    }
 }
 
 #[tokio::test]
@@ -5026,7 +4937,7 @@ async fn encrypted_function_arguments_preserve_tool_owner_and_reject_foreign_rep
 }
 
 #[tokio::test]
-async fn quota_only_refusals_fail_over_but_accepted_or_ambiguous_requests_never_replay() {
+async fn quota_refusal_failover_preserves_request_accounting() {
     for mode in [
         "quota_error",
         "quota_http",

@@ -1,4 +1,4 @@
-//! Fenced operational observations. This state never authorizes inference replay.
+//! Fenced operational observations.
 use crate::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;

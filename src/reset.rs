@@ -742,7 +742,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn weekly_activation_unknown_outcome_is_never_replayed_and_counters_stay_unknown() {
+    async fn weekly_activation_unknown_outcome_preserves_claim_and_unknown_counters() {
         let f = inactive_fixture().await;
         *f.mock.activation_reply.lock().unwrap() =
             "data: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic\"}}\n\n".into();

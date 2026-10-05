@@ -124,7 +124,6 @@ impl Session {
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
             .timeout(Duration::from_secs(180))
             .build()?;
         let reservation = TcpListener::bind("127.0.0.1:0").await?;
@@ -263,7 +262,7 @@ impl Session {
             .json(body)
             .send()
             .await
-            .map_err(|_| "smoke HTTP request interrupted; do not replay blindly".into())
+            .map_err(|_| "smoke HTTP request interrupted".into())
     }
     async fn response(&self, body: &Value) -> Result<Value> {
         let response = self.post("responses", body).await?;
@@ -360,7 +359,7 @@ async fn ws_terminal(
     tokio::time::timeout(Duration::from_secs(180), async {
         let mut items = BTreeMap::new();
         while let Some(message) = socket.next().await {
-            match message.map_err(|_| "smoke WebSocket interrupted; do not replay blindly")? {
+            match message.map_err(|_| "smoke WebSocket interrupted")? {
                 Message::Text(text) => {
                     let event: Value =
                         serde_json::from_str(&text).map_err(|_| "invalid smoke WebSocket event")?;
@@ -395,7 +394,7 @@ async fn ws_terminal(
         Err("smoke WebSocket ended before completion".into())
     })
     .await
-    .map_err(|_| "smoke WebSocket timed out; do not replay blindly")?
+    .map_err(|_| "smoke WebSocket timed out")?
 }
 async fn checks(session: &Session, model: &str, only: Option<&str>) -> Result<Value> {
     if only.is_some_and(|value| !matches!(value, "http_json" | "chat_refresh")) {
@@ -425,10 +424,7 @@ async fn checks(session: &Session, model: &str, only: Option<&str>) -> Result<Va
         if !reply.status().is_success() {
             return Err("smoke SSE request rejected".into());
         }
-        let text = reply
-            .text()
-            .await
-            .map_err(|_| "smoke SSE interrupted; do not replay blindly")?;
+        let text = reply.text().await.map_err(|_| "smoke SSE interrupted")?;
         let events = text
             .lines()
             .filter_map(|line| line.strip_prefix("data: "))
@@ -652,7 +648,7 @@ async fn live_upstream_smoke() {
     cleanup.expect("smoke cleanup failed");
     println!(
         "{}",
-        checked.expect("real upstream smoke failed; inspect saved usage, do not replay blindly")
+        checked.expect("real upstream smoke failed; inspect saved usage")
     );
 }
 
@@ -745,7 +741,7 @@ async fn client_checks(session: &Session, model: &str, codex: &str, opencode: &s
                 "{}",
                 json!({"case":name,"exit_success":output.status.success(),"tool_result":native::tool_result(&output.stdout),"client_fields":native::diagnostic(&output.stdout),"observed":observed,"rows":rows.iter().map(|row|json!({"status":row["status"],"upstream":row["upstream"],"known_usage":row["input"].as_i64().is_some() && row["output"].as_i64().is_some()})).collect::<Vec<_>>()})
             );
-            return Err(format!("{name} real tool cycle failed; do not replay blindly").into());
+            return Err(format!("{name} real tool cycle failed").into());
         }
         println!(
             "{}",
@@ -852,10 +848,7 @@ async fn live_prompt_cache() {
         .expect("cache test could not start");
     let result = cache_checks(&session, &model).await;
     session.close().await.expect("cache test cleanup failed");
-    println!(
-        "{}",
-        result.expect("real cache observation failed; do not replay blindly")
-    );
+    println!("{}", result.expect("real cache observation failed"));
 }
 
 async fn compaction_clients(

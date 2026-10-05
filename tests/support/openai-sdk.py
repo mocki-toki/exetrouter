@@ -7,7 +7,6 @@ assert openai.__version__ == "3.22.1", "Update the verified SDK matrix before ch
 with openai.OpenAI(
     api_key=os.environ["EXETROUTER_TOKEN"],
     base_url=os.environ["EXETROUTER_TEST_URL"] + "/v1",
-    max_retries=0,
     timeout=10,
 ) as client:
     messages = [{"role": "user", "content": "synthetic SDK fixture"}]

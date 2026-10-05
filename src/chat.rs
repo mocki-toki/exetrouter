@@ -999,7 +999,7 @@ fn data(value: &Value) -> Vec<u8> {
 
 pub(crate) fn stream_error() -> Vec<u8> {
     data(
-        &json!({"error":{"type":"upstream_error","code":"upstream_interrupted","message":"stream failed or cannot be represented; request outcome may be unknown"}}),
+        &json!({"error":{"type":"upstream_error","code":"upstream_interrupted","message":"stream failed or cannot be represented"}}),
     )
 }
 

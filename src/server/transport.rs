@@ -1051,7 +1051,7 @@ pub(super) async fn http(
             return error(
                 StatusCode::BAD_GATEWAY,
                 "upstream_connection_error",
-                "upstream write failed; request outcome may be unknown",
+                "upstream write failed",
             );
         }
         Source::WebSocket(Box::new(socket))
@@ -1069,7 +1069,7 @@ pub(super) async fn http(
                     return error(
                         StatusCode::BAD_GATEWAY,
                         "upstream_connection_error",
-                        "upstream interrupted; request outcome may be unknown",
+                        "upstream interrupted",
                     );
                 }
             };
@@ -1455,11 +1455,6 @@ impl Source {
 }
 
 fn ws_error(code: &str, message: &str) -> String {
-    if code == "upstream_interrupted" {
-        // Codex maps a wrapped HTTP 400 to a terminal InvalidRequest. An
-        // unclassified Stream error triggers WS-to-HTTP replay even at zero retries.
-        return json!({"type":"error","status":400,"error":{"type":"invalid_request_error","code":code,"message":message}}).to_string();
-    }
     json!({"type":"error","error":{"type":code,"code":code,"message":message}}).to_string()
 }
 
@@ -2710,10 +2705,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 let _ = log.finish("interrupted", Counters::default()).await;
                 let _ = send_client(
                     &mut client,
-                    ws_error(
-                        "upstream_interrupted",
-                        "connection interrupted; response outcome may be unknown",
-                    ),
+                    ws_error("upstream_interrupted", "connection interrupted"),
                 )
                 .await;
                 break 'frames;

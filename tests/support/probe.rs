@@ -234,7 +234,6 @@ impl Probe {
             target: target.into(),
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .retry(reqwest::retry::never())
                 .build()?,
             observed: observed.clone(),
             request_limit,

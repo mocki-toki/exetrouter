@@ -65,7 +65,6 @@ pub fn http_client() -> Result<Client> {
 fn client_with_read_timeout(read_timeout: Duration) -> Result<Client> {
     Ok(Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(read_timeout)
         .user_agent(concat!("exetrouter/", env!("CARGO_PKG_VERSION")))
@@ -723,7 +722,7 @@ impl Upstream {
                         None,
                     )
                     .await;
-                Err("upstream connection failed; request outcome may be unknown".into())
+                Err("upstream connection failed".into())
             }
         }
     }

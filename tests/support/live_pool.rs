@@ -117,7 +117,7 @@ async fn send(socket: &mut Socket, body: &Value) -> Result<()> {
     socket
         .send(Message::Text(create.to_string().into()))
         .await
-        .map_err(|_| "pool WebSocket send interrupted; do not replay blindly".into())
+        .map_err(|_| "pool WebSocket send interrupted".into())
 }
 async fn socket_error(socket: &mut Socket, code: &str, paused: bool) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(10), async {

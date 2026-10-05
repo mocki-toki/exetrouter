@@ -983,7 +983,7 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
                 if let Message::Text(text) = frame {
                     let event: Value = serde_json::from_str(&text).unwrap();
                     if event["type"] == "error" {
-                        assert_eq!(event["status"], 400);
+                        assert_eq!(event["error"]["type"], "upstream_interrupted");
                         assert_eq!(event["error"]["code"], "upstream_interrupted");
                         break;
                     }

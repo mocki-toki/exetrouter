@@ -34,7 +34,6 @@ fn claim(
     now: i64,
 ) -> Result<Option<i64>> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // A cancelled caller or a crashed process may have sent the request. Never replay it.
     tx.execute("UPDATE quota_activation_attempts SET status='unknown' WHERE status='pending' AND attempted_at<=?1", [now - 60])?;
     let quota = crate::quota::summary(&tx, account, now)?;
     let Some(reset) = inactive_reset(&quota, now) else {
