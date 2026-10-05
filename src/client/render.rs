@@ -267,7 +267,17 @@ pub(super) fn limits(v: &Value) -> String {
         text.push_str("No account quota observations available.\n");
     }
     for account in &accounts {
-        text.push_str(&format!("{}\n", field(account, "label")));
+        text.push_str(&format!(
+            "{}\n",
+            field(
+                account,
+                if account.get("display_name").is_some() {
+                    "display_name"
+                } else {
+                    "label"
+                }
+            )
+        ));
         if account["preference"].is_object() {
             text.push_str(&format!(
                 "  Priority {}\n",
@@ -379,7 +389,14 @@ pub(super) fn accounts(value: &Value) -> String {
             .map(|row| {
                 format!(
                     "{} (ID {}) - {}",
-                    field(row, "email"),
+                    field(
+                        row,
+                        if row.get("display_name").is_some() {
+                            "display_name"
+                        } else {
+                            "email"
+                        }
+                    ),
                     field(row, "id"),
                     field(row, "state")
                 )

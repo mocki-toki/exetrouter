@@ -31,6 +31,8 @@ pub(super) struct Connection {
     pub identity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_url: Option<String>,
+    #[serde(skip)]
+    pub privacy_key: Option<PathBuf>,
 }
 impl Default for Connection {
     fn default() -> Self {
@@ -44,6 +46,7 @@ impl Default for Connection {
             ssh_user: "routercli".into(),
             identity: String::new(),
             api_url: None,
+            privacy_key: None,
         }
     }
 }
@@ -191,6 +194,17 @@ pub(super) fn load(args: &Args) -> Result<Connection> {
     if let Some(value) = &args.api_url {
         result.api_url = Some(normalize_api_url(value)?);
     }
+    result.privacy_key = std::env::var_os("EXR_PRIVACY_KEY")
+        .map(PathBuf::from)
+        .or_else(|| {
+            path(args)
+                .ok()
+                .map(|path| path.with_extension("privacy-key"))
+        })
+        .or_else(|| {
+            (result.mode == Mode::Standalone)
+                .then(|| PathBuf::from(&result.state_dir).join("privacy.key"))
+        });
     Ok(result)
 }
 fn prompt(label: &str, current: &str) -> Result<String> {

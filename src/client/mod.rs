@@ -1,5 +1,6 @@
 mod clipboard;
 mod config;
+mod privacy;
 mod quota_forecast;
 mod render;
 mod tui;
@@ -595,6 +596,10 @@ impl std::fmt::Display for SetupInterrupted {
 impl std::error::Error for SetupInterrupted {}
 
 async fn ssh_request(args: &Session, request: ControlRequest) -> Result<Value> {
+    privacy::request(args, request).await
+}
+
+async fn raw_request(args: &Session, request: ControlRequest) -> Result<Value> {
     if let Some(local) = &args.connection.local {
         return local.request(request).await;
     }

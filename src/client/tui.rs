@@ -50,6 +50,7 @@ struct State {
     group: usize,
     usage_selected: usize,
     request_metric: bool,
+    personal: [String; 2],
     statuses: [String; 5],
     notices: [Option<String>; 5],
     forecasts: super::quota_forecast::Forecasts,
@@ -78,6 +79,11 @@ enum Modal {
     },
     UpdateConfirm,
     Name(String),
+    Personal {
+        kind: super::privacy::Kind,
+        id: String,
+        input: TextInput,
+    },
     Days {
         name: String,
         text: String,
@@ -181,11 +187,22 @@ fn start(connection: &Connection, req: ControlRequest, tab: usize, mutation: boo
         reset_prepare,
         reset_confirm,
         task: tokio::spawn(async move {
-            if tab == SETTINGS {
-                if let Some(local) = &session.connection.local {
-                    return local.accounts().await;
-                }
-                return ssh_request(&session, ControlRequest::Doctor).await;
+            if tab == SETTINGS && !mutation {
+                let accounts = if session.connection.local.is_some() {
+                    super::privacy::local_accounts(&session).await?
+                } else {
+                    ssh_request(&session, ControlRequest::Doctor).await?
+                };
+                let personal = match (
+                    super::privacy::get(&session, super::privacy::Kind::Note, "personal").await,
+                    super::privacy::get(&session, super::privacy::Kind::Project, "personal").await,
+                ) {
+                    (Ok(note), Ok(project)) => {
+                        Some([note.unwrap_or_default(), project.unwrap_or_default()])
+                    }
+                    _ => None,
+                };
+                return Ok(serde_json::json!({"accounts": accounts, "personal": personal}));
             }
             ssh_request(&session, req).await
         }),
@@ -439,7 +456,13 @@ fn settings_lines(connection: &Connection, state: &State, width: u16) -> Vec<Lin
                     format!(
                         "{}{}",
                         if selected { "▶ " } else { "  " },
-                        render::safe(account["email"].as_str().unwrap_or("Email unavailable"))
+                        render::safe(
+                            account
+                                .get("display_name")
+                                .unwrap_or(&account["email"])
+                                .as_str()
+                                .unwrap_or("Email unavailable")
+                        )
                     ),
                     if selected {
                         selection_style()
@@ -462,6 +485,32 @@ fn settings_lines(connection: &Connection, state: &State, width: u16) -> Vec<Lin
         lines.push(field("SSH username", connection.ssh_user.clone()));
         lines.push(field("Private key", connection.identity.clone()));
     }
+    lines.push(Line::default());
+    lines.push(heading("PERSONAL DATA · ENCRYPTED"));
+    lines.push(field(
+        "Local key",
+        connection
+            .privacy_key
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "Unavailable".into()),
+    ));
+    lines.push(field(
+        "Notes",
+        if state.personal[0].is_empty() {
+            "None".into()
+        } else {
+            state.personal[0].clone()
+        },
+    ));
+    lines.push(field(
+        "Projects",
+        if state.personal[1].is_empty() {
+            "None".into()
+        } else {
+            state.personal[1].clone()
+        },
+    ));
     lines.push(Line::default());
     lines.push(heading("SOFTWARE"));
     let updates = update_text(state);
@@ -517,10 +566,16 @@ fn action_menu(state: &State, connection: &Connection) -> (String, Vec<(String, 
                 ));
             }
             entries.push(("Switching rules".into(), KeyCode::Char('S')));
+            entries.push(("Edit personal account label".into(), KeyCode::Char('L')));
             return (
                 format!(
                     "{}{}",
-                    render::safe(row["label"].as_str().unwrap_or("Account")),
+                    render::safe(
+                        row.get("display_name")
+                            .unwrap_or(&row["label"])
+                            .as_str()
+                            .unwrap_or("Account")
+                    ),
                     if row["preference"]["locked"].as_bool() == Some(true) {
                         " · Locked by operator"
                     } else {
@@ -554,6 +609,10 @@ fn action_menu(state: &State, connection: &Connection) -> (String, Vec<(String, 
                     ("Reauthorize account".into(), KeyCode::Char('u')),
                 ]);
             }
+            entries.extend([
+                ("Personal notes".into(), KeyCode::Char('N')),
+                ("Project names".into(), KeyCode::Char('P')),
+            ]);
             entries
         }
     };
@@ -828,6 +887,7 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
         OVERVIEW => keys(&[
             ("↑ / ↓", "select"),
             ("Enter", "account actions"),
+            ("L", "personal label"),
             ("PgUp / PgDn", "page"),
         ]),
         USAGE if state.group != 0 => keys(&[
@@ -842,10 +902,17 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
             ("Enter", "copy model ID"),
             ("PgUp / PgDn", "page"),
         ]),
-        SETTINGS if connection.local.is_some() => {
-            keys(&[("↑ / ↓", "select"), ("Enter", "actions")])
-        }
-        SETTINGS => keys(&[("Enter", "settings actions")]),
+        SETTINGS if connection.local.is_some() => keys(&[
+            ("↑ / ↓", "select"),
+            ("Enter", "actions"),
+            ("N", "notes"),
+            ("P", "projects"),
+        ]),
+        SETTINGS => keys(&[
+            ("Enter", "settings actions"),
+            ("N", "notes"),
+            ("P", "projects"),
+        ]),
         _ => keys(&[("↑ / ↓", "scroll"), ("PgUp / PgDn", "page")]),
     });
 
@@ -875,6 +942,7 @@ fn render(frame: &mut Frame<'_>, state: &State, connection: &Connection, busy: b
             },
             Modal::UpdateConfirm => ("Update exr", "Install the latest published release in the existing installation?\nThe installation method is preserved; config, accounts and tokens stay in place.\nSource builds may take several minutes. Restart exr after completion.\n\nEnter: update   Esc: cancel.".into()),
             Modal::Name(text) => ("Create token",format!("Token name: {text}\n\nEnter: next   Esc: cancel")),
+            Modal::Personal {kind,input,..} => (match kind {super::privacy::Kind::Account=>"Account label",super::privacy::Kind::Note=>"Personal note",super::privacy::Kind::Project=>"Project names",super::privacy::Kind::Settings=>"Preferences"},format!("{}\n\nEnter: save   Esc: cancel",input.value)),
             Modal::Days { name,text } => ("Create token",format!("Name: {name}\nExpires in days (1–365): {text}\n\nEnter: create   Esc: cancel")),
             Modal::Confirm { id,rotate } => (if *rotate {"Rotate token"}else{"Revoke token"}, format!("Token: {id}\n{}\n\nPress y to confirm, Esc to cancel.",if *rotate {"The old secret will stop working. The new secret will be copied to the clipboard."}else{"This token will stop working immediately."})),
             Modal::ClipboardRetry { .. } => ("Clipboard unavailable", "The token was issued, but copying failed.\nThe secret stays hidden. No token request will be repeated.\n\nc: retry copying   Esc: discard and rotate the token later".into()),
@@ -1058,7 +1126,13 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
     for (index, account) in accounts.into_iter().enumerate() {
         let label = format!(
             "{}{} · Priority {}{}",
-            render::safe(account["label"].as_str().unwrap_or("Account")),
+            render::safe(
+                account
+                    .get("display_name")
+                    .unwrap_or(&account["label"])
+                    .as_str()
+                    .unwrap_or("Account")
+            ),
             if account["preference"]["enabled"].as_bool() == Some(false) {
                 " · Deactivated"
             } else {
@@ -1484,6 +1558,21 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let result = async {
     let mut state = State::default();
+    let mut private_settings_available = true;
+    match super::privacy::dashboard(&args).await {
+        Ok(Some(settings)) => { state.tab=settings.tab; state.period=settings.period; state.group=settings.group; state.request_metric=settings.request_metric; },
+        Ok(None) => {},
+        Err(_) => {private_settings_available=false; state.statuses[SETTINGS]="Private settings unavailable; restore the original privacy key and check server compatibility.".into();},
+    }
+    if private_settings_available {
+        match (
+            super::privacy::get(&args, super::privacy::Kind::Note, "personal").await,
+            super::privacy::get(&args, super::privacy::Kind::Project, "personal").await,
+        ) {
+            (Ok(note), Ok(project)) => state.personal = [note.unwrap_or_default(), project.unwrap_or_default()],
+            _ => private_settings_available = false,
+        }
+    }
     let mut next_limits_refresh = Instant::now() + LIMIT_REFRESH_INTERVAL;
     let mut pending = Some(start(&args.connection, request(&state), state.tab, false));
     let mut updater: Option<UpdateJob> = None;
@@ -1544,20 +1633,29 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                         } else {
                             return Err("token issued without a clipboard destination; rotate it before use".into());
                         }
+                    } else if value.get("updated").and_then(Value::as_bool) == Some(true) {
+                        state.notices[job.tab] = Some("Personal data saved.".into());
                     } else {
                         state.notices[job.tab] = Some(render::response("revoke", &value));
                     }
-                    state.values[TOKENS] = None;
+                    let refresh_tab=job.tab;
+                    state.values[refresh_tab] = None;
                     if state.modal.is_none() {
-                        pending = Some(start(
-                            &args.connection,
-                            ControlRequest::TokenList,
-                            TOKENS,
-                            false,
-                        ));
+                        let request=if matches!(value.get("updated").and_then(Value::as_bool),Some(true)){request(&state)}else{ControlRequest::TokenList};
+                        pending = Some(start(&args.connection,request,refresh_tab,false));
                     }
                 }
-                Ok(value) => {
+                Ok(mut value) => {
+                    if job.tab == SETTINGS {
+                        if let Some(personal) = value.get("personal") {
+                            if personal.is_null() {
+                                state.notices[SETTINGS] = Some("Personal data could not be refreshed; displayed values may be stale.".into());
+                            } else {
+                                state.personal = serde_json::from_value(personal.clone())?;
+                            }
+                            value = value["accounts"].take();
+                        }
+                    }
                     if job.tab == OVERVIEW {
                         state.forecasts.observe(&value, chrono::Utc::now().timestamp());
                     }
@@ -1601,6 +1699,10 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                         },
                         error
                     );
+                    if job.mutation && job.tab == SETTINGS {
+                        state.notices[SETTINGS] = Some(state.statuses[SETTINGS].clone());
+                        pending = Some(start(&args.connection, ControlRequest::Doctor, SETTINGS, false));
+                    }
                 }
             }
         }
@@ -1633,6 +1735,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
             if pending.as_ref().is_some_and(|p| p.mutation) {
                 return Err("Mutation interrupted; it may have completed. Inspect tokens or limits before any further action".into());
             }
+            if private_settings_available {super::privacy::save_dashboard(&args, &super::privacy::Dashboard {tab:state.tab,period:state.period,group:state.group,request_metric:state.request_metric}).await?;}
             return Ok(());
         }
         let size = terminal.size()?;
@@ -1767,6 +1870,17 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     }
                     _ => {}
                 },
+                Modal::Personal {kind,id,input} => match key.code {
+                    KeyCode::Esc => state.modal=None,
+                    KeyCode::Enter => {
+                        match super::privacy::seal(&args.connection,*kind,id,&input.value) {
+                            Ok(request)=>{mutation=Some(request);},
+                            Err(error)=>state.statuses[state.tab]=error.to_string(),
+                        }
+                        state.modal=None;
+                    }
+                    _=>input.edit(key),
+                },
                 Modal::Days { name, text } => match key.code {
                     KeyCode::Esc => state.modal = None,
                     KeyCode::Backspace => {
@@ -1807,6 +1921,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
             let old_tab = state.tab;
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => {
+                    if private_settings_available {super::privacy::save_dashboard(&args, &super::privacy::Dashboard {tab:state.tab,period:state.period,group:state.group,request_metric:state.request_metric}).await?;}
                     if let Some(local) = &args.connection.local {
                         local.stop().await?;
                     }
@@ -1958,6 +2073,16 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                         }
                     }
                 }
+                KeyCode::Char('L') if state.tab == OVERVIEW => {
+                    if let Some(row)=state.values[OVERVIEW].as_ref().and_then(|v|v["quota_accounts"].as_array()).and_then(|r|r.get(state.account_selected)) {
+                        if let Some(id)=row["id"].as_i64() {
+                            let value=row["display_name"].as_str().unwrap_or("").to_owned();
+                            state.modal=Some(Modal::Personal {kind:super::privacy::Kind::Account,id:id.to_string(),input:TextInput::new(value)});
+                        }
+                    }
+                }
+                KeyCode::Char('N') if state.tab == SETTINGS => state.modal=Some(Modal::Personal {kind:super::privacy::Kind::Note,id:"personal".into(),input:TextInput::new(state.personal[0].clone())}),
+                KeyCode::Char('P') if state.tab == SETTINGS => state.modal=Some(Modal::Personal {kind:super::privacy::Kind::Project,id:"personal".into(),input:TextInput::new(state.personal[1].clone())}),
                 KeyCode::Char('c') if state.tab == OVERVIEW => {
                     if let Some(req) = selected_reset_request(&state) {
                         pending = Some(start(&args.connection, req, OVERVIEW, false));
@@ -2074,6 +2199,8 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
             state.notices[state.tab] = None;
             let tab = if matches!(req, ControlRequest::ResetConfirm { .. } | ControlRequest::AccountSet { .. }) {
                 OVERVIEW
+            } else if matches!(req,ControlRequest::PrivatePut {..}) {
+                state.tab
             } else {
                 TOKENS
             };
@@ -2102,7 +2229,12 @@ fn settings_body(connection: &Connection, accounts: Option<&Value>, selected: us
             text.push_str(&format!(
                 "{}{} · {}\n",
                 if i == selected { "▶ " } else { "  " },
-                render::safe(row["email"].as_str().unwrap_or("Email unavailable")),
+                render::safe(
+                    row.get("display_name")
+                        .unwrap_or(&row["email"])
+                        .as_str()
+                        .unwrap_or("Email unavailable")
+                ),
                 render::safe(row["state"].as_str().unwrap_or("unknown"))
             ));
         }
@@ -2487,6 +2619,54 @@ fn reset_screen(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+
+    #[tokio::test]
+    async fn settings_refresh_reads_confirmed_personal_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = crate::local::Local::open(
+            &dir.path().join("state"),
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+        let connection = Connection {
+            mode: super::super::config::Mode::Standalone,
+            privacy_key: Some(dir.path().join("privacy-key")),
+            local: Some(local.clone()),
+            ..Default::default()
+        };
+        let sealed = super::super::privacy::seal(
+            &connection,
+            super::super::privacy::Kind::Note,
+            "personal",
+            "Confirmed note",
+        )
+        .unwrap();
+        let mut write = start(&connection, sealed, SETTINGS, true);
+        assert_eq!((&mut write.task).await.unwrap().unwrap()["updated"], true);
+        let mut refresh = start(&connection, ControlRequest::Doctor, SETTINGS, false);
+        assert_eq!(
+            (&mut refresh.task).await.unwrap().unwrap()["personal"][0],
+            "Confirmed note"
+        );
+        let mut failed = start(
+            &connection,
+            ControlRequest::PrivatePut {
+                id: "invalid".into(),
+                ciphertext: None,
+            },
+            SETTINGS,
+            true,
+        );
+        assert!((&mut failed.task).await.unwrap().is_err());
+        let mut refresh = start(&connection, ControlRequest::Doctor, SETTINGS, false);
+        assert_eq!(
+            (&mut refresh.task).await.unwrap().unwrap()["personal"][0],
+            "Confirmed note"
+        );
+        local.stop().await.unwrap();
+    }
     #[test]
     fn routing_dialog_shows_all_fields_error_controls_and_cursor_on_minimum_terminal() {
         let mut terminal = Terminal::new(TestBackend::new(72, 20)).unwrap();

@@ -19,6 +19,10 @@ impl Client {
 request=$(cat)
 printf '%s\n' "$request" >> "$EXETROUTER_TEST_REQUESTS"
 case "$request" in
+  *'"action":"private_list"'*) printf '%s' '{"ok":true,"result":{}}' ;;
+  *'"action":"private_put"'*) printf '%s' '{"ok":true,"result":{"updated":true}}' ;;
+  *'"action":"token_show"'*) printf '%s' '{"ok":true,"result":{"id":"tok_test","name":"Laptop"}}' ;;
+  *'"action":"token_rename"'*) printf '%s' '{"ok":true,"result":{"updated":true}}' ;;
   *'"action":"token_list"'*) printf '%s' '{"ok":true,"result":[{"id":"tok_test","name":"Laptop","expires_at":2000000000,"revoked_at":null,"last_used_at":null}]}' ;;
   *'"action":"models"'*) printf '%s' '{"ok":true,"result":{"data":[{"id":"gpt-test","object":"model","owned_by":"openai","display_name":"Test model","exetrouter":{"context_window":100000,"input_modalities":["text","image"],"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low"}},{"id":"gpt-other","object":"model","owned_by":"openai","display_name":"Other model","exetrouter":{"context_window":200000,"input_modalities":["text"],"supported_reasoning_levels":[{"effort":"high"}]}}]}}' ;;
   *'"action":"doctor"'*|*'"action":"limits"'*) printf '%s' '{"ok":true,"result":{"capabilities":{"account_routing_rules":1},"quota_accounts":[{"id":1,"label":"test@example.com","preference":{"enabled":true,"priority":1,"locked":false,"rules":{"switch_at":null,"switch_at_short":null,"switch_at_weekly":null},"settings":{}},"reset_credits":{"available_count":2,"credits":[]},"quota":{"status":"current","windows":[{"kind":"primary","window_minutes":480,"used_percent":20,"remaining_percent":80,"status":"current"},{"kind":"secondary","window_minutes":10080,"used_percent":30,"remaining_percent":70,"status":"stale"}]}}]}}' ;;
@@ -450,6 +454,8 @@ fn real_terminal_dashboard_copies_secrets_without_rendering_and_restores_screen(
     assert_eq!(requests.matches("token_revoke").count(), 1);
     assert_eq!(requests.matches("reset_prepare").count(), 2);
     assert_eq!(requests.matches("reset_confirm").count(), 1);
+    assert!(!requests.contains("Test service"));
+    assert!(requests.contains("exrp1:"));
     let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
     assert_eq!(
         unsafe { libc::tcgetattr(slave.as_raw_fd(), termios.as_mut_ptr()) },
