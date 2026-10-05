@@ -2,7 +2,7 @@
 
 ExetRouter encrypts personal metadata on the native client with XChaCha20-Poly1305. The service stores ciphertext and never receives the privacy key. This covers token names, personal account labels and dashboard preferences. It does not encrypt routing rules, account issuer identities, usage counters, or connection settings required to reach the service.
 
-The client creates its key automatically on first use. By default it is next to the selected client config, replacing its extension with `.privacy-key`; `EXR_PRIVACY_KEY` selects another local key file. Keys must be owner-only regular 32-byte files; symlinks are rejected. The key is never uploaded. Back it up separately and privately: server backups cannot recover it, and losing every copy makes encrypted data unreadable. Settings shows the local key path.
+The client creates its key automatically on first use. By default it is next to the selected client config, replacing its extension with `.privacy-key`; `EXR_PRIVACY_KEY` selects another local key file. Keys must be owner-only regular 32-byte files; symlinks are rejected. The key is never uploaded. Back it up separately and privately: server backups cannot recover it, and losing every copy makes encrypted data unreadable.
 
 New token names are encrypted automatically in CLI and TUI. Rotation preserves ciphertext. Existing plaintext names are encrypted automatically the next time the native client loads the token list; no bearer secret changes. Old backups, SQLite free pages and WAL files may still contain previous plaintext names. Operators and older clients see ciphertext. A wrong key produces a fixed error, and cannot rotate an encrypted token.
 

@@ -1,10 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - Stop writing a context binding for every output: return authenticated user/account envelopes for opaque context, turn state and saved conversation IDs, and restore original values before upstream dispatch. Require authenticated envelopes for all opaque continuations and preserve concurrent quota-transfer forks. Remove the former raw-context fallback and prune unpaired registry rows at startup. Full transfer storage fails before replacement inference instead of interrupting ordinary output.
 
 - Encrypt native-client token names, personal account labels and dashboard preferences with an automatically created client-held key. Add bounded user-scoped ciphertext storage, automatic migration of existing token names, and the schema-9-to-10 migration/rollback plan.
+- Support mouse navigation, token actions and model-ID copying, clickable controls and EN/RU command shortcuts without transliterating text input.
+- Move Settings actions inline, put Configure connection in Connection, and replace Check updates with Update when a newer version is available.
+- Publish matching schema-10 native gateway and container artifacts. Existing schema-9 servers require the reviewed migration and rollback procedure.
 
 ## 0.4.0
 
