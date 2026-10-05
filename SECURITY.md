@@ -12,6 +12,7 @@ Use [GitHub private vulnerability reporting](https://github.com/mocki-toki/exetr
 | Tool definitions, arguments/results and attachments | Forwarded in memory; never retained as payloads |
 | Bearer/authorization headers | Never logged; router bearer verification uses keyed hashes |
 | OAuth tokens | Encrypted with account-bound AEAD under a separate private key |
+| Personal metadata | Client-encrypted token names, account labels, notes, project names and dashboard preferences; user key never sent to service |
 | Usage | User/token IDs, validated model ID, numeric usage, fixed statuses, timings and request/response identifiers |
 | Conversation affinity | User-scoped HMAC digests and derived quota-transfer portability digests; bounded current WS history exists only in transient memory |
 | Subscription limits | Percentages, durations, reset/observation times and cooldowns |
@@ -34,6 +35,8 @@ WebSocket interruption diagnostics include a fixed reason and stage, elapsed tim
 Use separate unprivileged service/gateway UIDs, protected state/keys and reviewed TLS ingress. [Deployment templates](deploy/README.md) disable API access/error logging, buffering and caching. Keep payload/debug/packet capture, WAF body inspection and APM body capture disabled in your ingress. Client applications and OpenAI have their own retention policies.
 
 Management exposes account identities, usage totals, model IDs and operational metadata, never conversations or request bodies. Content passes through memory after TLS termination. A host operator can inspect memory or replace software, so this is not end-to-end confidentiality against that operator. Connect directly to a trusted provider if that property is required.
+
+[Personal metadata](docs/private-metadata.md) uses a separate client-held key created automatically by the native client. Existing plaintext token names are encrypted when the native client next loads them; server snapshots do not contain the client key. Confidentiality depends on a trusted client/device, and does not hide access patterns or prevent server rollback/deletion.
 
 ## Verification and publication
 

@@ -2,6 +2,8 @@
 
 `exr` runs a standalone API or connects to a shared server on macOS/Linux. Run it without a command to open the dashboard. CLI reports use readable text; add `--json` for scripts.
 
+Token names and personal data are encrypted automatically by the native client. Existing token names are encrypted the next time the token list is loaded. Edit account labels from Overview and personal notes/project names from Settings. See [encrypted personal data](private-metadata.md) for key backup and recovery.
+
 ## First run and standalone
 
 Running `exr` with no connection opens a wizard: choose Standalone or Remote, edit fields (Ctrl-U clears one), review and confirm. Esc cancels without saving. Settings (`←/→`) changes connection/mode. Standalone uses an embedded loopback API, private local credentials and no SSH, remote daemon or user administration.

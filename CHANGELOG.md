@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Encrypt native-client token names and personal account labels, notes, project names and dashboard preferences with an automatically created client-held key. Add bounded user-scoped ciphertext storage, automatic migration of existing token names, and the schema-9-to-10 migration/rollback plan.
+
 ## 0.4.0
 
 - Configure soft per-account switching thresholds for all, short and weekly quota windows through exr, exrd and the dashboard. Prefer alternatives at or below the remaining-percentage threshold, with fallback to healthy capacity and safe context transfer before submission.
