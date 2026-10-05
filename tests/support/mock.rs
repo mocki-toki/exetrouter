@@ -499,8 +499,12 @@ async fn websocket(
                     let cache = body["prompt_cache_key"].as_str().unwrap();
                     assert_eq!(cache.len(), 64);
                     state.cache_keys.lock().unwrap().push(cache.to_owned());
-                    state.requests.lock().unwrap().push(body.clone());
-                    state.request_accounts.lock().unwrap().push(account.clone());
+                    if is_compaction(&body) {
+                        state.compactions.lock().unwrap().push((account.clone(), body.clone()));
+                    } else {
+                        state.requests.lock().unwrap().push(body.clone());
+                        state.request_accounts.lock().unwrap().push(account.clone());
+                    }
                     let id = format!(
                         "resp_{}",
                         state.next_response.fetch_add(1, Ordering::SeqCst) + 1
@@ -655,11 +659,48 @@ fn configured_events(
             events
                 .push(json!({"type":"response.output_item.done","output_index":index,"item":item}));
         }
-        events.push(json!({"type":"response.completed","response":{"id":id,"status":"completed","output":if mode == "opaque_terminal" {output} else {vec![]},"usage":{"input_tokens":4,"output_tokens":1}}}));
+        events.push(json!({"type":"response.completed","response":{"id":id,"status":"completed","output":if mode == "opaque_terminal" {output} else {vec![]},"usage":{"input_tokens":4,"output_tokens":1,"total_tokens":5,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}));
         events
     } else {
-        events(body, id, state.tools.load(Ordering::SeqCst))
+        events(
+            body,
+            id,
+            state.tools.load(Ordering::SeqCst)
+                && !(mode == "native_proofs"
+                    && body["input"].as_array().is_some_and(|items| {
+                        items.iter().any(|item| item["type"] == "compaction")
+                    })),
+        )
     };
+    if mode == "native_proofs" && body["generate"] != false && !is_compaction(body) {
+        let reasoning = json!({"type":"reasoning","id":format!("rs_{id}"),"summary":[],"encrypted_content":format!("synthetic-native-proof-{account}-{id}")});
+        let tool_turn = events
+            .iter()
+            .any(|event| event["item"]["type"] == "function_call");
+        for event in &mut events {
+            if let Some(index) = event["output_index"].as_u64() {
+                event["output_index"] = json!(index + 1);
+            }
+            if event["type"] == "response.completed" {
+                event["response"]["output"]
+                    .as_array_mut()
+                    .unwrap()
+                    .insert(0, reasoning.clone());
+                if tool_turn {
+                    event["response"]["usage"]["input_tokens"] = json!(50000);
+                    event["response"]["usage"]["total_tokens"] = json!(50002);
+                }
+            }
+        }
+        events.insert(
+            1,
+            json!({"type":"response.output_item.added","output_index":0,"item":reasoning}),
+        );
+        events.insert(
+            2,
+            json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+        );
+    }
     if mode == "encrypted_tools" {
         for event in &mut events {
             if event["item"]["type"] == "function_call" {

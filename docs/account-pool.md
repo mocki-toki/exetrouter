@@ -44,17 +44,23 @@ Upstream authentication failure is redacted as upstream_authentication_error (HT
 
 ## Opaque context
 
-The router saves a domain-separated user-scoped HMAC digest, internal account ID and expiry for `encrypted_content` and `encrypted_function_args` output. Empty encrypted argument arrays are valid. No checkpoint, text, summary or tool arguments are persisted. Bindings survive restart with the same database/HMAC key; refresh preserves account identity.
+The router returns an authenticated `exrctx1` envelope around `encrypted_content`, each `encrypted_function_args` element, issued turn state and saved conversation IDs. Empty encrypted argument arrays remain valid. Encrypted metadata identifies the router user, issuing account and expiry; the exact upstream value and field kind are authenticated. Internal account IDs are not exposed. The original upstream value is extracted only in transient memory before dispatch. Clients must preserve these opaque values exactly.
 
-Lifetime is 24 hours from the last observation of that item in output, not extended by merely reading input. Bounds: 128 distinct opaque elements per snapshot, 4096 live bindings per user, 65536 total. Live bindings are not evicted to make room; failure is explicit.
+Normal output creates **no context-binding rows**. Proofs survive restart with the existing HMAC key and expire 24 hours after request admission. Added/done/completed events for the same value in one request carry identical proofs. Reading input does not extend validity. Incoming opaque snapshots retain the bound of 128 distinct elements. New proofs remain usable when the legacy registry is full.
 
-All opaque input must have live bindings for the current user. Unknown/expired/foreign context yields context_not_found. Quota transfer records an additional derived portability digest in the same bounded registry, without extending the input's expiry. Portable ancestors can be shared by concurrent forks; newer untransferred output retains its own account affinity. Conflicting untransferred account owners or an incompatible bound WS yield context_account_mismatch. Malformed opaque input is rejected. Another bearer of the same user can continue; another user cannot. Context imported from clients bypassing this router is unsupported.
+Unknown legacy values, foreign/tampered/expired proofs return `context_not_found` before inference. Valid proofs retain account affinity, subject to account authorization and eligibility. Conflicting untransferred owners or an incompatible bound WS return `context_account_mismatch`. A different bearer belonging to the same user can continue. Context imported from clients bypassing this router remains unsupported.
 
-Bindings are saved before exposing the corresponding output. Storage failure stops projection/stream explicitly and retains independently known terminal usage. The router never exposes an unbound checkpoint. Quota or configured-threshold transfer validates existing user ownership atomically and consumes registry capacity for its derived portability digests; no schema migration or raw history storage is required.
+Legacy raw values continue to resolve through the existing user-scoped HMAC digest registry until their original expiry. No live entries are evicted and no schema/key migration is required. Ordinary output does not renew or add legacy entries.
+
+Quota and configured soft-threshold transfers still require complete current context. Only a transfer saves keyed digest overrides and portability markers for its input, preserving input expiry. Portable ancestors can be shared by concurrent forks; newer untransferred output retains its issuing account. The bounded transfer/legacy registry permits 32768 rows per user and 65536 total. A full registry atomically rejects a transfer with `context_transfer_storage_full` before replacement generation; healthy continuations on the original account do not need a new record. Handshakes may precede this rejection, but inference is not resubmitted.
 
 ### Saved conversations
 
-Saved backend conversation references use a separate user-scoped HMAC domain in the bounded context registry. Only IDs observed in that user's Responses events are accepted for 24 hours, and continuation remains pinned to the issuing account. Stored conversations cannot migrate on quota rejection because their backend-owned history is unavailable to the router. Raw IDs remain transient and are not persisted.
+Saved backend conversation IDs and `x-codex-turn-state` also carry user/account proofs. The router unwraps IDs and turn state before forwarding. Saved conversations stay pinned to their issuing account and cannot migrate because their backend-owned history is unavailable. Legacy issued IDs/state retain their existing digest-based validation. Raw IDs and state are not persisted.
+
+### Upgrade and rollback
+
+Deploy server, native gateway and standalone binaries built from the same source. Existing client-held raw context continues to work on upgrade. Preserve the HMAC key: it now authenticates both legacy digests and client-carried proofs. A pre-proof binary cannot accept new envelopes on rollback; clients must reconnect with full text/tool history if that rollback is necessary. A database backup alone cannot make old binaries understand proofs. Do not strip or silently accept unverified envelopes as a fallback.
 
 ## Operator and diagnostics
 

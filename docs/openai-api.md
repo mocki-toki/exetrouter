@@ -80,7 +80,7 @@ Prompt/input and completion/output correspond. Cached/reasoning counters are inc
 
 Supply full input as a string or array. Strings become user messages, `system` becomes `developer`, absent instructions becomes empty, and `store` defaults false without replacing an explicit value. Other options pass to the backend, including `max_output_tokens`, `context_management`, `background`, `conversation`, `stream_id` and future fields; no static capability denylist is applied.
 
-HTTP JSON is assembled from upstream SSE/completed items; raw SSE preserves events. WS omits the HTTP `stream` field and preserves native event forwarding. Routing ownership, resource bounds and adapter checks still apply.
+HTTP JSON is assembled from upstream SSE/completed items; SSE preserves event fields while encoding authenticated opaque values. WS omits the HTTP `stream` field and preserves native event forwarding. Routing ownership, resource bounds and adapter checks still apply.
 
 Native WS services upstream ping/pong and control events between requests. If the upstream closes while no response is in flight, the downstream WS stays open. A separate next request may open a replacement WS on the same eligible account with the same scoped session/thread identity. Incremental input is expanded from the bounded latest completed context; an older or unavailable window returns `context_recovery_unavailable` before inference. Old upstream response IDs are not forwarded to a replacement socket.
 
@@ -95,8 +95,8 @@ Compact appends `compaction_trigger` to one Responses SSE request and projects `
 ### Context ownership
 
 - `previous_response_id` is supported only for responses owned by the current WS. HTTP/new-socket previous IDs are unsupported. Bearer validity is checked on every `response.create`.
-- `encrypted_content` and native `encrypted_function_args` pass unchanged; empty argument arrays are valid. User-scoped domain-separated digests bind output to its account for 24 hours. Unknown/foreign/expired input returns `context_not_found`; conflicting untransferred owners return `context_account_mismatch`.
-- Saved conversation IDs must have been issued to the same router user. Digests pin them to the owning account for 24 hours. Unknown/foreign/expired IDs fail before inference. Saved conversations cannot migrate because backend-owned history is unavailable to the router.
+- `encrypted_content` and native `encrypted_function_args` carry authenticated opaque envelopes; empty argument arrays are valid. The upstream receives the original values after verification. Proofs bind values to their user and issuing account for 24 hours without per-output database rows. Legacy raw values retain digest-based validation. Unknown/foreign/tampered/expired input returns `context_not_found`; conflicting untransferred owners return `context_account_mismatch`.
+- Saved conversation IDs must have been issued to the same router user. Authenticated envelopes pin them to the owning account for 24 hours; legacy IDs retain digest validation. Unknown/foreign/expired IDs fail before inference. Saved conversations cannot migrate because backend-owned history is unavailable to the router.
 - Quota or configured soft-threshold transfer requires complete current context and preserves authorization across concurrent forks. See [account-pool recovery](account-pool.md#failure-behavior) for bounds.
 
 ## Request sizes and compression
@@ -115,6 +115,7 @@ Unsupported/multiple codings return 415 `unsupported_content_encoding`; corrupt/
 | Unknown model / no available account | 404 / 503 |
 | User concurrency / global saturation | 429 `user_concurrency_limit` / 503 `server_busy`, before inference/accounting; no invented retry time |
 | Upstream quota cooldown | `upstream_cooldown` with retry information |
+| Transfer registry full | 503 `context_transfer_storage_full` before replacement inference; ordinary proof issuance remains available |
 | Operational pause | `upstream_backoff` with retry information |
 | Upstream OAuth authentication failure | Redacted `upstream_authentication_error` (502 or started-stream error); refresh belongs to a separate next operation |
 
@@ -128,7 +129,7 @@ An HTTP interruption emits generic `error`, then terminal `response.failed`. Usa
 
 ## Native routing metadata
 
-HTTP returns bounded upstream `x-codex-turn-state`. WS sends handshake `response.metadata` after the first `response.created`, as required by the reviewed OpenCode driver; upstream selection happens after the downstream upgrade. Event metadata also binds issued state before forwarding.
+HTTP returns bounded authenticated `x-codex-turn-state`, unwrapped before upstream dispatch. WS sends handshake `response.metadata` after the first `response.created`, as required by the reviewed OpenCode driver; upstream selection happens after the downstream upgrade. Event metadata also binds issued state before forwarding.
 
 WS accepts issued state in `client_metadata["x-codex-turn-state"]` or the upgrade header, projecting accepted header state into frame metadata. Both transports validate ownership/account. Only state issued to the same user is accepted; its digest pins the account for 24 hours in the bounded context registry. Unknown/foreign/expired state and conflicting untransferred opaque context fail before inference.
 

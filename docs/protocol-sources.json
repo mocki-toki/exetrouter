@@ -1,5 +1,5 @@
 {
-  "reviewed_at": "2026-10-02",
+  "reviewed_at": "2026-10-05",
   "projects": [
     {
       "id": "codex",
@@ -31,6 +31,10 @@
         {
           "path": "codex-rs/core/src/responses_metadata.rs",
           "sha256": "17821e5baed960026bc9b54f0af5085883c9c057647631fcd4d0070fdb3827bd"
+        },
+        {
+          "path": "codex-rs/protocol/src/models.rs",
+          "sha256": "916a595e136f4d7e32ce259f50678ffe818af2ea6a92f54d8628f57bfd4d43e7"
         }
       ],
       "npm_package": "@openai/codex"
@@ -38,9 +42,9 @@
     {
       "id": "opencode",
       "repository": "anomalyco/opencode",
-      "version": "2.0.22",
-      "tag": "v2.0.22",
-      "commit": "527f0b931d1f9b3ebd34e106c51b31ce5db5b075",
+      "version": "2.0.23",
+      "tag": "v2.0.23",
+      "commit": "0fd7e2829449b052abf0078666669302923d77af",
       "files": [
         {
           "path": "packages/core/src/plugin/provider/openai.ts",
@@ -52,7 +56,7 @@
         },
         {
           "path": "packages/ai/src/protocols/openai-responses.ts",
-          "sha256": "96cee1045495e61119f56fec13e7846677252f2bb6c64c05a53c1a3b3644f8e5"
+          "sha256": "cd79c1d73f91e7de468bbdf64de67b21d2e03df3ecd34832022f0a29413a706d"
         },
         {
           "path": "packages/ai/src/protocols/open-responses-continuation.ts",
@@ -72,7 +76,7 @@
         },
         {
           "path": "packages/core/src/provider.ts",
-          "sha256": "45cc3fab026fb626197af59c83a0bdfba7e04ffe3b5d3819bfcf3def585f16f4"
+          "sha256": "25f61874494c13fab9cc604acc5a8c894e7254561145083420d2ad9ce0d94d3a"
         },
         {
           "path": "packages/core/src/config/discovery.ts",
@@ -80,7 +84,11 @@
         },
         {
           "path": "packages/cli/src/server-process.ts",
-          "sha256": "4d6cfc459c379010eef4e6d01ac819a3db22333f0e13487aabe42fc7d436f017"
+          "sha256": "c7a191fc620a9ae6193b79015b3df3c0aed984c3d851214f8d1093cfaa1d9599"
+        },
+        {
+          "path": "packages/ai/src/protocols/open-responses.ts",
+          "sha256": "3239e4168e9a43b1e744f6eefc073d09102624b8ffdc0c3cc1f42bf755ba7c4f"
         }
       ],
       "npm_package": "@opencode/cli"

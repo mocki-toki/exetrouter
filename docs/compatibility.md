@@ -9,6 +9,7 @@ Supply your router endpoint, bearer token and an account-visible model. The setu
 | October 1, 2026 | Codex 0.159.3, OpenCode V2 2.0.21; Python openai 3.22.1, JavaScript openai 7.25.0 | Broader protocol/SDK matrix; SDK runs use mock upstream. |
 | October 2, 2026 | Codex 0.160.0, OpenCode V2 2.0.22 | Mock and real HTTP/WS tool cycles; public-ingress two-compaction/reopen/restart matrix. |
 | October 4, 2026 | OpenCode V1 1.18.34, V2 2.0.22 | Exported-provider model lists and mock tool cycles; V1 HTTP/SSE plus resume, V2 HTTP/SSE and WS. |
+| October 5, 2026 | Codex 0.160.0, OpenCode V2 2.0.23 | Synthetic HTTP/WS tool cycles, remote compaction, client reopen and router restart with client-carried ownership proofs; quota-switch continuations. |
 
 The [source manifest](protocol-sources.json) pins reviewed revisions. The [protocol audit](native-protocol-audit.md) records source-level contracts; [live-testing.md](live-testing.md) records measured runs, failed probes and request counts. Later versions need source review and new fixtures.
 
@@ -139,7 +140,7 @@ subprocess.run(["cargo", "test", "--locked", "--test", "responses",
 PY
 ```
 
-Four isolated profiles exercise Codex/OpenCode HTTP/WS with two mock accounts. Assertions verify tool execution/result, terminal completion, submissions, usage and primary transport. Codex WS warmup and OpenCode's auxiliary HTTP title are accounted separately. Mock HTTP 503 verifies one main submission; not all client recovery paths are covered.
+Four isolated profiles exercise Codex/OpenCode HTTP/WS with two mock accounts. Assertions verify tool execution/result, terminal completion, submissions, usage and primary transport. The proof fixture forces synthetic compaction, restarts the router and resumes each client process; encrypted context reaches the mock upstream without the router envelope, and normal continuations create no context-binding rows. Codex WS warmup and OpenCode's auxiliary HTTP title are accounted separately. Mock HTTP 503 verifies one main submission; not all client recovery paths are covered.
 
 ## SDK fixtures
 

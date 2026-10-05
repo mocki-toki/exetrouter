@@ -14,7 +14,7 @@ Use [GitHub private vulnerability reporting](https://github.com/mocki-toki/exetr
 | OAuth tokens | Encrypted with account-bound AEAD under a separate private key |
 | Personal metadata | Client-encrypted token names, account labels, notes, project names and dashboard preferences; user key never sent to service |
 | Usage | User/token IDs, validated model ID, numeric usage, fixed statuses, timings and request/response identifiers |
-| Conversation affinity | User-scoped HMAC digests and derived quota-transfer portability digests; bounded current WS history exists only in transient memory |
+| Conversation affinity | Legacy user-scoped HMAC digests and explicit transfer/portability overrides; new output uses client-carried authenticated envelopes. Bounded current WS history exists only in transient memory |
 | Subscription limits | Percentages, durations, reset/observation times and cooldowns |
 | Account identity | Operator-owned account metadata and display email extracted from encrypted issuer credentials |
 
@@ -43,3 +43,5 @@ Management exposes account identities, usage totals, model IDs and operational m
 Privacy regression tests exercise HTTP JSON, SSE, WebSocket, compaction, tool content, malformed JSON and upstream errors under `RUST_LOG=trace`. They search logs and persisted state for synthetic payload markers. Offline CI also audits tracked publication files and Cargo packaging. Runtime state, credentials, local logs and downloaded compatibility clients are excluded from Git and package allowlists.
 
 Use isolated profiles and synthetic prompts in debug/test tooling, never other users' content. When reporting a failure, include versions, transport, status and generated request ID. Do not attach body captures or complete native-client output. Real OAuth/inference/reset-credit tests are never run automatically by GitHub Actions.
+
+Client-carried context proofs encrypt user/account/expiry metadata with XChaCha20-Poly1305 under a domain-separated key derived from the existing HMAC key. Field-specific user-scoped HMACs authenticate the exact upstream value as associated data. A separate HMAC domain derives the 192-bit nonce from field kind, metadata and value so duplicate item events carry identical proofs. Foreign users, altered values, wrong field kinds and expired proofs fail before inference. Proofs are routing credentials: never log or persist their raw values. Transfer overrides remain digests only.

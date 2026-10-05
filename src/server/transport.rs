@@ -204,6 +204,7 @@ struct RequestLog {
     rejection_until: Option<i64>,
     user_id: i64,
     context_key: Arc<[u8]>,
+    context_expiry: i64,
     health_order: i64,
     authentication_rejected: bool,
     events_seen: u64,
@@ -281,6 +282,7 @@ impl RequestLog {
             rejection_until: None,
             user_id,
             context_key: state.key.clone(),
+            context_expiry: chrono::Utc::now().timestamp() + affinity::TTL,
             health_order,
             authentication_rejected: false,
             events_seen: 0,
@@ -360,29 +362,14 @@ impl RequestLog {
         }
         observed
     }
-    async fn remember(&self, output: &Value) -> Result<()> {
-        let digests = affinity::digests(output, &self.context_key, self.user_id)?;
-        if digests.is_empty() {
-            return Ok(());
-        }
-        let (user, account, generation) = (self.user_id, self.account_id, self.account_generation);
-        let saved = self
-            .db
-            .call(move |conn| {
-                affinity::save(
-                    conn,
-                    user,
-                    account,
-                    generation,
-                    &digests,
-                    chrono::Utc::now().timestamp(),
-                )
-            })
-            .await;
-        if saved.is_err() {
-            tracing::error!(event="context_binding_failed",request_id=%self.id);
-        }
-        saved
+    fn remember(&self, output: &mut Value) -> Result<()> {
+        affinity::wrap_output(
+            output,
+            &self.context_key,
+            self.user_id,
+            self.account_id,
+            self.context_expiry,
+        )
     }
     async fn finish(&mut self, status: &'static str, counters: Counters) -> Result<()> {
         if self.finalized {
@@ -432,28 +419,17 @@ impl RequestLog {
             reason=failure.reason,stage=failure.stage,
             transport_error_kind=failure.transport_error_kind,close_code=failure.close_code);
     }
-    async fn observe(&mut self, event: &Value) -> Result<bool> {
+    async fn observe(&mut self, event: &mut Value) -> Result<bool> {
         let received = chrono::Utc::now();
         let kind = event
             .get("type")
             .and_then(Value::as_str)
-            .ok_or_else(|| WsInterruption::new("upstream_event_type_missing"))?;
+            .ok_or_else(|| WsInterruption::new("upstream_event_type_missing"))?
+            .to_owned();
+        let kind = kind.as_str();
         self.last_event
             .observe(kind, received.timestamp_millis(), Instant::now());
         let now = received.timestamp();
-        for headers in [event.get("headers"), event.pointer("/response/headers")]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(headers) = headers.as_object() {
-                for (name, value) in headers {
-                    if name.eq_ignore_ascii_case("x-codex-turn-state") {
-                        self.remember_turn(value.as_str().ok_or("invalid upstream turn state")?)
-                            .await?;
-                    }
-                }
-            }
-        }
         // Quota metadata must not prevent finalizing known usage or forwarding
         // the terminal event if its separate storage operation fails.
         let observation = crate::quota::event(event, now);
@@ -528,56 +504,64 @@ impl RequestLog {
             let _ = self.health(None, "success").await;
         }
         let output = match kind {
-            "response.completed" | "response.incomplete" => event.pointer("/response/output"),
-            "response.output_item.added" | "response.output_item.done" => event.get("item"),
+            "response.completed" | "response.incomplete" => event.pointer_mut("/response/output"),
+            "response.output_item.added" | "response.output_item.done" => event.get_mut("item"),
             _ => None,
         };
         if let Some(output) = output {
-            self.remember(output).await?;
+            self.remember(output)?;
         }
         if matches!(
             kind,
             "response.created" | "response.completed" | "response.incomplete"
         ) {
-            if let Some(digest) = affinity::conversation_digest(
-                &event["response"]["conversation"],
-                &self.context_key,
-                self.user_id,
-            )? {
-                let (user, account, generation) =
-                    (self.user_id, self.account_id, self.account_generation);
-                self.db
-                    .call(move |conn| {
-                        affinity::save(
-                            conn,
-                            user,
-                            account,
-                            generation,
-                            &[digest],
-                            chrono::Utc::now().timestamp(),
-                        )
-                    })
-                    .await?;
+            if let Some(conversation) = event
+                .pointer_mut("/response/conversation")
+                .filter(|v| !v.is_null())
+            {
+                let id = if conversation.is_string() {
+                    conversation
+                } else {
+                    conversation
+                        .get_mut("id")
+                        .ok_or("invalid conversation reference")?
+                };
+                let raw = id.as_str().ok_or("invalid conversation reference")?;
+                *id = Value::String(affinity::issue(
+                    raw,
+                    affinity::Kind::Conversation,
+                    &self.context_key,
+                    self.user_id,
+                    self.account_id,
+                    self.context_expiry,
+                )?);
+            }
+        }
+        for path in ["/headers", "/response/headers"] {
+            if let Some(headers) = event.pointer_mut(path).and_then(Value::as_object_mut) {
+                for (name, value) in headers {
+                    if name.eq_ignore_ascii_case("x-codex-turn-state") {
+                        *value =
+                            Value::String(self.remember_turn(
+                                value.as_str().ok_or("invalid upstream turn state")?,
+                            )?);
+                    }
+                }
             }
         }
         Ok(status.is_some())
     }
 
-    async fn remember_turn(&self, value: &str) -> Result<()> {
-        let digest = affinity::turn_digest(value, &self.context_key, self.user_id)?;
-        let (user, account, generation) = (self.user_id, self.account_id, self.account_generation);
-        self.db
-            .call(move |conn| {
-                affinity::save(
-                    conn,
-                    user,
-                    account,
-                    generation,
-                    &[digest],
-                    chrono::Utc::now().timestamp(),
-                )
-            })
-            .await
+    fn remember_turn(&self, value: &str) -> Result<String> {
+        affinity::turn_digest(value, &self.context_key, self.user_id)?;
+        affinity::issue(
+            value,
+            affinity::Kind::Turn,
+            &self.context_key,
+            self.user_id,
+            self.account_id,
+            self.context_expiry,
+        )
     }
 }
 
@@ -680,6 +664,7 @@ enum ContextError {
     Missing,
     Conflict,
     Storage,
+    TransferFull,
 }
 impl ContextError {
     fn code(&self) -> &'static str {
@@ -688,6 +673,7 @@ impl ContextError {
             Self::Missing => "context_not_found",
             Self::Conflict => "context_account_mismatch",
             Self::Storage => "storage_unavailable",
+            Self::TransferFull => "context_transfer_storage_full",
         }
     }
     fn message(&self) -> &'static str {
@@ -700,10 +686,13 @@ impl ContextError {
                 "opaque context belongs to different accounts; send full text and tool context"
             }
             Self::Storage => "context binding storage unavailable",
+            Self::TransferFull => {
+                "context transfer storage full; wait for existing transfers to expire"
+            }
         }
     }
     fn response(&self) -> Response {
-        let storage = matches!(self, Self::Storage);
+        let storage = matches!(self, Self::Storage | Self::TransferFull);
         (if storage { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::BAD_REQUEST },Json(json!({"error":{"type":if storage {"storage_unavailable"} else {"invalid_request_error"},"code":self.code(),"message":self.message()}}))).into_response()
     }
 }
@@ -712,21 +701,36 @@ async fn context_account(
     identity: &Identity,
     payload: &Value,
 ) -> std::result::Result<(Option<i64>, bool), ContextError> {
-    let mut digests = affinity::digests(&payload["input"], &state.key, identity.user_id)
+    let now = chrono::Utc::now().timestamp();
+    affinity::digests(&payload["input"], &state.key, identity.user_id)
         .map_err(|_| ContextError::Invalid)?;
-    if let Some(digest) =
-        affinity::conversation_digest(&payload["conversation"], &state.key, identity.user_id)
-            .map_err(|_| ContextError::Invalid)?
-    {
-        digests.push(digest);
+    let mut refs = affinity::references(&payload["input"], &state.key, identity.user_id, now)
+        .map_err(|_| ContextError::Missing)?;
+    if !payload["conversation"].is_null() {
+        let id = payload["conversation"]
+            .as_str()
+            .or_else(|| payload["conversation"]["id"].as_str())
+            .ok_or(ContextError::Invalid)?;
+        refs.push(
+            affinity::reference(
+                id,
+                affinity::Kind::Conversation,
+                &state.key,
+                identity.user_id,
+                now,
+            )
+            .map_err(|_| ContextError::Missing)?,
+        );
     }
-    if digests.is_empty() {
+    if refs.is_empty() {
         return Ok((None, false));
     }
     let user = identity.user_id;
     match state
         .db
-        .call(move |conn| affinity::lookup(conn, user, &digests, chrono::Utc::now().timestamp()))
+        .call(move |conn| {
+            affinity::lookup_references(conn, user, &refs, chrono::Utc::now().timestamp())
+        })
         .await
         .map_err(|_| ContextError::Storage)?
     {
@@ -779,25 +783,38 @@ async fn transfer_context(
     identity: &Identity,
     payload: &mut Value,
     account: &Account,
-) -> Result<()> {
+) -> std::result::Result<(), ContextError> {
     if !payload["conversation"].is_null() {
-        return Err("saved conversation must remain on its owning account".into());
+        return Err(ContextError::Conflict);
     }
-    let digests = affinity::digests(&payload["input"], &state.key, identity.user_id)?;
+    let refs = affinity::references(
+        &payload["input"],
+        &state.key,
+        identity.user_id,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| ContextError::Missing)?;
     let (user, id, generation) = (identity.user_id, account.info.id, account.info.generation);
     state
         .db
         .call(move |conn| {
-            affinity::transfer(
+            affinity::transfer_references(
                 conn,
                 user,
                 id,
                 generation,
-                &digests,
+                &refs,
                 chrono::Utc::now().timestamp(),
             )
         })
-        .await?;
+        .await
+        .map_err(|err| {
+            if err.is::<affinity::TransferStorageFull>() {
+                ContextError::TransferFull
+            } else {
+                ContextError::Storage
+            }
+        })?;
     if let Some(metadata) = payload
         .get_mut("client_metadata")
         .and_then(Value::as_object_mut)
@@ -815,15 +832,21 @@ async fn turn_account(
     let Some(value) = turn else {
         return Ok(None);
     };
-    let digest = value
-        .to_str()
-        .ok()
-        .and_then(|value| affinity::turn_digest(value, &state.key, identity.user_id).ok())
-        .ok_or(ContextError::Invalid)?;
+    let value = value.to_str().map_err(|_| ContextError::Invalid)?;
+    let item = affinity::reference(
+        value,
+        affinity::Kind::Turn,
+        &state.key,
+        identity.user_id,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| ContextError::Missing)?;
     let user = identity.user_id;
     match state
         .db
-        .call(move |conn| affinity::lookup(conn, user, &[digest], chrono::Utc::now().timestamp()))
+        .call(move |conn| {
+            affinity::lookup_references(conn, user, &[item], chrono::Utc::now().timestamp())
+        })
         .await
     {
         Ok(affinity::Lookup::Account(account)) => Ok(Some(account)),
@@ -983,11 +1006,8 @@ pub(super) async fn http(
         }
     };
     if owner.is_some_and(|id| id != account.info.id) {
-        if transfer_context(&state, &identity, &mut payload, &account)
-            .await
-            .is_err()
-        {
-            return ContextError::Storage.response();
+        if let Err(err) = transfer_context(&state, &identity, &mut payload, &account).await {
+            return err.response();
         }
         turn_state = None;
     }
@@ -1022,13 +1042,18 @@ pub(super) async fn http(
     let session = cache.identity_session;
     let thread = cache.thread;
     let stopped = state.stopped.clone();
+    let dispatch_payload =
+        match affinity::upstream_payload(&payload, &state.key, identity.user_id, 0) {
+            Ok(value) => value,
+            Err(_) => return ContextError::Missing.response(),
+        };
     let socket = if chat_request {
         tokio::select! {
             _=wait_for_stop(stopped.clone())=> {
                 let _=log.finish("interrupted", Counters::default()).await;
                 return error(StatusCode::SERVICE_UNAVAILABLE, "service_stopping", "service stopping");
             },
-            socket=upstream.websocket(&account,(&session,&thread),true,&payload)=>match socket {
+            socket=upstream.websocket(&account,(&session,&thread),true,&dispatch_payload)=>match socket {
                 Ok((socket, _headers))=>Some(socket),
                 Err(crate::upstream::SocketError::Cooldown(until))=> {
                     let _=log.finish("local_rejected", Counters::default()).await;
@@ -1083,7 +1108,7 @@ pub(super) async fn http(
             .remove("stream");
         let sent = tokio::select! {
             _=wait_for_stop(stopped.clone())=>Err(WsInterruption::new("service_stopping")),
-            sent=send_upstream(&mut socket,UpstreamMessage::Text(payload.to_string().into()))=>sent,
+            sent=send_upstream(&mut socket,UpstreamMessage::Text(affinity::upstream_payload(&payload, &state.key, identity.user_id, 0).expect("validated context").to_string().into()))=>sent,
         };
         if let Err(failure) = sent {
             log.ws_interrupted(&failure.at("request_write"));
@@ -1103,9 +1128,19 @@ pub(super) async fn http(
     } else {
         let mut excluded = Vec::new();
         let response = loop {
+            let dispatch_payload =
+                match affinity::upstream_payload(&payload, &state.key, identity.user_id, 0) {
+                    Ok(value) => value,
+                    Err(_) => return ContextError::Missing.response(),
+                };
+            let dispatch_turn = turn_state
+                .as_ref()
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| affinity::upstream_turn(v, &state.key, identity.user_id, 0).ok())
+                .and_then(|v| HeaderValue::from_str(&v).ok());
             let response = tokio::select! {
                 _=wait_for_stop(stopped.clone())=>Err("service stopping".into()),
-                response=upstream.post(&account,path,&payload,Some((&session,&thread)),log.health_order,turn_state.as_ref())=>response,
+                response=upstream.post(&account,path,&dispatch_payload,Some((&session,&thread)),log.health_order,dispatch_turn.as_ref())=>response,
             };
             let response = match response {
                 Ok(response) => response,
@@ -1165,11 +1200,10 @@ pub(super) async fn http(
                             .select_excluding(&model, None, Some(identity.user_id), &excluded)
                             .await
                         {
-                            if transfer_context(&state, &identity, &mut payload, &alternate)
-                                .await
-                                .is_err()
+                            if let Err(err) =
+                                transfer_context(&state, &identity, &mut payload, &alternate).await
                             {
-                                return ContextError::Storage.response();
+                                return err.response();
                             }
                             account = alternate;
                             turn_state = None;
@@ -1260,34 +1294,11 @@ pub(super) async fn http(
             );
         }
         if let Some(value) = response.headers().get("x-codex-turn-state") {
-            if let Some(digest) = value
+            response_turn_state = value
                 .to_str()
                 .ok()
-                .and_then(|value| affinity::turn_digest(value, &state.key, identity.user_id).ok())
-            {
-                let (user, account_id, generation) =
-                    (identity.user_id, account.info.id, account.info.generation);
-                // Continue draining/accounting even when the binding cannot be saved.
-                if state
-                    .db
-                    .call(move |conn| {
-                        affinity::save(
-                            conn,
-                            user,
-                            account_id,
-                            generation,
-                            &[digest],
-                            chrono::Utc::now().timestamp(),
-                        )
-                    })
-                    .await
-                    .is_ok()
-                {
-                    response_turn_state = Some(value.clone());
-                } else {
-                    tracing::error!(event="turn_binding_failed",request_id=%log.id);
-                }
-            }
+                .and_then(|v| log.remember_turn(v).ok())
+                .and_then(|v| HeaderValue::from_str(&v).ok());
         }
         tracing::info!(event="upstream_stream_opened",request_id=%log.id,turn_state_returned=response_turn_state.is_some());
         Source::Http(response)
@@ -1330,6 +1341,7 @@ pub(super) async fn http(
                     let ended = match &mut frame.event {
                         Some(event) => {
                             let ended=log.observe(event).await?;
+                            frame.wire = format!("event: {}\ndata: {}\n\n", event["type"].as_str().unwrap_or("error"), event).into_bytes();
                             if let Some(output)=&mut output {output.observe(event)?;}
                             ended
                         },
@@ -1807,10 +1819,10 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         Some(Ok(UpstreamMessage::Pong(_))) => None,
                         Some(Ok(UpstreamMessage::Text(text))) => {
                             let event = serde_json::from_str::<Value>(&text).ok();
-                            if let Some(event) = event.filter(|event| matches!(event["type"].as_str(),
+                            if let Some(mut event) = event.filter(|event| matches!(event["type"].as_str(),
                                 Some("ping" | "codex.rate_limits" | "codex.response.metadata" | "response.metadata" | "responsesapi.websocket_timing"))) {
                                 if let Some(log) = &mut idle_log {
-                                    if log.observe(&event).await.is_err() {
+                                    if log.observe(&mut event).await.is_err() {
                                         bound.idle_closed(&WsInterruption::new("event_observation_failed"));
                                         break 'frames;
                                     }
@@ -1820,7 +1832,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                         bound.idle_closed(&WsInterruption::new("idle_metadata_capacity_exceeded"));
                                         break 'frames;
                                     }
-                                    bound.pending_metadata = Some(text.to_string());
+                                    bound.pending_metadata = Some(event.to_string());
                                 } else if send_client(&mut client, text.to_string()).await.is_err() {
                                     break 'frames;
                                 }
@@ -2189,7 +2201,13 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                             identity.user_id,
                                             &model,
                                             (native_session, thread),
-                                            &mut payload,
+                                            &mut affinity::upstream_payload(
+                                                &payload,
+                                                &state.key,
+                                                identity.user_id,
+                                                0,
+                                            )
+                                            .expect("validated context"),
                                         )
                                         .await
                                 } else {
@@ -2200,28 +2218,30 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                             &account,
                                             (native_session, thread),
                                             false,
-                                            &payload,
+                                            &affinity::upstream_payload(
+                                                &payload,
+                                                &state.key,
+                                                identity.user_id,
+                                                0,
+                                            )
+                                            .expect("validated context"),
                                         )
                                         .await
                                         .map(|(socket, metadata)| (account, socket, metadata))
                                 };
                                 match replacement {
                                     Ok((account, socket, metadata)) => {
-                                        if transfer_context(
+                                        if let Err(err) = transfer_context(
                                             &state,
                                             &identity,
                                             &mut payload,
                                             &account,
                                         )
                                         .await
-                                        .is_err()
                                         {
                                             let _ = send_client(
                                                 &mut client,
-                                                ws_error(
-                                                    "storage_unavailable",
-                                                    "context transfer unavailable",
-                                                ),
+                                                ws_error(err.code(), err.message()),
                                             )
                                             .await;
                                             continue 'frames;
@@ -2370,7 +2390,8 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         identity.user_id,
                         &model,
                         (&cache.identity_session, &cache.thread),
-                        &mut payload,
+                        &mut affinity::upstream_payload(&payload, &state.key, identity.user_id, 0)
+                            .expect("validated context"),
                     )
                     .await
                 {
@@ -2411,15 +2432,10 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     }
                 };
                 if initial_id != account.info.id {
-                    if transfer_context(&state, &identity, &mut payload, &account)
-                        .await
-                        .is_err()
+                    if let Err(err) =
+                        transfer_context(&state, &identity, &mut payload, &account).await
                     {
-                        let _ = send_client(
-                            &mut client,
-                            ws_error("storage_unavailable", "context transfer unavailable"),
-                        )
-                        .await;
+                        let _ = send_client(&mut client, ws_error(err.code(), err.message())).await;
                         continue 'frames;
                     }
                     frame_turn = None;
@@ -2563,7 +2579,8 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                             upstream_thread.as_deref().expect("bound thread"),
                         ),
                         false,
-                        &payload,
+                        &affinity::upstream_payload(&payload, &state.key, identity.user_id, 0)
+                            .expect("validated context"),
                     )
                     .await
                 {
@@ -2637,10 +2654,10 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         let turn = value.to_str().map_err(|_| {
                             WsInterruption::new("invalid_turn_state").at("handshake_metadata")
                         })?;
-                        log.remember_turn(turn).await.map_err(|_| {
+                        let turn = log.remember_turn(turn).map_err(|_| {
                             WsInterruption::new("turn_binding_failed").at("handshake_metadata")
                         })?;
-                        safe.insert("x-codex-turn-state", value.clone());
+                        safe.insert("x-codex-turn-state", HeaderValue::from_str(&turn).map_err(|_| WsInterruption::new("invalid_turn_state"))?);
                     }
                     if !safe.is_empty() {
                         let headers = safe.iter().map(|(name, value)| {
@@ -2655,7 +2672,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     finished_requests=*finished,client_connection_id=%client_log.id.0,
                     frame_sequence=client_log.frames,preparation_ms=frame_received.elapsed().as_millis() as u64);
                 let write_started = Instant::now();
-                if let Err(failure) = send_upstream(socket, UpstreamMessage::Text(payload.to_string().into())).await {
+                if let Err(failure) = send_upstream(socket, UpstreamMessage::Text(affinity::upstream_payload(&payload, &state.key, identity.user_id, 0).map_err(|_| WsInterruption::new("context_proof_invalid"))?.to_string().into())).await {
                     let _ = log.health(Some(crate::health::Rejection::Temporary), "transport").await;
                     return Err(failure.at("request_write"));
                 }
@@ -2756,7 +2773,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     let pre_generation_quota = safe_to_switch && payload["conversation"].is_null() && !log.created && quota_refusal(&event);
                     safe_to_switch &= matches!(event["type"].as_str(), Some("ping" | "codex.rate_limits" | "codex.response.metadata" | "response.metadata" | "responsesapi.websocket_timing"));
                     liveness.response_started |= !safe_to_switch;
-                    let terminal = log.observe(&event).await
+                    let terminal = log.observe(&mut event).await
                         .map_err(|error| {
                             error.downcast::<WsInterruption>()
                                 .map(|failure| failure.at("event_observation"))
@@ -2773,7 +2790,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     send_client(&mut client, if log.authentication_rejected {
                         ws_error("upstream_authentication_error", "upstream credentials rejected; reconnect with full context using a separate new request")
                     } else {
-                        text.to_string()
+                        event.to_string()
                     }).await.map_err(|failure| failure.at("event_write"))?;
                     // OpenCode's sequential driver rejects response.* notifications
                     // before response.created; Codex also accepts metadata here.
@@ -2853,20 +2870,23 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                             .expect("bound session"),
                                         upstream_thread.as_deref().expect("bound thread"),
                                     ),
-                                    &mut payload,
+                                    &mut affinity::upstream_payload(
+                                        &payload,
+                                        &state.key,
+                                        identity.user_id,
+                                        0,
+                                    )
+                                    .expect("validated context"),
                                 )
                                 .await
                             {
-                                if transfer_context(&state, &identity, &mut payload, &alternate)
-                                    .await
-                                    .is_err()
+                                if let Err(err) =
+                                    transfer_context(&state, &identity, &mut payload, &alternate)
+                                        .await
                                 {
                                     let _ = send_client(
                                         &mut client,
-                                        ws_error(
-                                            "storage_unavailable",
-                                            "context transfer unavailable",
-                                        ),
+                                        ws_error(err.code(), err.message()),
                                     )
                                     .await;
                                     break 'frames;

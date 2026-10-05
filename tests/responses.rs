@@ -23,6 +23,22 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, Message},
 };
 
+// Strip the client-carried envelope only for assertions about exact upstream
+// forwarding. Authentication, tampering and expiry are exercised separately.
+fn upstream_value(value: &Value) -> Value {
+    match value {
+        Value::String(s) if s.starts_with("exrctx1.") => json!(s.splitn(3, '.').nth(2).unwrap()),
+        Value::Array(values) => Value::Array(values.iter().map(upstream_value).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(k, v)| (k.clone(), upstream_value(v)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
 struct Fixture {
     dir: TempDir,
     db: Database,
@@ -37,6 +53,29 @@ struct Fixture {
     mock_server: JoinHandle<()>,
 }
 impl Fixture {
+    async fn bind_legacy(&self, raw: String, turn: bool) {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&[1; 32]).unwrap();
+        mac.update(if turn {
+            b"exetrouter/turn-affinity/v1\0"
+        } else {
+            b"exetrouter/context-affinity/v1\0"
+        });
+        mac.update(&1_i64.to_be_bytes());
+        mac.update(raw.as_bytes());
+        let digest = mac.finalize().into_bytes().to_vec();
+        self.db
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO context_bindings VALUES(1,?1,1,?2)",
+                    rusqlite::params![digest, chrono::Utc::now().timestamp() + 86400],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
     async fn expire_health(&self) {
         self.db
             .call(|conn| {
@@ -533,7 +572,7 @@ async fn ws_turn_metadata_pins_http_and_new_ws_continuations_without_leaking_hea
     assert_eq!(
         fixture.mock.requests.lock().unwrap().last().unwrap()["client_metadata"]
             ["x-codex-turn-state"],
-        state
+        upstream_value(&json!(state))
     );
     let accounts = fixture.mock.request_accounts.lock().unwrap().clone();
     assert!(accounts.iter().all(|account| account == &accounts[0]));
@@ -2318,11 +2357,14 @@ async fn native_custom_namespace_phase_images_and_opaque_items_keep_order_and_ow
         .await
         .unwrap();
     let terminal = terminal(&mut socket).await;
-    assert_eq!(terminal["response"]["output"], json!(output));
+    assert_eq!(
+        upstream_value(&terminal["response"]["output"]),
+        upstream_value(&json!(output))
+    );
     let calls = fixture.mock.requests.lock().unwrap().clone();
     assert_eq!(calls[0]["input"][0], prefix);
     assert_eq!(calls[0]["input"][1], body["input"][1]);
-    assert_eq!(calls[1]["input"], body["input"]);
+    assert_eq!(calls[1]["input"], upstream_value(&body["input"]));
     let accounts = fixture.mock.request_accounts.lock().unwrap().clone();
     assert_eq!(accounts[0], accounts[1]);
     socket.close(None).await.unwrap();
@@ -2966,7 +3008,7 @@ async fn pool_compaction_routes_http_and_new_ws_to_its_account_after_restart() {
     );
     fixture.db.call(|conn| {
         assert_eq!(conn.query_row("PRAGMA user_version",[],|row|row.get::<_,i64>(0))?,exetrouter::store::SCHEMA_VERSION as i64);
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM context_bindings WHERE length(digest)=32 AND account_id=2",[],|row|row.get::<_,i64>(0))?,2);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM context_bindings WHERE length(digest)=32 AND account_id=2",[],|row|row.get::<_,i64>(0))?,0);
         oauth::disable(conn,2)?; Ok(())
     }).await.unwrap();
     body.as_object_mut().unwrap().remove("type");
@@ -3060,6 +3102,16 @@ async fn pool_context_is_user_scoped_and_rejects_unknown_mixed_and_expired_items
         .unwrap();
     assert_eq!(reply.status(), 200);
     let _ = reply.json::<Value>().await.unwrap();
+    body["input"] = upstream_value(&body["input"]);
+    fixture
+        .bind_legacy(
+            body["input"][0]["encrypted_content"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            false,
+        )
+        .await;
     fixture
         .db
         .call(|conn| {
@@ -3284,16 +3336,18 @@ async fn streamed_opaque_output_is_bound_before_forwarding_and_survives_disconne
 }
 
 #[tokio::test]
-async fn context_storage_failure_preserves_known_usage_and_never_returns_an_unbound_terminal() {
+async fn full_legacy_registry_does_not_interrupt_new_proofs_on_any_transport() {
     for surface in ["compact", "json", "sse", "ws"] {
         let fixture = Fixture::start(false).await;
-        fixture.add_account(&["gpt-test"], false).await;
-        fixture.db.call(|conn| { conn.execute_batch("CREATE TRIGGER reject_context BEFORE INSERT ON context_bindings BEGIN SELECT RAISE(ABORT,'private storage failure'); END;")?; Ok(()) }).await.unwrap();
+        fixture.db.call(|conn| {
+            conn.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<65536) INSERT INTO context_bindings SELECT 1,CAST(printf('%032d',x) AS BLOB),1,9999999999 FROM n; CREATE TRIGGER reject_context BEFORE INSERT ON context_bindings BEGIN SELECT RAISE(ABORT,'private storage failure'); END;")?;
+            Ok(())
+        }).await.unwrap();
         let wire = if surface == "compact" {
             let reply = fixture
-                .compact(json!({"model":"gpt-test","input":[],"test_mode":"opaque_terminal"}))
+                .compact(json!({"model":"gpt-test","input":[]}))
                 .await;
-            assert_eq!(reply.status(), 502);
+            assert_eq!(reply.status(), 200);
             reply.text().await.unwrap()
         } else if surface == "ws" {
             let mut socket = fixture.ws().await;
@@ -3305,30 +3359,108 @@ async fn context_storage_failure_preserves_known_usage_and_never_returns_an_unbo
                 .await
                 .unwrap();
             let event = terminal(&mut socket).await;
-            assert_eq!(event["error"]["code"], "upstream_interrupted");
+            assert_eq!(event["type"], "response.completed");
+            socket.close(None).await.unwrap();
             event.to_string()
         } else {
             let mut body = request();
             body["test_mode"] = json!("opaque_terminal");
             body["stream"] = json!(surface == "sse");
             let reply = fixture.post(body).await;
-            assert_eq!(reply.status(), if surface == "sse" { 200 } else { 502 });
+            assert_eq!(reply.status(), 200);
             reply.text().await.unwrap()
         };
-        assert!(!wire.contains("synthetic-reasoning-"));
+        let carried: Value = if surface == "sse" {
+            wire.lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|event| event["type"] == "response.completed")
+                .unwrap()["response"]["output"]
+                .clone()
+        } else {
+            let value: Value = serde_json::from_str(&wire).unwrap();
+            if surface == "ws" {
+                value["response"]["output"].clone()
+            } else {
+                value["output"].clone()
+            }
+        };
+        let mut continuation = request();
+        continuation["stream"] = json!(false);
+        continuation["input"] = carried;
+        assert_eq!(fixture.post(continuation).await.status(), 200);
+        assert!(wire.contains("exrctx1."));
         assert!(!wire.contains("private storage failure"));
-        assert!(!wire.contains("response.completed"));
-        let rows = fixture.rows().await;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["status"], "completed");
-        assert_eq!(rows[0]["input"], if surface == "compact" { 4 } else { 10 });
-        assert_eq!(
-            fixture.mock.requests.lock().unwrap().len()
-                + fixture.mock.compactions.lock().unwrap().len(),
-            1
-        );
+        assert!(!wire.contains("upstream_interrupted"));
+        assert_eq!(fixture.rows().await[0]["status"], "completed");
+        fixture
+            .db
+            .call(|conn| {
+                assert_eq!(
+                    conn.query_row("SELECT COUNT(*) FROM context_bindings", [], |r| r
+                        .get::<_, i64>(0))?,
+                    65536
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
         fixture.stop().await;
     }
+}
+
+#[tokio::test]
+async fn full_transfer_registry_rejects_before_replacement_generation() {
+    let fixture = Fixture::start(false).await;
+    fixture.add_account(&["gpt-test"], false).await;
+    let checkpoint = fixture
+        .compact(json!({"model":"gpt-test","input":[]}))
+        .await
+        .json::<Value>()
+        .await
+        .unwrap()["output"]
+        .clone();
+    fixture.db.call(|conn| {
+        conn.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<65536) INSERT INTO context_bindings SELECT 1,CAST(printf('%032d',x) AS BLOB),1,9999999999 FROM n;")?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute("INSERT INTO oauth_quota_windows(account_id,kind,used_percent,window_minutes,reset_at,observed_at,request_order) VALUES(1,'primary',100,300,?1,?2,0)",rusqlite::params![now+300,now])?;
+        Ok(())
+    }).await.unwrap();
+    let mut body = request();
+    body["input"] = checkpoint;
+    body["stream"] = json!(false);
+    let reply = fixture.post(body.clone()).await;
+    assert_eq!(reply.status(), 503);
+    assert_eq!(
+        reply.json::<Value>().await.unwrap()["error"]["code"],
+        "context_transfer_storage_full"
+    );
+    body["type"] = json!("response.create");
+    let mut socket = fixture.ws().await;
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal(&mut socket).await["error"]["code"],
+        "context_transfer_storage_full"
+    );
+    assert!(fixture.mock.requests.lock().unwrap().is_empty());
+    assert_eq!(fixture.rows().await.len(), 1);
+    fixture
+        .db
+        .call(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM context_bindings", [], |r| r
+                    .get::<_, i64>(0))?,
+                65536
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    socket.close(None).await.unwrap();
+    fixture.stop().await;
 }
 
 #[tokio::test]
@@ -3938,6 +4070,9 @@ async fn websocket_proactively_retires_idle_upstream_without_losing_client_conte
     assert!(client_pings >= 2);
     assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
     body["previous_response_id"] = first["response"]["id"].clone();
+    fixture
+        .bind_legacy("private-synthetic-ws-turn-state".into(), true)
+        .await;
     body["client_metadata"] = json!({"x-codex-turn-state":"private-synthetic-ws-turn-state"});
     body["input"] =
         json!([{"role":"user","content":"synthetic continuation after idle retirement"}]);
@@ -4035,7 +4170,7 @@ async fn websocket_defers_idle_metadata_until_the_next_response_created() {
     let metadata: Value = serde_json::from_str(&metadata).unwrap();
     assert_eq!(metadata["type"], "response.metadata");
     let state = metadata["headers"]["x-codex-turn-state"].clone();
-    assert_eq!(state, "private-synthetic-idle-turn-state");
+    assert_eq!(upstream_value(&state), "private-synthetic-idle-turn-state");
     let second = terminal(&mut socket).await;
     assert_eq!(second["type"], "response.completed");
     body["previous_response_id"] = second["response"]["id"].clone();
@@ -4294,8 +4429,18 @@ async fn current_clients_complete_tool_cycles_over_http_and_websocket() {
         ("opencode", false),
         ("opencode", true),
     ] {
-        let fixture = Fixture::start(false).await;
+        let mut fixture = Fixture::start(false).await;
+        *fixture.mock.mode.lock().unwrap() = "native_proofs".into();
+        fixture.first_profile(&["gpt-test"], "native_proofs");
         fixture.add_account(&["gpt-test"], false).await;
+        fixture
+            .mock
+            .accounts
+            .lock()
+            .unwrap()
+            .get_mut("upstream-account-2")
+            .unwrap()
+            .mode = "native_proofs".into();
         fixture.mock.tools.store(true, Ordering::SeqCst);
         // Real handshake headers must be emitted after created for both clients.
         fixture
@@ -4315,7 +4460,10 @@ async fn current_clients_complete_tool_cycles_over_http_and_websocket() {
             directory: fixture.dir.path(),
             prompt: "Run the local compatibility fixture and report the result.",
         }
-        .execute()
+        .continued(&native::Continuation {
+            token_limit: 10000,
+            resume: false,
+        })
         .await
         .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -4334,6 +4482,67 @@ async fn current_clients_complete_tool_cycles_over_http_and_websocket() {
             output.status,
             native::diagnostic(&output.stdout)
         );
+        fixture.restart().await;
+        let reopened = native::Run {
+            binary: if client == "codex" { &codex } else { &opencode },
+            client,
+            url: &probe.url,
+            model: "gpt-test",
+            bearer: &fixture.secret,
+            websocket,
+            directory: fixture.dir.path(),
+            prompt: "Continue the synthetic compatibility fixture.",
+        }
+        .continued(&native::Continuation {
+            token_limit: 10000,
+            resume: true,
+        })
+        .await
+        .unwrap();
+        assert!(
+            reopened.status.success()
+                && String::from_utf8_lossy(&reopened.stdout).contains("EXETROUTER_SMOKE_OK"),
+            "{client} reopen failed: {}",
+            native::diagnostic(&reopened.stdout)
+        );
+        assert!(
+            !fixture.mock.compactions.lock().unwrap().is_empty(),
+            "{client} websocket={websocket} did not compact"
+        );
+        assert!(
+            fixture
+                .mock
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call["input"]
+                    .to_string()
+                    .contains("synthetic-encrypted-state-")
+                    || call["input"]
+                        .to_string()
+                        .contains("synthetic-native-proof-")),
+            "{client} did not carry opaque context"
+        );
+        assert!(fixture
+            .mock
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| !call.to_string().contains("exrctx1.")));
+        fixture
+            .db
+            .call(|conn| {
+                assert_eq!(
+                    conn.query_row("SELECT COUNT(*) FROM context_bindings", [], |r| r
+                        .get::<_, i64>(0))?,
+                    0
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
         let calls = fixture.mock.requests.lock().unwrap().clone();
         let tools=calls.iter().filter_map(|call|call.get("tools")).flat_map(|tools|tools.as_array().into_iter().flatten()).map(|tool|json!({"name":tool["name"],"type":tool["type"],"nested":tool.get("tools").and_then(Value::as_array).map(|tools|tools.iter().map(|tool|tool["name"].clone()).collect::<Vec<_>>())})).collect::<Vec<_>>();
         let outputs = calls
@@ -4343,8 +4552,9 @@ async fn current_clients_complete_tool_cycles_over_http_and_websocket() {
             .filter(|item| item["type"] == "function_call_output")
             .cloned()
             .collect::<Vec<_>>();
+        let compactions = fixture.mock.compactions.lock().unwrap().clone();
         assert!(
-            calls.iter().any(
+            calls.iter().chain(compactions.iter().map(|(_, body)| body)).any(
                 |call| call
                     .get("input")
                     .and_then(Value::as_array)
@@ -4375,6 +4585,7 @@ async fn current_clients_complete_tool_cycles_over_http_and_websocket() {
         );
         assert!(
             rows.iter().all(|row| row["transport"] == expected
+                || (row["surface"] == "responses_compact" && row["transport"] == "http_sse")
                 || (client == "opencode" && websocket && row["transport"] == "http_sse")),
             "{client} used an unexpected transport: {rows:?}"
         );
@@ -4924,7 +5135,10 @@ async fn turn_state_survives_http_continuation_and_pins_only_its_owner_account()
     assert!(second.text().await.unwrap().contains("response.completed"));
     assert_eq!(
         fixture.mock.turn_states.lock().unwrap().as_slice(),
-        &[None, Some(state.clone())]
+        &[
+            None,
+            Some(upstream_value(&json!(state)).as_str().unwrap().to_owned())
+        ]
     );
     let accounts = fixture.mock.request_accounts.lock().unwrap().clone();
     assert_eq!(accounts[0], accounts[1]);
@@ -4946,6 +5160,8 @@ async fn turn_state_survives_http_continuation_and_pins_only_its_owner_account()
         assert!(error.contains("context_not_found"));
         assert!(!error.contains(&value));
     }
+    let state = upstream_value(&json!(state)).as_str().unwrap().to_owned();
+    fixture.bind_legacy(state.clone(), true).await;
     fixture
         .db
         .call(|conn| {
@@ -4998,7 +5214,7 @@ async fn encrypted_function_arguments_preserve_tool_owner_and_reject_foreign_rep
     assert!(second.json::<Value>().await.unwrap()["output"].is_array());
     assert_eq!(
         fixture.mock.requests.lock().unwrap()[1]["input"][0]["encrypted_function_args"],
-        call["encrypted_function_args"]
+        upstream_value(&call["encrypted_function_args"])
     );
     let accounts = fixture.mock.request_accounts.lock().unwrap().clone();
     assert_eq!(accounts[0], accounts[1]);
@@ -5157,17 +5373,7 @@ async fn exhausted_subscription_moves_known_checkpoint_without_rewriting_it_or_e
         .await
         .unwrap()["output"][0]
         .clone();
-    let expiry = fixture
-        .db
-        .call(|conn| {
-            Ok(conn.query_row(
-                "SELECT expires_at FROM context_bindings LIMIT 1",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?)
-        })
-        .await
-        .unwrap();
+    let expiry = chrono::Utc::now().timestamp() + 86400;
     fixture.db.call(|conn| {
         let now = chrono::Utc::now().timestamp();
         conn.execute("INSERT INTO oauth_quota_windows(account_id,kind,used_percent,window_minutes,reset_at,observed_at,request_order) VALUES(1,'primary',100,300,?1,?2,0)",rusqlite::params![now+300,now])?;
@@ -5183,7 +5389,7 @@ async fn exhausted_subscription_moves_known_checkpoint_without_rewriting_it_or_e
     );
     assert_eq!(
         fixture.mock.requests.lock().unwrap()[0]["input"][0],
-        checkpoint
+        upstream_value(&checkpoint)
     );
     fixture
         .db
@@ -5193,7 +5399,8 @@ async fn exhausted_subscription_moves_known_checkpoint_without_rewriting_it_or_e
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            assert_eq!((owner, actual), (2, expiry));
+            assert_eq!(owner, 2);
+            assert!((expiry - 2..=expiry).contains(&actual));
             Ok(())
         })
         .await
@@ -5348,7 +5555,7 @@ async fn lite_quota_transfer_preserves_prefix_encrypted_tool_state_and_new_accou
     assert!(observed_limit);
     let forwarded = fixture.mock.requests.lock().unwrap().clone();
     assert_eq!(forwarded[1]["input"][0], prefix);
-    assert_eq!(forwarded[1]["input"][2], call);
+    assert_eq!(forwarded[1]["input"][2], upstream_value(&call));
     assert!(forwarded[1].get("previous_response_id").is_none());
     assert_eq!(
         forwarded[0]["prompt_cache_key"],
@@ -5450,15 +5657,10 @@ async fn saved_conversations_are_user_owned_pinned_and_never_migrate_on_quota() 
     initial["stream"] = json!(false);
     let reply = fixture.post(initial).await;
     assert_eq!(reply.status(), 200);
-    assert_eq!(
-        reply.json::<Value>().await.unwrap()["conversation"]["id"],
-        "conv_synthetic_owned"
-    );
+    let conversation_id = reply.json::<Value>().await.unwrap()["conversation"]["id"].clone();
+    assert_eq!(upstream_value(&conversation_id), "conv_synthetic_owned");
     let first = fixture.mock.request_accounts.lock().unwrap()[0].clone();
-    for conversation in [
-        json!("conv_synthetic_owned"),
-        json!({"id":"conv_synthetic_owned"}),
-    ] {
+    for conversation in [conversation_id.clone(), json!({"id":conversation_id})] {
         let mut body = request();
         body["stream"] = json!(false);
         body["conversation"] = conversation.clone();
@@ -5476,7 +5678,7 @@ async fn saved_conversations_are_user_owned_pinned_and_never_migrate_on_quota() 
         );
         assert_eq!(
             fixture.mock.requests.lock().unwrap().last().unwrap()["conversation"],
-            conversation
+            upstream_value(&conversation)
         );
     }
     let mut unknown = request();
@@ -5502,7 +5704,7 @@ async fn saved_conversations_are_user_owned_pinned_and_never_migrate_on_quota() 
         .await
         .unwrap();
     let mut stolen = request();
-    stolen["conversation"] = json!("conv_synthetic_owned");
+    stolen["conversation"] = conversation_id.clone();
     let rejected = reqwest::Client::new()
         .post(format!("{}/v1/responses", fixture.url))
         .bearer_auth(foreign_token)
@@ -5519,7 +5721,7 @@ async fn saved_conversations_are_user_owned_pinned_and_never_migrate_on_quota() 
     fixture.restart().await;
     let mut owned = request();
     owned["stream"] = json!(false);
-    owned["conversation"] = json!("conv_synthetic_owned");
+    owned["conversation"] = conversation_id.clone();
     assert_eq!(fixture.post(owned.clone()).await.status(), 200);
     let mut socket = fixture.ws().await;
     let mut frame = owned.clone();
@@ -5675,7 +5877,7 @@ async fn soft_threshold_migrates_checkpoint_forks_without_replaying_or_losing_ow
         .lock()
         .unwrap()
         .iter()
-        .all(|request| request["input"][0] == checkpoint));
+        .all(|request| request["input"][0] == upstream_value(&checkpoint)));
     assert_eq!(fixture.rows().await.len(), 3);
     fixture.restart().await;
     assert_eq!(fixture.post(body).await.status(), 200);
