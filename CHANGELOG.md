@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2
+
+- Raise the bounded opaque-context snapshot limit from 128 to 16,384 unique values so long native histories can continue before compaction. Preserve ownership proofs, account affinity and request-size limits, and avoid quadratic reference deduplication.
+- Add regression coverage for long reasoning/tool histories, foreign-user rejection and the exact snapshot boundary. No database schema change is required.
+
 ## 0.5.1
 
 - Wait for modal dismissal in terminal integration tests before sending subsequent input, preventing Escape/character races on macOS runners.
