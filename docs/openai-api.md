@@ -96,6 +96,7 @@ Compact appends `compaction_trigger` to one Responses SSE request and projects `
 
 - `previous_response_id` is supported only for responses owned by the current WS. HTTP/new-socket previous IDs are unsupported. Bearer validity is checked on every `response.create`.
 - `encrypted_content` and native `encrypted_function_args` carry authenticated opaque envelopes; empty argument arrays are valid. The upstream receives the original values after verification. Proofs bind values to their user and issuing account for 24 hours without per-output database rows. Raw values without a router proof are rejected even when their digests remain stored. Unknown/foreign/tampered/expired input returns `context_not_found`; conflicting untransferred owners return `context_account_mismatch`.
+- A context snapshot accepts up to 16,384 unique opaque values, including encrypted tool arguments, within the 16 MiB request limit. Duplicate values count once per field kind. Larger snapshots must be compacted.
 - Saved conversation IDs must have been issued to the same router user. Authenticated envelopes pin them to the owning account for 24 hours. Unknown/foreign/expired IDs fail before inference. Saved conversations cannot migrate because backend-owned history is unavailable to the router.
 - Quota or configured soft-threshold transfer requires complete current context and preserves authorization across concurrent forks. See [account-pool recovery](account-pool.md#failure-behavior) for bounds.
 

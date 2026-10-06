@@ -12,7 +12,10 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const TTL: i64 = 24 * 60 * 60;
-const ITEMS: usize = 128;
+// Long native histories can contain one opaque reasoning item per turn and
+// multiple encrypted tool arguments. Keep references bounded while allowing
+// one full snapshot to fit the per-user transfer budget (two rows per item).
+const ITEMS: usize = 16384;
 // Only explicit quota-transfer overrides occupy the registry.
 const PER_USER: i64 = 32768;
 const TOTAL: i64 = 65536;
@@ -214,13 +217,11 @@ pub(crate) fn references(value: &Value, key: &[u8], user: i64, now: i64) -> Resu
         key: &[u8],
         user: i64,
         now: i64,
-        found: &mut Vec<Reference>,
+        found: &mut BTreeMap<Digest, Reference>,
     ) -> Result<()> {
         let mut add = |raw: &str, kind| -> Result<()> {
             let item = reference(raw, kind, key, user, now)?;
-            if !found.iter().any(|old| old.digest == item.digest) {
-                found.push(item);
-            }
+            found.entry(item.digest).or_insert(item);
             Ok(())
         };
         match value {
@@ -254,9 +255,9 @@ pub(crate) fn references(value: &Value, key: &[u8], user: i64, now: i64) -> Resu
         }
         Ok(())
     }
-    let mut found = Vec::new();
+    let mut found = BTreeMap::new();
     collect(value, key, user, now, &mut found)?;
-    Ok(found)
+    Ok(found.into_values().collect())
 }
 pub(crate) fn wrap_output(
     value: &mut Value,
@@ -625,12 +626,38 @@ mod tests {
             .unwrap()
             .is_empty());
         let input = Value::Array(
-            (0..129)
+            (0..=ITEMS)
                 .map(|id| json!({"encrypted_content":id.to_string()}))
                 .collect(),
         );
         assert!(digests(&input, &[1; 32], 1).is_err());
+        let mut input = input;
+        input.as_array_mut().unwrap().pop();
+        assert_eq!(digests(&input, &[1; 32], 1).unwrap().len(), ITEMS);
     }
+    #[test]
+    fn long_native_history_preserves_ownership_and_unwraps_all_context() {
+        let key = [7; 32];
+        let input = Value::Array(
+            (0..256)
+                .map(|id| json!({"type":"reasoning","encrypted_content":format!("reasoning-{id}"),"encrypted_function_args":[format!("args-{id}")]}))
+                .collect(),
+        );
+        let mut signed = input.clone();
+        wrap_output(&mut signed, &key, 1, 2, 2000).unwrap();
+        let refs = references(&signed, &key, 1, 1000).unwrap();
+        assert_eq!(refs.len(), 512);
+        assert_eq!(
+            lookup_references(&database(), 1, &refs, 1000).unwrap(),
+            Lookup::Account(2)
+        );
+        assert!(references(&signed, &key, 3, 1000).is_err());
+        assert_eq!(
+            upstream_payload(&json!({"input":signed}), &key, 1, 1000).unwrap()["input"],
+            input
+        );
+    }
+
     #[test]
     fn encrypted_tool_calls_bind_their_owner_without_storing_arguments() {
         let input = json!({"type":"function_call","encrypted_function_args":["private-tool-state","private-tool-state"]});
