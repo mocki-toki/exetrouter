@@ -87,7 +87,13 @@ For stable-release observations it downloads SHA-512-verified exact native clien
 versions and requires release tags to match the pinned commits. It runs only the
 named synthetic HTTP/WS tool/compaction/reopen fixture (or the separate V1 fixture)
 against loopback mocks. Compile-time version pins are temporary and never included
-in a PR. A failing native baseline escalates even a negative medium verdict to
+in a PR. Only these synthetic fixtures explicitly use the hardened outer Docker
+container instead of Codex's nested OS sandbox, whose namespace creation Docker
+blocks. The helper requires a non-root Linux container, a literal HTTP loopback
+address with a port and the synthetic `gpt-test` model; normal host/live fixtures
+retain Codex's read-only sandbox. This validates transport and successful tool
+results, not Codex's nested OS sandbox. No Docker security restriction is relaxed.
+A failing native baseline escalates even a negative medium verdict to
 independent xhigh verification. A released patch must also pass native validation.
 No real OAuth/reset/deployment operations are exposed to the model.
 

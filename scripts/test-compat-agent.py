@@ -533,8 +533,11 @@ class LoaderTests(unittest.TestCase):
             manifest.write_text("original")
             with patch.object(box, "native_versions", return_value=[]), \
                     patch("scripts.compat_agent.sandbox.command", return_value=SimpleNamespace(
-                     returncode=0, stdout=b"0 passed", stderr=b"")):
+                      returncode=0, stdout=b"0 passed", stderr=b"")) as run:
                 self.assertFalse(box.native_check()["passed"])
+            args = run.call_args.args[0]
+            self.assertIn("EXETROUTER_NATIVE_OUTER_SANDBOX=1", args)
+            self.assertEqual(args[-4:], ["opencode_v1_http_compatibility_probe", "--", "--ignored", "--exact"])
             self.assertEqual(manifest.read_text(), "original")
 
     def test_native_version_startup_failure_is_not_version_mismatch(self):
