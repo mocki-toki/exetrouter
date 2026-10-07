@@ -4684,6 +4684,7 @@ async fn cache_affinity_survives_rotation_restart_and_transport_without_crossing
         })
         .await
         .unwrap();
+    assert_eq!(fixture.post(body.clone()).await.status(), 401);
     for (bearer, equal) in [(&rotated, true), (&other, false)] {
         let response = reqwest::Client::new()
             .post(format!("{}/v1/responses", fixture.url))
@@ -4699,6 +4700,7 @@ async fn cache_affinity_survives_rotation_restart_and_transport_without_crossing
             equal
         );
     }
+    fixture.secret = rotated;
     fixture.restart().await;
     assert_eq!(fixture.post(body.clone()).await.status(), 200);
     assert_eq!(

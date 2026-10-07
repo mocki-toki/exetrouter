@@ -89,7 +89,7 @@ mod tests {
         );
         let rotated = rotate_token(&mut db, &key, a, &t.token.id).unwrap();
         assert_ne!(rotated.secret, t.secret);
-        assert!(revoke_token(&db, a, &t.token.id).unwrap());
+        assert!(!revoke_token(&db, a, &t.token.id).unwrap());
         let listed = list_tokens(&db, a).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, rotated.token.id);

@@ -245,8 +245,8 @@ fn rotate_at(
     }
     let issued = create_token(&tx, key, user_id, &old.name, 90)?;
     tx.execute(
-        "UPDATE access_tokens SET expires_at=MIN(expires_at,?1) WHERE id=?2",
-        params![now + 86_400, id],
+        "UPDATE access_tokens SET revoked_at=?1 WHERE id=?2 AND user_id=?3",
+        params![now, id, user_id],
     )?;
     tx.commit()?;
     Ok(issued)
@@ -298,7 +298,7 @@ mod tests {
     use crate::init;
 
     #[test]
-    fn tokens_expire_at_exact_boundary_and_rotation_does_not_extend_old_ttl() {
+    fn tokens_expire_at_exact_boundary_and_rotation_revokes_old_token_immediately() {
         let mut db = Connection::open_in_memory().unwrap();
         init(&db).unwrap();
         let user = create_user(&db, "alice").unwrap();
@@ -314,17 +314,22 @@ mod tests {
                 .is_none()
         );
         let now = token.token.created_at;
-        rotate_at(&mut db, &[1; 32], user, &token.token.id, now).unwrap();
-        assert_eq!(
-            token_info(&db, user, &token.token.id)
-                .unwrap()
-                .unwrap()
-                .expires_at,
-            now + 86_400
-        );
-        assert!(authenticate_at(&db, &[1; 32], &token.secret, now + 86_400)
+        let rotated = rotate_at(&mut db, &[1; 32], user, &token.token.id, now).unwrap();
+        let old = token_info(&db, user, &token.token.id).unwrap().unwrap();
+        assert_eq!(old.revoked_at, Some(now));
+        assert_eq!(old.expires_at, token.token.expires_at);
+        assert!(authenticate_at(&db, &[1; 32], &token.secret, now)
             .unwrap()
             .is_none());
+        assert_eq!(
+            authenticate_at(&db, &[1; 32], &rotated.secret, now)
+                .unwrap()
+                .unwrap(),
+            (user, rotated.token.id.clone())
+        );
+        let listed = list_tokens(&db, user).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, rotated.token.id);
         let short = create_token(&db, &[1; 32], user, "short", 1).unwrap();
         rotate_at(
             &mut db,
