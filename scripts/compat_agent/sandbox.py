@@ -176,12 +176,33 @@ class Sandbox:
         return file.read_text()
 
     def dispatch(self, name, args, editable=False):
+        if not isinstance(args, dict):
+            raise Stop("invalid_tool_arguments")
+        if name == "read_files":
+            files = args.get("files")
+            if not isinstance(files, list) or not 1 <= len(files) <= 8:
+                raise Stop("invalid_read_batch")
+            ranges = [self.dispatch("read_file", item) for item in files]
+            if len(json.dumps(ranges).encode()) > 256000:
+                raise Stop("read_batch_too_large")
+            return {"files": ranges}
         if name == "read_file":
             if (args.get("repository"), args.get("sha")) not in self.allowed_revisions:
                 raise Stop("revision_outside_evidence")
+            start, count = args.get("start_line", 1), args.get("line_count", 200)
+            if type(start) is not int or start < 1 or type(count) is not int or not 1 <= count <= 1000:
+                raise Stop("invalid_read_range")
             if args["repository"] == self.gh.repo:
-                return {"content": self.local(args["path"])}
-            return {"content": self.gh.file(args["repository"], args["sha"], args["path"])}
+                content = self.local(args["path"])
+            else:
+                content = self.gh.file(args["repository"], args["sha"], args["path"])
+            lines = content.splitlines()
+            selected = "\n".join(lines[start - 1:start - 1 + count])
+            if len(selected.encode()) > 64000:
+                raise Stop("read_range_too_large")
+            return {"repository": args["repository"], "sha": args["sha"], "path": args["path"],
+                    "start_line": start, "total_lines": len(lines), "content": selected,
+                    "truncated": start + count - 1 < len(lines)}
         if name == "search_code":
             query = args.get("query")
             if not isinstance(query, str) or not query or len(query) > 200:

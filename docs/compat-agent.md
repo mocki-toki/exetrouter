@@ -79,12 +79,14 @@ in a PR. A failing native baseline escalates even a negative medium verdict to
 independent xhigh verification. A released patch must also pass native validation.
 No real OAuth/reset/deployment operations are exposed to the model.
 
-Limits: one package per run, 40 model requests, 600,000 confirmed input/output
-tokens, eight turns per analysis/review session, 24 coding turns, 20 changed files,
+Limits: one package per run, 64 model requests, 600,000 confirmed input/output
+tokens, 16 turns per analysis/verification session, 12 review turns, 24 coding turns, 20 changed files,
 512 KiB total proposed source, and a 60-minute workflow timeout. Unknown usage
 prevents another inference call. Overflow, missing evidence, unknown capabilities,
 failed checks or a moved target base stop publication. No raw session artifacts
-or candidate diagnostics are uploaded; logs contain fixed categories and PR IDs.
+or candidate diagnostics are uploaded; logs contain fixed categories, phase names,
+numeric request/token counters, usage-known status and PR IDs. Source reads are
+line-bounded and may be batched, up to eight ranges per turn. Truncation is explicit.
 
 ## Development
 

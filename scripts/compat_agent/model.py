@@ -5,6 +5,11 @@ from urllib.parse import urlsplit
 
 from .core import DECISIONS, MODEL, Stop, decision, request
 
+PHASE_TURNS = {"triage": 16, "verify": 16, "implement": 24, "review": 12}
+READ_PROPERTIES = {k: {"type": "string"} for k in ("repository", "sha", "path")}
+READ_PROPERTIES.update({"start_line": {"type": "integer", "minimum": 1},
+                        "line_count": {"type": "integer", "minimum": 1, "maximum": 1000}})
+
 CITATION = {"type": "object", "properties": {
     "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "path": {"type": "string"}, "symbol": {"type": "string"}},
@@ -54,13 +59,19 @@ class Model:
             raise Stop("reasoning_levels_unavailable")
 
     def run(self, phase, context, sandbox, triage=None):
+        print("compat_agent: phase_" + phase, flush=True)
         prompts = self.root / "prompts/compat-agent"
         history = [{"role": "developer", "content": (prompts / "common.md").read_text()
                     + "\n" + (prompts / (phase + ".md")).read_text()},
                    {"role": "user", "content": json.dumps(context)}]
         tools = [
-            tool("read_file", "Read pinned source. repository must match supplied evidence.",
-                 {k: {"type": "string"} for k in ("repository", "sha", "path")}, ["repository", "sha", "path"]),
+            tool("read_file", "Read pinned source lines (default first 200). Follow truncated ranges as needed.",
+                 READ_PROPERTIES, ["repository", "sha", "path"]),
+            tool("read_files", "Read up to eight pinned source ranges in one turn.",
+                 {"files": {"type": "array", "minItems": 1, "maxItems": 8,
+                            "items": {"type": "object", "properties": READ_PROPERTIES,
+                                      "required": ["repository", "sha", "path"],
+                                      "additionalProperties": False}}}, ["files"]),
             tool("search_code", "Search local ExetRouter tracked sources (literal query).",
                  {"query": {"type": "string"}}, ["query"]),
             {"type": "function", "name": "submit_decision", "strict": False, "description":
@@ -81,8 +92,13 @@ class Model:
                      {"name": {"type": "string", "enum": ["fmt", "clippy", "tests", "publication"]}}, ["name"]),
             ])
         revealed = False
-        for _ in range(24 if phase == "implement" else 8):
-            if self.calls >= 40 or self.tokens >= 600000 or not self.usage_known:
+        for turn in range(PHASE_TURNS[phase]):
+            if turn == PHASE_TURNS[phase] - 3:
+                history.append({"role": "developer", "content":
+                    "Only three tool turns remain. Finish with submit_decision within this budget. "
+                    "If evidence remains incomplete, report needs_human and describe the limitation; "
+                    "never claim unsupported compatibility or fabricate coverage."})
+            if self.calls >= 64 or self.tokens >= 600000 or not self.usage_known:
                 raise Stop("model_budget_or_unknown_usage")
             self.calls += 1
             response = self.call(self.base + "/responses", self.token, "POST", {
@@ -97,6 +113,9 @@ class Model:
             self.usage_known = all(type(n) is int and n >= 0 for n in counters)
             if self.usage_known:
                 self.tokens += sum(counters)
+            print("compat_agent: phase=" + phase + " turn=" + str(turn + 1)
+                  + " calls=" + str(self.calls) + " tokens=" + str(self.tokens)
+                  + " usage_known=" + str(self.usage_known).lower(), flush=True)
             outputs = response.get("output", [])
             history.extend(outputs)  # Preserve opaque context and exact call IDs.
             calls = [i for i in outputs if i.get("type") == "function_call"]
