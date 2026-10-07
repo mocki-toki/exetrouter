@@ -2,8 +2,11 @@
 
 The hourly GitHub Actions workflow watches Codex and OpenCode default-branch
 commits and npm stable release tracks (Codex, OpenCode V2 and V1). It pins source
-SHAs, inventories changed files, and fails closed on truncated or divergent
-comparisons. A new release alone is not a reason for a patch.
+SHAs and compares complete recursive source trees, including blob IDs and modes.
+This is an exact snapshot comparison, not GitHub Compare's capped merge-base
+diff: legitimate release-branch divergence does not block analysis. Truncated
+trees or oversized inventories stop analysis. The model reads relevant files at
+both revisions. A new release alone is not a reason for a patch.
 
 ## Decisions and publication
 
