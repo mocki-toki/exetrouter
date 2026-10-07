@@ -224,6 +224,10 @@ class FakeBox:
 
 class ModelTests(unittest.TestCase):
     def setUp(self):
+        # Synthetic model telemetry must not look like real inference in CI logs.
+        logger = patch("builtins.print")
+        logger.start()
+        self.addCleanup(logger.stop)
         self.env = patch.dict(os.environ, {"COMPAT_API_BASE_URL": "https://api.example.com/v1",
                                           "COMPAT_API_TOKEN": "synthetic-secret"})
         self.env.start()
