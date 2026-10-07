@@ -172,6 +172,8 @@ enum TokenCommand {
     List,
     /// Inspect one token without revealing its secret.
     Show { id: String },
+    /// Rename a token's encrypted label without changing its secret.
+    Rename { id: String, name: String },
     /// Replace a token; the old secret stops working immediately.
     Rotate { id: String },
     /// Disable a token, with confirmation unless --yes is supplied.
@@ -460,6 +462,10 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
             },
             TokenCommand::List => ControlRequest::TokenList,
             TokenCommand::Show { id } => ControlRequest::TokenShow { id: id.clone() },
+            TokenCommand::Rename { id, name } => ControlRequest::TokenRename {
+                id: id.clone(),
+                name: name.clone(),
+            },
             TokenCommand::Rotate { id } => ControlRequest::TokenRotate { id: id.clone() },
             TokenCommand::Revoke { id, yes } => {
                 if !yes {
@@ -834,6 +840,7 @@ fn request_kind(command: &CommandLine) -> String {
             TokenCommand::List => "tokens",
             TokenCommand::Show { .. } => "token",
             TokenCommand::Revoke { .. } => "revoke",
+            TokenCommand::Rename { .. } => "rename",
             _ => "secret",
         },
         _ => "doctor",

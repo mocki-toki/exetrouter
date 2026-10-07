@@ -205,9 +205,20 @@ impl Vault {
 }
 
 pub(super) async fn request(args: &Session, mut request: ControlRequest) -> Result<Value> {
+    if matches!(&request, ControlRequest::Usage { by: Some(by), .. } if by == "token") {
+        let mut result = raw_request(args, request).await?;
+        let vault = args
+            .connection
+            .privacy_key
+            .as_ref()
+            .and_then(|_| Vault::open(&args.connection).ok());
+        decorate_token_usage(vault.as_ref(), &mut result);
+        return Ok(result);
+    }
     if !matches!(
         request,
         ControlRequest::TokenCreate { .. }
+            | ControlRequest::TokenRename { .. }
             | ControlRequest::TokenList
             | ControlRequest::TokenShow { .. }
             | ControlRequest::TokenRotate { .. }
@@ -222,7 +233,9 @@ pub(super) async fn request(args: &Session, mut request: ControlRequest) -> Resu
             Err(error)
                 if matches!(
                     request,
-                    ControlRequest::TokenCreate { .. } | ControlRequest::TokenRotate { .. }
+                    ControlRequest::TokenCreate { .. }
+                        | ControlRequest::TokenRename { .. }
+                        | ControlRequest::TokenRotate { .. }
                 ) =>
             {
                 return Err(error)
@@ -232,7 +245,7 @@ pub(super) async fn request(args: &Session, mut request: ControlRequest) -> Resu
     } else {
         None
     };
-    if let ControlRequest::TokenRotate { id } = &request {
+    if let ControlRequest::TokenRotate { id } | ControlRequest::TokenRename { id, .. } = &request {
         let mut token = raw_request(args, ControlRequest::TokenShow { id: id.clone() }).await?;
         if token["name"]
             .as_str()
@@ -240,17 +253,17 @@ pub(super) async fn request(args: &Session, mut request: ControlRequest) -> Resu
         {
             vault
                 .as_ref()
-                .ok_or("privacy key unavailable; encrypted token cannot be rotated")?
+                .ok_or("privacy key unavailable; encrypted token cannot be changed")?
                 .names(&mut token)?;
         }
     }
-    if let ControlRequest::TokenCreate { name, .. } = &mut request {
-        if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
-            return Err("invalid token name".into());
-        }
+    if let ControlRequest::TokenCreate { name, .. } | ControlRequest::TokenRename { name, .. } =
+        &mut request
+    {
+        validate_token_label(name)?;
         *name = vault
             .as_ref()
-            .ok_or("a saved client profile is required to create encrypted token names")?
+            .ok_or("a saved client profile is required to encrypt token names")?
             .encrypt("token-name", name.as_bytes())?;
     }
     let aliases = matches!(request, ControlRequest::Limits | ControlRequest::Doctor);
@@ -309,6 +322,35 @@ pub(super) async fn request(args: &Session, mut request: ControlRequest) -> Resu
         }
     }
     Ok(result)
+}
+
+pub(super) fn validate_token_label(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
+        return Err("Token label must be 1–80 bytes with no control characters.".into());
+    }
+    Ok(())
+}
+
+fn decorate_token_usage(vault: Option<&Vault>, report: &mut Value) {
+    let decorate_rows = |rows: &mut Value| {
+        for row in rows.as_array_mut().into_iter().flatten() {
+            let label = row["display_name"].as_str().and_then(|name| {
+                if name.starts_with(PREFIX) {
+                    vault
+                        .and_then(|vault| vault.decrypt("token-name", name).ok())
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                } else {
+                    Some(name.to_owned())
+                }
+            });
+            // Keep the ID as the grouping key, even when two labels are identical.
+            row["display_name"] = label.unwrap_or_else(|| "Label unavailable".into()).into();
+        }
+    };
+    decorate_rows(&mut report["rows"]);
+    for bucket in report["timeline"].as_array_mut().into_iter().flatten() {
+        decorate_rows(&mut bucket["rows"]);
+    }
 }
 fn hide_encrypted_names(value: &mut Value) {
     match value {
@@ -457,6 +499,191 @@ pub(super) async fn save_dashboard(args: &Session, settings: &Dashboard) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn renamed_labels_are_encrypted_and_usage_retains_distinct_revoked_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = crate::local::Local::open(
+            &dir.path().join("state"),
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+        let session = Session {
+            connection: Connection {
+                mode: super::super::config::Mode::Standalone,
+                privacy_key: Some(dir.path().join("privacy-key")),
+                local: Some(local.clone()),
+                ..Default::default()
+            },
+            json: false,
+            command: super::super::CommandLine::Doctor,
+        };
+        let mut issued = Vec::new();
+        for name in ["Original label", "Shared private label"] {
+            issued.push(
+                request(
+                    &session,
+                    ControlRequest::TokenCreate {
+                        name: name.into(),
+                        expires_days: Some(1),
+                    },
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let first = issued[0]["token"]["id"].as_str().unwrap().to_owned();
+        let second = issued[1]["token"]["id"].as_str().unwrap().to_owned();
+        let user = local.user;
+        let ids = [first.clone(), second.clone()];
+        local
+            .db
+            .call(move |conn| {
+                for (id, input) in ids.iter().zip([20, 3]) {
+                    crate::usage::record_usage(
+                        conn,
+                        crate::usage::UsageEvent {
+                            user_id: user,
+                            token_id: id,
+                            surface: "responses",
+                            model: "test",
+                            status: "done",
+                            input: Some(input),
+                            output: Some(1),
+                            cached_input: None,
+                            reasoning_output: None,
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let show = || ControlRequest::TokenShow { id: first.clone() };
+        let mut before = raw_request(&session, show()).await.unwrap();
+        assert_eq!(
+            request(
+                &session,
+                ControlRequest::TokenRename {
+                    id: first.clone(),
+                    name: "Shared private label".into(),
+                }
+            )
+            .await
+            .unwrap()["updated"],
+            true
+        );
+        let mut after = raw_request(&session, show()).await.unwrap();
+        assert!(after["name"].as_str().unwrap().starts_with(PREFIX));
+        assert!(!after.to_string().contains("Shared private label"));
+        before.as_object_mut().unwrap().remove("name");
+        after.as_object_mut().unwrap().remove("name");
+        assert_eq!(before, after, "renaming changes no other token metadata");
+        let key = local.key.clone();
+        let secret = issued[0]["secret"].as_str().unwrap().to_owned();
+        assert_eq!(
+            local
+                .db
+                .call(move |conn| crate::authenticate(conn, &key, &secret))
+                .await
+                .unwrap(),
+            Some((user, first.clone()))
+        );
+        request(&session, ControlRequest::TokenRevoke { id: second.clone() })
+            .await
+            .unwrap();
+        let usage = || ControlRequest::Usage {
+            period: "day".into(),
+            by: Some("token".into()),
+            timezone: Some("UTC".into()),
+        };
+        let raw = raw_request(&session, usage()).await.unwrap();
+        assert!(!raw.to_string().contains("Shared private label"));
+        let report = request(&session, usage()).await.unwrap();
+        assert_eq!(report["rows"].as_array().unwrap().len(), 2);
+        for (id, total) in [(&first, 21), (&second, 4)] {
+            let row = report["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["name"] == *id)
+                .unwrap();
+            assert_eq!(row["display_name"], "Shared private label");
+            assert_eq!(row["total_tokens"], total);
+            let bucket_row = report["timeline"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|bucket| bucket["rows"].as_array().unwrap())
+                .find(|row| row["name"] == *id)
+                .unwrap();
+            assert_eq!(bucket_row["display_name"], "Shared private label");
+            assert_eq!(bucket_row["total_tokens"], total);
+        }
+        let mut wrong = Session {
+            connection: session.connection.clone(),
+            json: false,
+            command: super::super::CommandLine::Doctor,
+        };
+        wrong.connection.privacy_key = Some(dir.path().join("wrong-key"));
+        let unchanged = raw_request(&session, show()).await.unwrap();
+        assert!(request(
+            &wrong,
+            ControlRequest::TokenRename {
+                id: first.clone(),
+                name: "Cannot overwrite".into(),
+            }
+        )
+        .await
+        .is_err());
+        for name in [
+            String::new(),
+            "x".repeat(81),
+            "界".repeat(27),
+            "bad\nlabel".into(),
+        ] {
+            assert!(request(
+                &session,
+                ControlRequest::TokenRename {
+                    id: first.clone(),
+                    name,
+                }
+            )
+            .await
+            .is_err());
+        }
+        assert_eq!(raw_request(&session, show()).await.unwrap(), unchanged);
+        for privacy_key in [
+            wrong.connection.privacy_key.clone(),
+            Some(dir.path().to_path_buf()),
+            None,
+        ] {
+            wrong.connection.privacy_key = privacy_key;
+            let report = request(&wrong, usage()).await.unwrap();
+            assert!(report["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["display_name"] == "Label unavailable"));
+            assert!(!report.to_string().contains(PREFIX));
+        }
+        local.stop().await.unwrap();
+    }
+
+    #[test]
+    fn missing_usage_labels_do_not_expose_token_ids_as_labels() {
+        let mut report = serde_json::json!({"rows":[{"name":"tok_legacy","requests":1}],
+            "timeline":[{"rows":[{"name":"tok_legacy","requests":1}]}]});
+        decorate_token_usage(None, &mut report);
+        assert_eq!(report["rows"][0]["display_name"], "Label unavailable");
+        assert_eq!(
+            report["timeline"][0]["rows"][0]["display_name"],
+            "Label unavailable"
+        );
+        assert_eq!(report["rows"][0]["name"], "tok_legacy");
+    }
+
     #[tokio::test]
     async fn native_client_encrypts_before_storage_and_restores_dashboard() {
         let dir = tempfile::tempdir().unwrap();

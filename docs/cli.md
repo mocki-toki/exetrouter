@@ -56,6 +56,7 @@ exr limits --json            # Array of live account limits and reset credits, l
 exr tokens                  # List your tokens
 exr token list --json        # Same list, for scripts
 exr token show tok_...
+exr tokens rename tok_... "Work laptop"
 exr token create --name macbook --expires-days 90
 exr token rotate tok_...
 exr token revoke tok_...     # Interactive confirmation
@@ -66,7 +67,7 @@ exr token revoke tok_... --yes
 
 Model exports require `--json`. OpenCode exports use the standalone address or saved remote `api_url`; `--base-url` overrides one export. URLs must use HTTP(S), end in `/v1`, and have no credentials, query or fragment. `--model exetrouter/gpt-5.6-sol` selects an available model without changing the exported list. See [client setup](compatibility.md#opencode-setup) and [export examples](model-export-examples.md).
 
-Token metadata and mutations are scoped to the authenticated user. Usage is shared aggregate metadata, grouped by user or model. Token grouping (`--by token`) shows only the authenticated user’s token IDs, including revoked tokens with recorded usage; users cannot list another user's tokens, obtain upstream credentials/account identifiers or read request contents. User creation, OAuth login and backups remain local `exrd admin` operations. Operator reports also default to readable text; add `--json` for scripts. OAuth login is interactive and rejects JSON. The SSH gateway wire protocol and raw authorized_keys export retain their dedicated machine formats.
+Token metadata and mutations are scoped to the authenticated user. Usage is shared aggregate metadata, grouped by user or model. Token grouping (`--by token`) shows only the authenticated user’s tokens by their current labels, including revoked tokens with recorded usage. Grouping stays keyed by token ID, so identical labels never merge statistics. JSON retains each ID in `name` and adds the client-decrypted `display_name`. Unavailable labels (including reports from older servers without label metadata) display `Label unavailable`, never a token fragment. Users cannot list another user's tokens, obtain upstream credentials/account identifiers or read request contents. User creation, OAuth login and backups remain local `exrd admin` operations. Operator reports also default to readable text; add `--json` for scripts. OAuth login is interactive and rejects JSON. The SSH gateway wire protocol and raw authorized_keys export retain their dedicated machine formats.
 
 SSH exchanges have a 45-second deadline and a 1 MiB reply cap. Failed child processes are killed and reaped. Failure or timeout does not prove a mutation was cancelled: inspect the token list before retrying creation/rotation/revocation. The client never automatically retries these operations.
 
@@ -78,11 +79,13 @@ Use an interactive terminal at least 72 columns × 20 rows. Press `?` for help o
 | --- | --- |
 | Overview | Inspect routing/account health and subscription limits. Enter opens account actions: reset-credit review, switching rules (including priority) and activation. Operator locks apply. |
 | Usage | View Today, Last 24 hours, This week or This month, grouped by total, user, model or your API tokens. |
-| Tokens | Create, rotate or revoke tokens. Revoked tokens are hidden. Enter opens actions. |
+| Tokens | Create, rename, rotate or revoke tokens. Revoked tokens are hidden. Enter opens actions. |
 | Models | Browse account-visible models and reported limits. Enter copies the selected model ID. |
 | Settings | Change mode/connection, check/install client updates, and add or reauthorize standalone accounts. Enter opens actions. |
 
-←/→ changes tabs; ↑/↓ selects items; PageUp/PageDown scrolls; `r` refreshes; `q` or Ctrl-C exits. In Usage, `p` changes the period, `b` changes grouping and `m` switches between reported tokens and requests. Select a group with ↑/↓ to see its chart and totals. User groups combine all that user's tokens; token groups show only your own IDs.
+←/→ changes tabs; ↑/↓ selects items; PageUp/PageDown scrolls; `r` refreshes; `q` or Ctrl-C exits. In Usage, `p` changes the period, `b` changes grouping and `m` switches between reported tokens and requests. Select a group with ↑/↓ to see its chart and totals. User groups combine all that user's tokens; token groups show only your own token labels.
+
+Tokens: Enter → Rename token (or `l`) edits the selected label. Enter saves, Esc cancels, and Ctrl-U clears the field. Labels must be 1–80 bytes without control characters. Renaming encrypts the new label on the client and changes neither the bearer secret, token ID, expiry nor usage counters; past usage displays the new label on reload. CLI renaming also supports `--json` and requires no clipboard or interactive terminal.
 
 Overview: `S` opens Switching rules (also accessible through Enter). The form accepts priority -255…255, thresholds 0…100, `off` and `default`. Tab/Up/Down selects a field, Enter saves all edits, Esc cancels, and invalid values remain editable without sending a mutation. Locked rules can be inspected but not changed. Controls shows contextual hints. Overview shows effective priority; switching thresholds appear only in the settings form. Thresholds are soft: without a suitable alternative, a healthy original account continues. See [selection and inheritance](account-pool.md#soft-switching-thresholds).
 

@@ -70,6 +70,7 @@ fn command_input(state: &State) -> bool {
         state.modal,
         Some(
             Modal::Name(_)
+                | Modal::Rename { .. }
                 | Modal::Days { .. }
                 | Modal::Personal { .. }
                 | Modal::Routing { locked: false, .. }
@@ -233,7 +234,9 @@ fn mouse_key(mouse: MouseEvent, hits: &[Hit], state: &mut State) -> Option<KeyEv
                     return None;
                 }
                 MouseAction::Cursor => {
-                    if let Some(Modal::Personal { input, .. }) = &mut state.modal {
+                    if let Some(Modal::Personal { input, .. } | Modal::Rename { input, .. }) =
+                        &mut state.modal
+                    {
                         input.place_cursor(mouse.column.saturating_sub(hit.area.x) as usize);
                     }
                     return None;
@@ -316,6 +319,11 @@ enum Modal {
     },
     UpdateConfirm,
     Name(String),
+    Rename {
+        id: String,
+        input: TextInput,
+        error: String,
+    },
     Personal {
         kind: super::privacy::Kind,
         id: String,
@@ -836,8 +844,9 @@ fn action_menu(state: &State, _connection: &Connection) -> (String, Vec<(String,
                 .and_then(Value::as_array)
                 .is_some_and(|rows| !rows.is_empty())
             {
-                entries.insert(0, ("Rotate token".into(), KeyCode::Char('o')));
-                entries.insert(1, ("Revoke token".into(), KeyCode::Char('x')));
+                entries.insert(0, ("Rename token".into(), KeyCode::Char('l')));
+                entries.insert(1, ("Rotate token".into(), KeyCode::Char('o')));
+                entries.insert(2, ("Revoke token".into(), KeyCode::Char('x')));
             }
             entries
         }
@@ -860,6 +869,26 @@ fn selected_reset_request(state: &State) -> Option<ControlRequest> {
         .and_then(|rows| rows.get(state.account_selected))
         .and_then(|account| account["id"].as_i64())
         .map(|account| ControlRequest::ResetPrepare { account })
+}
+fn token_rename_modal(state: &State) -> Option<Modal> {
+    let row = state.values[TOKENS]
+        .as_ref()?
+        .as_array()?
+        .get(state.selected)?;
+    Some(Modal::Rename {
+        id: row["id"].as_str()?.into(),
+        input: TextInput::new(row["name"].as_str()?.into()),
+        error: String::new(),
+    })
+}
+
+fn token_rename_request(id: &str, input: &TextInput) -> Result<ControlRequest> {
+    let name = input.value.trim();
+    super::privacy::validate_token_label(name)?;
+    Ok(ControlRequest::TokenRename {
+        id: id.into(),
+        name: name.into(),
+    })
 }
 fn preserve_selection(state: &mut State, tab: usize, value: &Value) {
     if tab == OVERVIEW {
@@ -1171,7 +1200,9 @@ fn render_hits(
         footer = vec![match modal {
             Modal::Actions { .. } => keys(&[("↑ / ↓", "select")]),
             Modal::Routing { locked: false, .. } => keys(&[("Tab / ↑ / ↓", "field")]),
-            Modal::Personal { .. } => keys(&[("← / →", "cursor"), ("Ctrl-U", "clear")]),
+            Modal::Personal { .. } | Modal::Rename { .. } => {
+                keys(&[("← / →", "cursor"), ("Ctrl-U", "clear")])
+            }
             _ => Line::default(),
         }];
     }
@@ -1294,6 +1325,7 @@ fn render_hits(
             },
             Modal::UpdateConfirm => ("Update exr", "Install the latest published release in the existing installation?\nThe installation method is preserved; config, accounts and tokens stay in place.\nSource builds may take several minutes. Restart exr after completion.".into()),
             Modal::Name(text) => ("Create token",format!("Token name: {text}")),
+            Modal::Rename { input, error, .. } => ("Rename token", format!("{}\n\n{error}", input.value)),
             Modal::Personal {kind,input,..} => (match kind {super::privacy::Kind::Account=>"Account label",super::privacy::Kind::Settings=>"Preferences"},input.value.clone()),
             Modal::Days { name,text } => ("Create token",format!("Name: {name}\nExpires in days (1–365): {text}")),
             Modal::Confirm { id,rotate } => (if *rotate {"Rotate token"}else{"Revoke token"}, format!("Token: {id}\n{}",if *rotate {"The old secret will stop working. The new secret will be copied to the clipboard."}else{"This token will stop working immediately."})),
@@ -1363,7 +1395,7 @@ fn render_hits(
                     });
                 }
             }
-            Modal::Personal { input, .. }
+            Modal::Personal { input, .. } | Modal::Rename { input, .. }
                 if Line::from(input.value.as_str()).width()
                     <= area.width.saturating_sub(2) as usize =>
             {
@@ -1395,7 +1427,7 @@ fn render_hits(
             }
             Modal::Actions { .. } => &[("Close", KeyCode::Esc)],
             Modal::UpdateConfirm => &[("Update", KeyCode::Enter), ("Cancel", KeyCode::Esc)],
-            Modal::Personal { .. } | Modal::Routing { .. } => {
+            Modal::Personal { .. } | Modal::Rename { .. } | Modal::Routing { .. } => {
                 &[("Save", KeyCode::Enter), ("Cancel", KeyCode::Esc)]
             }
             Modal::Days { .. } => &[("Create token", KeyCode::Enter), ("Cancel", KeyCode::Esc)],
@@ -1412,7 +1444,7 @@ fn render_hits(
             controls,
             &mut hits,
         );
-        if let Modal::Personal { input, .. } = modal {
+        if let Modal::Personal { input, .. } | Modal::Rename { input, .. } = modal {
             if Line::from(input.value.as_str()).width() <= area.width.saturating_sub(2) as usize {
                 frame.set_cursor_position((
                     area.x + 1 + Line::from(&input.value[..input.cursor]).width() as u16,
@@ -1881,8 +1913,12 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
         .zip(&series)
         .enumerate()
         .map(|(i, (name, data))| {
+            let label = rows
+                .iter()
+                .find(|row| row["name"].as_str() == Some(name))
+                .map_or(name.as_str(), render::usage_name);
             Dataset::default()
-                .name(format!("  {}  ", render::safe(name)))
+                .name(format!("  {}  ", render::safe(label)))
                 .marker(Marker::HalfBlock)
                 .graph_type(GraphType::Line)
                 .style(
@@ -1971,7 +2007,7 @@ fn keyboard_help(state: &State, connection: &Connection) -> String {
         OVERVIEW => "↑/↓: select account\nPgUp/PgDn: page\nEnter: account actions\nc: review reset credit (≤5% remaining)\nP: set numeric priority; S: switching rules; D: toggle activation\nOperator locks apply; reset credits require confirmation.",
         USAGE if state.group == 0 => "p: change period\nb: change grouping\nm: switch tokens / requests",
         USAGE => "↑/↓: select user, model or token with recorded usage\np: change period\nb: change grouping\nm: switch tokens / requests",
-        TOKENS => "↑/↓: select token\nEnter: token actions\nn: create; o: rotate; x: revoke\nRotation and revocation require confirmation.",
+        TOKENS => "↑/↓: select token\nEnter: token actions\nn: create; l: rename; o: rotate; x: revoke\nRotation and revocation require confirmation.",
         MODELS => "↑/↓: select model\nPgUp/PgDn: page\nEnter: copy selected model ID",
         SETTINGS if connection.local.is_some() => "↑/↓: select settings actions or account\nEnter: activate selected action; reauthorize selected account\ne: configure connection; v: check updates; U: update\na: add account; u: reauthorize; d: disable",
         _ => "↑/↓: select settings actions\nEnter: activate selected action\ne: configure connection; v: check updates; U: update",
@@ -2062,6 +2098,10 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     ));
                 }
                 Ok(mut value) if job.mutation => {
+                    if job.tab == TOKENS {
+                        // Usage labels are resolved when the report is loaded.
+                        state.values[USAGE] = None;
+                    }
                     if let Some(Value::String(secret)) = value.get_mut("secret").map(Value::take) {
                         if let Some(clipboard) = state.clipboard.take() {
                             match clipboard.copy(&secret).await {
@@ -2074,7 +2114,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                             return Err("token issued without a clipboard destination; rotate it before use".into());
                         }
                     } else if value.get("updated").and_then(Value::as_bool) == Some(true) {
-                        state.notices[job.tab] = Some("Personal data saved.".into());
+                        state.notices[job.tab] = Some(if job.tab == TOKENS { "Token label saved." } else { "Personal data saved." }.into());
                     } else {
                         state.notices[job.tab] = Some(render::response("revoke", &value));
                     }
@@ -2329,6 +2369,17 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     }
                     _=>input.edit(key),
                 },
+                Modal::Rename { id, input, error } => match key.code {
+                    KeyCode::Esc => state.modal = None,
+                    KeyCode::Enter => match token_rename_request(id, input) {
+                        Ok(request) => {
+                            mutation = Some(request);
+                            state.modal = None;
+                        }
+                        Err(reason) => *error = reason.to_string(),
+                    },
+                    _ => input.edit(key),
+                },
                 Modal::Days { name, text } => match key.code {
                     KeyCode::Esc => state.modal = None,
                     KeyCode::Backspace => {
@@ -2547,6 +2598,9 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                 }
                 KeyCode::Char('n') if state.tab == TOKENS => {
                     state.modal = Some(Modal::Name(String::new()))
+                }
+                KeyCode::Char('l') if state.tab == TOKENS => {
+                    state.modal = token_rename_modal(&state);
                 }
                 KeyCode::Char(c @ ('o' | 'x')) if state.tab == TOKENS => {
                     if let Some(id) = state.values[TOKENS]
@@ -3133,6 +3187,11 @@ mod tests {
         }
         for modal in [
             Modal::Name(String::new()),
+            Modal::Rename {
+                id: "tok_fixture".into(),
+                input: TextInput::new(String::new()),
+                error: String::new(),
+            },
             Modal::Personal {
                 kind: super::super::privacy::Kind::Account,
                 id: "fixture".into(),
@@ -3569,6 +3628,57 @@ mod tests {
     }
 
     #[test]
+    fn token_rename_prefills_the_label_and_validates_before_submission() {
+        let connection = Connection::default();
+        let mut state = State {
+            tab: TOKENS,
+            ..Default::default()
+        };
+        assert!(token_rename_modal(&state).is_none());
+        assert!(!action_menu(&state, &connection)
+            .1
+            .iter()
+            .any(|(_, key)| *key == KeyCode::Char('l')));
+        state.values[TOKENS] = Some(serde_json::json!([
+            {"id":"tok_first","name":"First label"},
+            {"id":"tok_second","name":"Второй лейбл"}
+        ]));
+        state.selected = 1;
+        assert!(action_menu(&state, &connection)
+            .1
+            .iter()
+            .any(|(name, key)| name == "Rename token" && *key == KeyCode::Char('l')));
+        let Some(Modal::Rename { id, mut input, .. }) = token_rename_modal(&state) else {
+            panic!("rename dialog expected");
+        };
+        assert_eq!(id, "tok_second");
+        assert_eq!(input.value, "Второй лейбл");
+        assert_eq!(input.cursor, input.value.len());
+        input.edit(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert!(token_rename_request(&id, &input).is_err());
+        input = TextInput::new("  New label  ".into());
+        assert!(matches!(token_rename_request(&id, &input).unwrap(),
+            ControlRequest::TokenRename { id, name } if id == "tok_second" && name == "New label"));
+        input = TextInput::new("界".repeat(27));
+        assert!(token_rename_request(&id, &input).is_err());
+        state.modal = token_rename_modal(&state);
+        let mut terminal = Terminal::new(TestBackend::new(72, 20)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &state, &connection, false))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Rename token"));
+        assert!(text.contains("Save Enter"));
+        assert!(text.contains("Cancel Esc"));
+    }
+
+    #[test]
     fn usage_view_selects_users_models_and_tokens() {
         let now = chrono::Utc::now().timestamp();
         let rows = serde_json::json!([
@@ -3637,10 +3747,11 @@ mod tests {
     }
 
     #[test]
-    fn usage_legend_shows_full_token_ids_on_small_terminals() {
+    fn usage_legend_shows_token_labels_on_small_terminals() {
         let now = chrono::Utc::now().timestamp();
         let id = "tok_0123456789abcdef";
-        let rows = serde_json::json!([{"name":id,"requests":1,"input_tokens":10,"output_tokens":20,"unknown_usage":0}]);
+        let label = "Personal laptop";
+        let rows = serde_json::json!([{"name":id,"display_name":label,"requests":1,"input_tokens":10,"output_tokens":20,"unknown_usage":0}]);
         let value = serde_json::json!({"rows":rows,"from_utc":now-3600,"to_utc":now,
             "timeline":[{"from_utc":now-3600,"rows":rows}]});
         for (width, height) in [(72, 20), (120, 35)] {
@@ -3662,9 +3773,10 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect::<String>();
             assert!(
-                text.contains(id),
+                text.contains(label),
                 "token legend missing at {width}x{height}"
             );
+            assert!(!text.contains(id));
         }
     }
 

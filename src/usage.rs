@@ -7,6 +7,9 @@ use serde::Serialize;
 #[derive(Debug, Serialize)]
 pub struct UsageRow {
     pub name: String,
+    /// Stored label (ciphertext for native clients), only in user-scoped token reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub requests: i64,
     pub unknown_usage: i64,
     pub known_usage: i64,
@@ -301,11 +304,17 @@ fn aggregate(
     } else {
         "(SELECT at_utc,user_id,token_id,model,input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens FROM usage_events UNION ALL SELECT attempted_at,user_id,NULL,model,input_tokens,output_tokens,cached_input_tokens,reasoning_output_tokens FROM quota_activation_attempts)"
     };
+    let label = if group == "e.token_id" && user_id.is_some() {
+        "(SELECT t.name FROM access_tokens t WHERE t.id=e.token_id AND t.user_id=e.user_id)"
+    } else {
+        "NULL"
+    };
     let sql = format!("SELECT {group},COUNT(*),
         SUM(CASE WHEN e.input_tokens IS NULL OR e.output_tokens IS NULL THEN 1 ELSE 0 END),
         SUM(e.input_tokens),SUM(e.output_tokens),SUM(e.cached_input_tokens),SUM(e.reasoning_output_tokens),
         SUM(CASE WHEN e.input_tokens IS NOT NULL AND e.output_tokens IS NOT NULL THEN 1 ELSE 0 END),
-        SUM(CASE WHEN (e.input_tokens IS NULL) != (e.output_tokens IS NULL) THEN 1 ELSE 0 END)
+        SUM(CASE WHEN (e.input_tokens IS NULL) != (e.output_tokens IS NULL) THEN 1 ELSE 0 END),
+        {label}
         FROM {source} e JOIN users u ON u.id=e.user_id
         WHERE e.at_utc>=?1 AND e.at_utc<?2 AND (?3 IS NULL OR e.user_id=?3) GROUP BY {group} ORDER BY {group}");
     let mut stmt = conn.prepare(&sql)?;
@@ -319,6 +328,7 @@ fn aggregate(
                 .transpose()?;
             Ok(UsageRow {
                 name: r.get(0)?,
+                display_name: r.get(9)?,
                 requests: r.get(1)?,
                 unknown_usage: r.get(2)?,
                 known_usage: r.get(7)?,
@@ -379,6 +389,7 @@ mod tests {
             .find(|r| r.name == first.token.id)
             .unwrap();
         assert_eq!(known.total_tokens, Some(20));
+        assert_eq!(known.display_name.as_deref(), Some("first"));
         let unknown = report
             .rows
             .iter()
@@ -386,6 +397,7 @@ mod tests {
             .unwrap();
         assert_eq!(unknown.total_tokens, None);
         assert_eq!(unknown.unknown_usage, 1);
+        assert_eq!(unknown.display_name.as_deref(), Some("second"));
         assert!(report
             .timeline
             .iter()
@@ -393,6 +405,21 @@ mod tests {
             .all(|r| r.name != foreign.token.id));
         let shared = usage_report_for_user(&db, alice, "day", Some("user"), Some("UTC")).unwrap();
         assert_eq!(shared.rows.len(), 2);
+        assert!(shared.rows.iter().all(|row| row.display_name.is_none()));
+        let unscoped = usage_report(&db, "day", Some("token")).unwrap();
+        assert!(unscoped.rows.iter().all(|row| row.display_name.is_none()));
+        db.execute(
+            "UPDATE access_tokens SET name='same label' WHERE user_id=?1",
+            [alice],
+        )
+        .unwrap();
+        let renamed = usage_report_for_user(&db, alice, "day", Some("token"), Some("UTC")).unwrap();
+        assert_eq!(renamed.rows.len(), 2);
+        assert!(renamed
+            .rows
+            .iter()
+            .chain(renamed.timeline.iter().flat_map(|bucket| &bucket.rows))
+            .all(|row| row.display_name.as_deref() == Some("same label")));
     }
 
     #[test]

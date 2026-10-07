@@ -94,6 +94,7 @@ pub(super) fn response(kind: &str, v: &Value) -> String {
         }
         "token" => format!("Token       {}\nName        {}\nStatus      {}\nCreated     {}\nExpires     {}\nLast used   {}\n",field(v,"id"),field(v,"name"),token_status(v),date(&v["created_at"]),date(&v["expires_at"]),date(&v["last_used_at"])),
         "revoke" => if v["revoked"].as_bool()==Some(true) { "Token revoked.\n".into() } else { "Token was already revoked or does not exist.\n".into() },
+        "rename" => "Token label saved.\n".into(),
         "usage" => usage(v),
         "doctor" => format!("Server       Connected\nRouting      {}\nOAuth        {} active accounts · {} require login\nModels       {} · {}\nGenerations  {} active / {} per user\nWebSockets   {} active / {} per user",routing(v),field(&v["oauth"],"active_accounts"),field(&v["oauth"],"reauth_required_accounts"),field(&v["catalog"],"models"),catalog_status(v),field(&v["limits"]["generations"],"active_for_user"),field(&v["limits"]["generations"],"per_user_limit"),field(&v["limits"]["websockets"],"active_for_user"),field(&v["limits"]["websockets"],"per_user_limit")),
         _ => "Request completed.\n".into(),
@@ -145,7 +146,7 @@ fn usage(v: &Value) -> String {
     for row in rows {
         text.push_str(&format!(
             "{} · {} requests\n  Input {} · Output {} · Cached {}\n",
-            field(&row, "name"),
+            safe(usage_name(&row)),
             field(&row, "requests"),
             field(&row, "input_tokens"),
             field(&row, "output_tokens"),
@@ -199,6 +200,12 @@ fn usage(v: &Value) -> String {
         }
     }
     text
+}
+pub(super) fn usage_name(row: &Value) -> &str {
+    row["display_name"]
+        .as_str()
+        .or_else(|| row["name"].as_str())
+        .unwrap_or("—")
 }
 pub(super) fn terminal(text: &str) -> String {
     use std::io::IsTerminal;
@@ -416,6 +423,17 @@ pub(super) fn accounts(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn usage_shows_labels_without_merging_identically_named_tokens() {
+        let report = serde_json::json!({"period":"day","rows":[
+            {"name":"tok_first","display_name":"Laptop","requests":3,"input_tokens":10,"output_tokens":2},
+            {"name":"tok_second","display_name":"Laptop","requests":7,"input_tokens":null,"output_tokens":null}
+        ]});
+        let text = response("usage", &report);
+        assert!(text.contains("Laptop · 3 requests"));
+        assert!(text.contains("Laptop · 7 requests"));
+        assert!(!text.contains("tok_"));
+    }
     #[test]
     fn model_display_reverses_the_catalog_order() {
         let value = serde_json::json!({"data":[{"id":"first"},{"id":"second"},{"id":"last"}]});

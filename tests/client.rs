@@ -29,6 +29,7 @@ case "$request" in
   *'"action":"account_set"'*) printf '%s' '{"ok":true,"result":{"enabled":true,"priority":-255,"locked":false,"rules":{"switch_at":20,"switch_at_short":-1,"switch_at_weekly":15},"settings":{"priority":-255,"switch_at":20,"switch_at_short":"off","switch_at_weekly":15}}}' ;;
   *'"action":"reset_prepare"'*) printf '%s' '{"ok":true,"result":{"confirmation":"synthetic-confirmation","email":"test@example.com","remaining_percent":5,"available_count":2,"credit_title":"Full reset","free_reset_at":2000000000,"recommend_wait":true,"credit_expires_at":null}}' ;;
   *'"action":"reset_confirm"'*) printf '%s' '{"ok":true,"result":{"code":"reset","windows_reset":2}}' ;;
+  *'"action":"usage"'*'"by":"token"'*) printf '%s' '{"ok":true,"result":{"period":"day","timezone":"Europe/Moscow","rows":[{"name":"tok_test","display_name":"Laptop","requests":3,"input_tokens":10,"output_tokens":2}]}}' ;;
   *'"action":"usage"'*) printf '%s' '{"ok":true,"result":{"period":"day","timezone":"Europe/Moscow","rows":[]}}' ;;
   *'"action":"token_create"'*) printf '%s' '{"ok":true,"result":{"token":{"id":"tok_created"},"secret":"SYNTHETIC_TEST_SECRET"}}' ;;
   *'"action":"token_rotate"'*) printf '%s' '{"ok":true,"result":{"token":{"id":"tok_rotated"},"secret":"SYNTHETIC_ROTATED_SECRET"}}' ;;
@@ -104,6 +105,53 @@ cat > "$EXETROUTER_TEST_CLIPBOARD"
         client
     }
 }
+#[test]
+fn cli_renames_without_clipboard_or_secret_and_usage_shows_labels() {
+    let client = Client::configured();
+    let output = client.run(&["tokens", "rename", "tok_test", "Private new label"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "Token label saved."
+    );
+    let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    let rename: serde_json::Value = serde_json::from_str(
+        requests
+            .lines()
+            .find(|line| line.contains("token_rename"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rename["id"], "tok_test");
+    assert!(rename["name"].as_str().unwrap().starts_with("exrp1:"));
+    assert!(!requests.contains("Private new label"));
+    assert!(!client.dir.path().join("clipboard").exists());
+    let output = client.run(&["tokens", "rename", "tok_test", "Another label", "--json"]);
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["updated"],
+        true
+    );
+    assert!(!client
+        .run(&["tokens", "rename", "tok_test", ""])
+        .status
+        .success());
+    let output = client.run(&["usage", "--by", "token"]);
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Laptop · 3 requests"));
+    assert!(!text.contains("tok_test"));
+    let output = client.run(&["usage", "--by", "token", "--json"]);
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["rows"][0]["name"], "tok_test");
+    assert_eq!(report["rows"][0]["display_name"], "Laptop");
+}
+
 #[test]
 fn saved_connection_removes_identity_flags_and_json_is_explicit() {
     let client = Client::configured();
@@ -379,8 +427,12 @@ fn real_terminal_dashboard_copies_secrets_without_rendering_and_restores_screen(
     clear_history(&mut output);
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Rotate token");
-    master.write_all(b"\r").unwrap();
-    wait(&mut master, &mut output, "Rotate");
+    master.write_all(b"o").unwrap();
+    wait(
+        &mut master,
+        &mut output,
+        "The old secret will stop working.",
+    );
     master.write_all(b"\x1b").unwrap();
     std::thread::sleep(Duration::from_millis(150));
     assert!(!fs::read_to_string(client.dir.path().join("requests.log"))
@@ -389,8 +441,12 @@ fn real_terminal_dashboard_copies_secrets_without_rendering_and_restores_screen(
     clear_history(&mut output);
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Rotate token");
-    master.write_all(b"\r").unwrap();
-    wait(&mut master, &mut output, "Rotate");
+    master.write_all(b"o").unwrap();
+    wait(
+        &mut master,
+        &mut output,
+        "The old secret will stop working.",
+    );
     clear_history(&mut output);
     fs::write(client.dir.path().join("clipboard-failure"), "").unwrap();
     master.write_all(b"y").unwrap();
@@ -409,8 +465,12 @@ fn real_terminal_dashboard_copies_secrets_without_rendering_and_restores_screen(
     clear_history(&mut output);
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Revoke token");
-    master.write_all(b"\x1b[B\r").unwrap();
-    wait(&mut master, &mut output, "Revoke");
+    master.write_all(b"x").unwrap();
+    wait(
+        &mut master,
+        &mut output,
+        "This token will stop working immediately.",
+    );
     clear_history(&mut output);
     master.write_all(b"y").unwrap();
     wait(&mut master, &mut output, "revoked");
@@ -710,6 +770,48 @@ impl Drop for Dashboard {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+#[test]
+fn dashboard_renames_from_actions_and_cancels_or_rejects_empty_edits() {
+    let client = Client::configured();
+    let mut dashboard = Dashboard::start(client.command());
+    dashboard.wait("Actions Enter");
+    dashboard.send(b"3");
+    dashboard.wait("TOKEN INFORMATION");
+    dashboard.send(b"\r");
+    dashboard.wait("Token actions");
+    dashboard.send(b"\r");
+    dashboard.wait("Save Enter");
+    dashboard.wait("Laptop");
+    let before = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    dashboard.dismiss("Save Enter");
+    assert_eq!(
+        fs::read_to_string(client.dir.path().join("requests.log")).unwrap(),
+        before
+    );
+    dashboard.send(b"l");
+    dashboard.wait("Save Enter");
+    dashboard.send(b"\x15\r");
+    dashboard.wait("Token label must be");
+    assert_eq!(
+        fs::read_to_string(client.dir.path().join("requests.log")).unwrap(),
+        before
+    );
+    dashboard.send("Личный ноутбук".as_bytes());
+    dashboard.send(b"\r");
+    dashboard.wait("Token label saved.");
+    dashboard.wait("TOKEN INFORMATION");
+    dashboard.quit();
+    let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    assert!(
+        requests.matches("\"action\":\"token_rename\"").count()
+            > before.matches("\"action\":\"token_rename\"").count()
+    );
+    assert!(!requests.contains("Личный ноутбук"));
+    assert!(!requests.contains("token_rotate"));
+    assert!(!requests.contains("token_create"));
+    assert!(!client.dir.path().join("clipboard").exists());
 }
 
 #[test]
