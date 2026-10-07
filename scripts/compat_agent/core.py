@@ -78,6 +78,7 @@ def writable(path):
         path.startswith(("src/", "tests/", "docs/"))
         and not path.startswith(("src/migrations/", "docs/assets/"))
         and path.endswith((".rs", ".md", ".json"))
+        and PurePosixPath(path).name not in {"AGENTS.md", "CLAUDE.md", "SECURITY.md"}
         and path not in {"docs/protocol-sources.json", "docs/compat-agent.md"}
     )
 

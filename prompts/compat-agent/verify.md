@@ -1,5 +1,6 @@
 Independently inspect the upstream change and current ExetRouter implementation.
-First submit your own preliminary verdict; the controller will then reveal the
+First submit your own complete, source-cited preliminary verdict through
+submit_preliminary; the controller validates it before revealing the
 triage report. Challenge every finding, looking for existing handling, optional
 client behavior, wrong backend assumptions and violations of router invariants.
 Return confirmed only with a concrete source-backed mismatch, a minimal solution

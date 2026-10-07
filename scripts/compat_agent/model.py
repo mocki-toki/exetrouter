@@ -69,8 +69,10 @@ class Model:
                  "decision": {"type": "string", "enum": sorted(DECISIONS[phase])}}}},
         ]
         if phase == "verify":
-            tools.append(tool("submit_preliminary", "Freeze independent verdict and reveal triage.",
-                              {"summary": {"type": "string"}}, ["summary"]))
+            tools.append({"type": "function", "name": "submit_preliminary", "strict": False,
+                          "description": "Freeze an evidence-backed independent verdict, then reveal triage.",
+                          "parameters": {**SCHEMA, "properties": {**SCHEMA["properties"],
+                              "decision": {"type": "string", "enum": sorted(DECISIONS["verify"])}}}})
         if phase == "implement":
             tools.extend([
                 tool("write_file", "Replace an allowed source file. No deletes, symlinks or automation edits.",
@@ -113,10 +115,10 @@ class Model:
                 sandbox.validate_citations(result)
                 return result
             if name == "submit_preliminary" and phase == "verify" and not revealed:
-                if not isinstance(args.get("summary"), str) or not args["summary"]:
-                    raise Stop("invalid_preliminary")
+                independent = decision("verify", args)
+                sandbox.validate_citations(independent)
                 revealed = True
-                result = {"triage": triage}
+                result = {"independent_verdict": independent, "triage": triage}
             else:
                 result = sandbox.dispatch(name, args, editable=phase == "implement")
             history.append({"type": "function_call_output", "call_id": item["call_id"],

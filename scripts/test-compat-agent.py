@@ -90,8 +90,9 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(writable("src/server.rs"))
         self.assertTrue(writable("tests/new.rs"))
         for path in ("AGENTS.md", "SECURITY.md", ".github/workflows/ci.yml", "Cargo.toml",
-                     "src/migrations/10.sql", "scripts/check-publication.py",
-                     "docs/protocol-sources.json", "docs/compat-agent.md", "docs/assets/new.jpg"):
+                      "src/migrations/10.sql", "scripts/check-publication.py",
+                      "docs/protocol-sources.json", "docs/compat-agent.md", "docs/assets/new.jpg",
+                      "tests/AGENTS.md", "src/CLAUDE.md", "docs/SECURITY.md"):
             self.assertFalse(writable(path), path)
 
     def test_decisions_fail_closed(self):
@@ -185,7 +186,7 @@ class ModelTests(unittest.TestCase):
 
     def test_efforts_full_history_and_blind_verify(self):
         calls = []
-        queue = [self.response("submit_preliminary", {"summary": "Independent analysis"}),
+        queue = [self.response("submit_preliminary", verdict("rejected")),
                  self.response("submit_decision", verdict("rejected"))]
         def api(url, token, method, body):
             calls.append(copy.deepcopy(body))
@@ -206,6 +207,23 @@ class ModelTests(unittest.TestCase):
         model = Model(ROOT, lambda *a: self.response("submit_decision", verdict("rejected")))
         with self.assertRaisesRegex(Stop, "independent_verdict_missing"):
             model.run("verify", {}, FakeBox(), triage={})
+
+    def test_preliminary_verdict_requires_complete_evidence(self):
+        for args in ({"summary": "I will analyze"}, verdict("confirmed"),
+                     {**verdict("rejected"), "coverage_complete": False}):
+            with self.subTest(args=args), self.assertRaises(Stop):
+                model = Model(ROOT, lambda *a: self.response("submit_preliminary", args))
+                model.run("verify", {}, FakeBox(), triage={})
+
+    def test_preliminary_citations_are_verified_before_reveal(self):
+        box = FakeBox()
+        def reject_citations(value):
+            raise Stop("citation_not_found")
+        box.validate_citations = reject_citations
+        model = Model(ROOT, lambda *a: self.response("submit_preliminary", {
+            **verdict("confirmed"), "findings": [finding()]}))
+        with self.assertRaisesRegex(Stop, "citation_not_found"):
+            model.run("verify", {}, box, triage={})
 
     def test_medium_cannot_edit(self):
         requests = []
