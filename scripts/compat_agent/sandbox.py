@@ -51,6 +51,12 @@ def native_observation(result):
         observation["websocket"] = client[2] == "true"
     fields = {"bytes": int, "json_events": int, "error_events": int,
               "tool_marker": bool, "smoke_marker": bool}
+    probe_numbers = ("tool_results", "tool_markers", "primary_requests", "submitted_requests",
+                     "http_received", "http_forwarded", "request_tools", "additional_tools")
+    known_categories = {"unknown tool", "not found", "namespace", "invalid", "arguments",
+                        "sandbox", "permission", "not permitted", "error"}
+    known_tools = {"exec_command", "functions.exec_command", "shell", "functions.shell",
+                   "exec", "functions.exec", "shell_command", "functions.shell_command"}
     for match in re.finditer(r"\{[^{}\n]{1,1000}\}", text):
         try:
             data = json.loads(match[0])
@@ -59,7 +65,13 @@ def native_observation(result):
         if isinstance(data, dict) and set(data) == fields.keys() and all(
                 type(data[k]) is kind for k, kind in fields.items()):
             observation["client_counters"] = data
-            break
+        if isinstance(data, dict) and all(type(data.get(k)) is int for k in probe_numbers):
+            categories, names = data.get("categories"), data.get("tool_names")
+            if (isinstance(categories, list) and isinstance(names, list)
+                    and all(isinstance(v, str) and v in known_categories for v in categories)
+                    and all(isinstance(v, str) and v in known_tools for v in names)):
+                observation["probe_counters"] = {k: data[k] for k in probe_numbers}
+                observation["probe_counters"].update(categories=categories, tool_names=names)
     return observation
 
 

@@ -476,6 +476,22 @@ class LoaderTests(unittest.TestCase):
             self.assertNotIn("client_counters", observed)
             self.assertNotIn("PRIVATE", json.dumps(observed))
 
+    def test_native_probe_counters_exclude_unknown_categories_and_keys(self):
+        from types import SimpleNamespace
+        numbers = ("tool_results", "tool_markers", "primary_requests", "submitted_requests",
+                   "http_received", "http_forwarded", "request_tools", "additional_tools")
+        data = {k: 1 for k in numbers}
+        data.update(categories=["sandbox", "permission"], tool_names=["exec_command"],
+                    credential="PRIVATE_SECRET")
+        observed = native_observation(SimpleNamespace(returncode=101, stdout=json.dumps(data).encode()))
+        self.assertEqual(observed["probe_counters"]["categories"], ["sandbox", "permission"])
+        self.assertNotIn("PRIVATE", json.dumps(observed))
+        for change in ({"categories": ["PRIVATE"]}, {"tool_names": ["PRIVATE"]}, {"tool_results": "PRIVATE"}):
+            output = json.dumps({**data, **change}).encode()
+            observed = native_observation(SimpleNamespace(returncode=101, stdout=output))
+            self.assertNotIn("probe_counters", observed)
+            self.assertNotIn("PRIVATE", json.dumps(observed))
+
     def test_native_categories_never_echo_candidate_output(self):
         from types import SimpleNamespace
         for output, category in ((b"client version does not match the reviewed matrix", "version_mismatch"),

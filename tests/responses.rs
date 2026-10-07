@@ -4471,11 +4471,11 @@ async fn current_clients_complete_tool_cycles_over_http_and_websocket() {
         .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let observed = probe.observed.lock().unwrap().metadata();
         assert!(
-            probe.observed.lock().unwrap().metadata()["tool_markers"]
-                .as_u64()
-                .unwrap()
-                > 0
+            observed["tool_markers"].as_u64().unwrap() > 0,
+            "{client} websocket={websocket}: tool marker missing; client={}; probe={observed}",
+            native::diagnostic(&output.stdout)
         );
         assert!(
             output.status.success()
