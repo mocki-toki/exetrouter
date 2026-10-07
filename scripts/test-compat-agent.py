@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.compat_agent.core import (GitHub, Ledger, MODEL, STATE_BRANCH, Stop,
                                       collect, decision, digest, source_path, writable)
 from scripts.compat_agent.model import Model
-from scripts.compat_agent.sandbox import Sandbox
+from scripts.compat_agent.sandbox import Sandbox, command
 from scripts.compat_agent.__main__ import publish
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -287,6 +287,15 @@ class SandboxTests(unittest.TestCase):
         bad["upstream"][0]["symbol"] = "nonexistent"
         with self.assertRaisesRegex(Stop, "citation_not_found"):
             self.box.validate_citations({"findings": [bad]})
+
+    def test_command_output_is_bounded_while_running(self):
+        with patch("scripts.compat_agent.sandbox.MAX_BYTES", 128), self.assertRaisesRegex(
+                Stop, "command_output_too_large"):
+            command([sys.executable, "-c", "import sys; sys.stdout.write('x'*100000)"])
+
+    def test_command_timeout(self):
+        with self.assertRaisesRegex(Stop, "command_failed_or_timed_out"):
+            command([sys.executable, "-c", "import time; time.sleep(10)"], timeout=0.1)
 
 
 class LoaderTests(unittest.TestCase):

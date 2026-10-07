@@ -2,7 +2,9 @@
 import os
 import json
 import subprocess
+import selectors
 import tempfile
+import time
 from pathlib import Path
 
 from .core import MAX_BYTES, Stop, source_path, writable
@@ -16,15 +18,37 @@ CHECKS = {
 
 
 def command(args, cwd=None, timeout=1800):
+    process = None
     try:
-        result = subprocess.run(args, cwd=cwd, capture_output=True, timeout=timeout,
-                                env={k: v for k, v in os.environ.items() if k in {
-                                    "PATH", "HOME", "TMPDIR", "DOCKER_HOST", "DOCKER_CONFIG"}})
+        process = subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   env={k: v for k, v in os.environ.items() if k in {
+                                       "PATH", "HOME", "TMPDIR", "DOCKER_HOST", "DOCKER_CONFIG"}})
+        output = bytearray()
+        deadline = time.monotonic() + timeout
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise Stop("command_failed_or_timed_out")
+                for key, _ in selector.select(min(remaining, 1)):
+                    chunk = os.read(key.fd, min(65536, MAX_BYTES + 1 - len(output)))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    output.extend(chunk)
+                    if len(output) > MAX_BYTES:
+                        raise Stop("command_output_too_large")
+            code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(args, code, bytes(output), b"")
     except (OSError, subprocess.TimeoutExpired):
         raise Stop("command_failed_or_timed_out") from None
-    if len(result.stdout) + len(result.stderr) > MAX_BYTES:
-        raise Stop("command_output_too_large")
-    return result
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            process.stdout.close()
 
 
 class Sandbox:
@@ -72,11 +96,11 @@ class Sandbox:
         result = command(["docker", "run", "-d", "--name", self.name, "--network", "none",
                           "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                           "--pids-limit", "512", "--memory", "6g", "--cpus", "2",
-                          "--read-only", "--tmpfs", "/tmp:rw,size=128m",
+                          "--read-only", "--tmpfs", "/tmp:rw,exec,size=128m",
                           "--mount", "type=bind,src=" + str(self.path) + ",dst=/work,readonly",
                           "--mount", "type=bind,src=" + str(self.clients) + ",dst=/clients,readonly",
-                          "--tmpfs", "/cache:rw,size=1g",
-                          "--tmpfs", "/work/target:rw,size=3g", self.image, "sleep", "infinity"])
+                          "--tmpfs", "/cache:rw,exec,size=1g",
+                          "--tmpfs", "/work/target:rw,exec,size=3g", self.image, "sleep", "infinity"])
         if result.returncode:
             raise Stop("sandbox_start_failed")
         self.started = True
