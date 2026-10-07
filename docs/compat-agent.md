@@ -65,6 +65,8 @@ mocks, without any AI request, PR publication or durable state change. It logs
 only fixed diagnostic categories, validated numeric versions/exit status, fixture
 line/column, a fixed client/transport identifier and allowlisted numeric/boolean
 client counters, not client output or fixture payloads.
+The missing-tool-marker assertion exposes the loopback probe's safe counters;
+diagnostic categories and tool names are restricted to fixed allowlists.
 
 ## State and failures
 
