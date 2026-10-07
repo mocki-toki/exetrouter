@@ -18,6 +18,8 @@ release versions, migrations, installation, deployment, automation and policy
 changes require a human. Production fixes require a test-first observed failure.
 Formatting, offline clippy/tests and publication checks must pass before a PR.
 Candidate execution runs in a bounded, credential-free, networkless container.
+Its temporary dev/test profiles omit debug symbols and incremental caches to fit
+the bounded target volume; debug assertions and all named checks stay enabled.
 Upstream source/config is never executed or loaded as agent instructions.
 
 Released changes produce normal PRs; default-branch changes produce draft PRs.
