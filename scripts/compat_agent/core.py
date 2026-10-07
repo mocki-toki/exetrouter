@@ -149,6 +149,27 @@ class GitHub:
             raise Stop("invalid_revision")
         return sha
 
+    def tree(self, repo, sha):
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise Stop("invalid_revision")
+        commit = self.api("repos/" + repo + "/git/commits/" + sha)
+        data = self.api("repos/" + repo + "/git/trees/" + commit["tree"]["sha"] + "?recursive=1")
+        if data.get("truncated") is not False or not isinstance(data.get("tree"), list):
+            raise Stop("source_tree_incomplete")
+        if len(data["tree"]) > 50000:
+            raise Stop("source_tree_incomplete")
+        result = {}
+        for item in data["tree"]:
+            path = source_path(item["path"])
+            if item["type"] == "tree":
+                continue
+            if item["type"] not in {"blob", "commit"} or not re.fullmatch(r"[0-9a-f]{40}", item["sha"]):
+                raise Stop("source_tree_incomplete")
+            if path in result:
+                raise Stop("source_tree_incomplete")
+            result[path] = {k: item[k] for k in ("sha", "mode", "type")}
+        return result
+
     def prs(self):
         result = []
         for page in range(1, 101):
@@ -223,6 +244,7 @@ def collect(gh, manifest, cursors):
         branch = gh.api("repos/" + repo)["default_branch"]
         observations.append((repo + ":branch", repo, gh.resolve(repo, branch), None))
     events = []
+    trees = {}
     for track, repo, sha, version in observations:
         fallback = baseline["codex" if repo == "openai/codex" else "opencode"]["commit"]
         if track in baseline:
@@ -230,17 +252,28 @@ def collect(gh, manifest, cursors):
         before = cursors.get(track, fallback)
         if before == sha:
             continue
-        diff = gh.api(f"repos/{repo}/compare/{before}...{sha}?per_page=1")
-        files = diff.get("files", [])
-        # GitHub compare files are capped at 300, irrespective of pagination.
-        # Fail closed instead of allowing a truncated negative classification.
-        if diff.get("status") not in {"ahead", "identical"} or len(files) >= 300:
-            events.append({"track": track, "repository": repo, "before": before,
-                           "after": sha, "version": version,
-                           "blocked": "comparison_incomplete_or_diverged"})
-            continue
-        events.append({"track": track, "repository": repo, "before": before,
-                       "after": sha, "version": version,
-                       "files": [{k: f[k] for k in ("filename", "previous_filename", "status", "patch") if k in f}
-                                 for f in files]})
+        event = {"track": track, "repository": repo, "before": before,
+                 "after": sha, "version": version, "comparison": "exact_source_trees"}
+        try:
+            # Compare both pinned snapshots, not a merge base. Release branches
+            # legitimately diverge; Compare also caps its file inventory at 300.
+            for revision in (before, sha):
+                if (repo, revision) not in trees:
+                    trees[repo, revision] = gh.tree(repo, revision)
+            old, new = trees[repo, before], trees[repo, sha]
+            files = []
+            for path in sorted(old.keys() | new.keys()):
+                if old.get(path) == new.get(path):
+                    continue
+                files.append({"filename": path, "status": "added" if path not in old else
+                              "removed" if path not in new else "modified",
+                              "before": old.get(path), "after": new.get(path)})
+            if len(files) > 5000 or len(json.dumps(files).encode()) > 1024 * 1024:
+                raise Stop("change_inventory_too_large")
+            event["files"] = files
+        except Stop as error:
+            if str(error) not in {"source_tree_incomplete", "change_inventory_too_large"}:
+                raise
+            event["blocked"] = str(error)
+        events.append(event)
     return events

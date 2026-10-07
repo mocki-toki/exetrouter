@@ -148,15 +148,66 @@ class PolicyTests(unittest.TestCase):
                     {"title": "Synthetic fix", "body": "x" * 60})
         self.assertFalse(gh.writes)
 
-    def test_incomplete_compare(self):
+    def test_incomplete_tree_blocks_observation(self):
         gh = FakeGH()
-        gh.api = lambda path: ({"default_branch": "dev"} if "compare" not in path else
-                               {"status": "ahead", "files": [{}] * 300})
+        gh.api = lambda path: {"default_branch": "dev"}
+        def incomplete(repo, sha):
+            raise Stop("source_tree_incomplete")
+        gh.tree = incomplete
         manifest = {"projects": [{"id": i, "commit": NEW} for i in ("codex", "opencode", "opencode-v1")]}
         with patch("scripts.compat_agent.core.request", return_value={"version": "1.0.0"}):
             events = collect(gh, manifest, {})
             self.assertTrue(events)
-            self.assertTrue(all(e.get("blocked") == "comparison_incomplete_or_diverged" for e in events))
+            self.assertTrue(all(e.get("blocked") == "source_tree_incomplete" for e in events))
+
+    def test_exact_snapshots_include_over_300_changes_and_mode_changes(self):
+        gh = FakeGH()
+        gh.api = lambda path: {"default_branch": "dev"}
+        old = {"src/changed.rs": {"sha": SHA, "mode": "100644", "type": "blob"},
+               "src/removed.rs": {"sha": SHA, "mode": "100644", "type": "blob"}}
+        new = {"src/changed.rs": {"sha": SHA, "mode": "100755", "type": "blob"}}
+        new.update({f"src/new{i}.rs": {"sha": NEW, "mode": "100644", "type": "blob"}
+                    for i in range(301)})
+        calls = []
+        def tree(repo, sha):
+            calls.append((repo, sha))
+            return old if sha == NEW else new
+        gh.tree = tree
+        manifest = {"projects": [{"id": i, "commit": NEW} for i in ("codex", "opencode", "opencode-v1")]}
+        with patch("scripts.compat_agent.core.request", return_value={"version": "1.0.0"}):
+            events = collect(gh, manifest, {})
+        self.assertEqual(len(events), 5)
+        self.assertEqual(len(calls), 4)  # Cache shared snapshots across tracks.
+        for event in events:
+            self.assertNotIn("blocked", event)
+            self.assertEqual(len(event["files"]), 303)
+            kinds = {f["filename"]: f["status"] for f in event["files"]}
+            self.assertEqual(kinds["src/changed.rs"], "modified")
+            self.assertEqual(kinds["src/removed.rs"], "removed")
+            self.assertEqual(kinds["src/new0.rs"], "added")
+
+    def test_tree_rejects_truncation_duplicates_and_invalid_paths(self):
+        gh = GitHub("example/router", "synthetic-secret")
+        entry = {"path": "src/example.rs", "type": "blob", "mode": "100644", "sha": SHA}
+        for data in ({"truncated": True, "tree": []}, {"tree": []},
+                     {"truncated": False, "tree": [entry, entry]},
+                     {"truncated": False, "tree": [{**entry, "path": "../escape"}]}):
+            gh.api = lambda path: {"tree": {"sha": NEW}} if "/git/commits/" in path else data
+            with self.subTest(data=data), self.assertRaises(Stop):
+                gh.tree("example/upstream", SHA)
+        gh.api = lambda path: {"tree": {"sha": NEW}} if "/git/commits/" in path else {
+            "truncated": False, "tree": [entry]}
+        self.assertEqual(gh.tree("example/upstream", SHA)["src/example.rs"]["sha"], SHA)
+
+    def test_oversized_inventory_blocks_observation(self):
+        gh = FakeGH()
+        gh.api = lambda path: {"default_branch": "dev"}
+        gh.tree = lambda repo, sha: {} if sha == NEW else {
+            f"src/new{i}.rs": {"sha": SHA, "mode": "100644", "type": "blob"} for i in range(5001)}
+        manifest = {"projects": [{"id": i, "commit": NEW} for i in ("codex", "opencode", "opencode-v1")]}
+        with patch("scripts.compat_agent.core.request", return_value={"version": "1.0.0"}):
+            events = collect(gh, manifest, {})
+        self.assertTrue(all(e.get("blocked") == "change_inventory_too_large" for e in events))
 
 
 class FakeBox:

@@ -76,6 +76,7 @@ def main():
                 # rejection is sticky until the operator explicitly clears it.
                 held.add(attempt.get("repository"))
     # One bounded package per run; later observations remain queued via cursors.
+    blocked = False
     for event in events:
         if event["repository"] in held:
             continue
@@ -89,9 +90,10 @@ def main():
         if not args.dry_run and not ledger.claim(key, event["track"], event["after"], event["repository"]):
             continue
         if event.get("blocked"):
+            blocked = True
             if not args.dry_run:
                 ledger.finish(key, "blocked")
-            print("compat_agent: comparison_incomplete_or_diverged")
+            print("compat_agent: " + event["blocked"])
             continue
         box = Sandbox(root, gh, event, base)
         try:
@@ -168,6 +170,8 @@ def main():
             raise
         finally:
             box.close()
+    if blocked:
+        raise Stop("source_comparison_blocked")
     print("compat_agent: previously_attempted")
 
 
