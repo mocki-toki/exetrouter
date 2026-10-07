@@ -24,7 +24,7 @@ try:
             print(result["diagnostics"], file=sys.stderr)
             raise SystemExit("Sandbox smoke check failed: " + name)
     probe = command(["docker", "exec", box.name, "sh", "-c",
-                     "test ! -e /work/.git && test ! -w /work/Cargo.toml && test -w /work/target"])
+                     "test \"$(id -u)\" != 0 && test ! -e /work/.git && test ! -w /work/Cargo.toml && test -w /work/target"])
     if probe.returncode:
         raise SystemExit("Sandbox filesystem boundary failed")
     print("Credential-free sandbox checks passed")

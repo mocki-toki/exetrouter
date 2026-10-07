@@ -5,6 +5,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 \
 WORKDIR /work
 COPY . /work
 RUN cargo fetch --locked
+RUN useradd --uid 10001 --create-home compat \
+    && chmod -R a+rX /usr/local/cargo /usr/local/rustup
+USER 10001:10001
+ENV HOME=/home/compat
 ENV CARGO_NET_OFFLINE=true
 ENV CARGO_HOME=/cache
 ENV CARGO_BUILD_JOBS=2

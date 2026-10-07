@@ -99,14 +99,15 @@ class Sandbox:
                           "--read-only", "--tmpfs", "/tmp:rw,exec,size=128m",
                           "--mount", "type=bind,src=" + str(self.path) + ",dst=/work,readonly",
                           "--mount", "type=bind,src=" + str(self.clients) + ",dst=/clients,readonly",
-                          "--tmpfs", "/cache:rw,exec,size=1g",
-                          "--tmpfs", "/work/target:rw,exec,size=3g", self.image, "sleep", "infinity"])
+                          "--tmpfs", "/cache:rw,exec,size=1g,uid=10001,gid=10001,mode=0700",
+                          "--tmpfs", "/work/target:rw,exec,size=3g,uid=10001,gid=10001,mode=0700",
+                          self.image, "sleep", "infinity"])
         if result.returncode:
             raise Stop("sandbox_start_failed")
         self.started = True
         # Wait for cache initialization synchronously; detached entrypoint copying
         # would race the first offline Cargo invocation.
-        result = command(["docker", "exec", self.name, "cp", "-a", "/usr/local/cargo/.", "/cache/"])
+        result = command(["docker", "exec", self.name, "cp", "-R", "/usr/local/cargo/.", "/cache/"])
         if result.returncode:
             raise Stop("sandbox_cache_initialization_failed")
 
