@@ -677,8 +677,14 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
                 let body: Value = serde_json::from_str(&text).unwrap();
                 use axum::extract::ws::{CloseFrame, Message};
                 match body["metadata"]["mode"].as_str() {
-                    Some("ws_close" | "ws_partial_close") => {
-                        if body["metadata"]["mode"] == "ws_partial_close" {
+                    Some(
+                        "ws_close"
+                        | "ws_partial_close"
+                        | "ws_normal_partial_close"
+                        | "ws_control_close",
+                    ) => {
+                        let mode = body["metadata"]["mode"].as_str().unwrap();
+                        if mode != "ws_close" {
                             for event in events(&body).into_iter().take(2) {
                                 socket
                                     .send(Message::Text(event.to_string().into()))
@@ -686,9 +692,38 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
                                     .unwrap();
                             }
                         }
+                        if mode == "ws_normal_partial_close" {
+                            socket
+                                .send(Message::Text(
+                                    json!({
+                                        "type":"response.output_item.done",
+                                        "item":{"type":"message","id":"msg-done","content":[]}
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ))
+                                .await
+                                .unwrap();
+                        }
+                        if mode == "ws_control_close" {
+                            socket
+                                .send(Message::Text(
+                                    json!({"type":"codex.rate_limits"}).to_string().into(),
+                                ))
+                                .await
+                                .unwrap();
+                            socket
+                                .send(Message::Pong(HEADER.as_bytes().into()))
+                                .await
+                                .unwrap();
+                        }
                         let _ = socket
                             .send(Message::Close(Some(CloseFrame {
-                                code: 1011,
+                                code: if mode == "ws_normal_partial_close" {
+                                    1000
+                                } else {
+                                    1011
+                                },
                                 reason: ERROR.into(),
                             })))
                             .await;
@@ -915,6 +950,8 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
     let ws_cases = [
         ("ws_close", "upstream_close"),
         ("ws_partial_close", "upstream_close"),
+        ("ws_normal_partial_close", "upstream_close"),
+        ("ws_control_close", "upstream_close"),
         ("ws_reset", "upstream_read_error"),
         ("ws_binary", "upstream_invalid_frame"),
         ("ws_invalid_json", "upstream_invalid_json"),
@@ -922,7 +959,8 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
         ("client_concurrent", "client_concurrent_request"),
         ("client_close", "client_close"),
     ];
-    for (mode, _) in ws_cases {
+    let mut client_errors = Vec::new();
+    for (mode, reason) in ws_cases {
         let db = rusqlite::Connection::open(server.dir.path().join("state.sqlite")).unwrap();
         let before: i64 = db
             .query_row("SELECT count(*) FROM usage_events", [], |row| row.get(0))
@@ -985,6 +1023,12 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
                     if event["type"] == "error" {
                         assert_eq!(event["error"]["type"], "upstream_interrupted");
                         assert_eq!(event["error"]["code"], "upstream_interrupted");
+                        let message = event["error"]["message"].as_str().unwrap();
+                        assert!(message.contains(&format!("reason={reason}")));
+                        for marker in [ERROR, OUTPUT, TOOL, HEADER] {
+                            assert!(!message.contains(marker));
+                        }
+                        client_errors.push((mode, message.to_owned()));
                         break;
                     }
                     assert_ne!(event["type"], "response.completed");
@@ -1008,6 +1052,38 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         db.execute("DELETE FROM oauth_health", []).unwrap();
+    }
+    // Accounting finishes before socket cleanup; wait for correlated closure logs.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let logs = fs::read_to_string(server.dir.path().join("server.log")).unwrap();
+        let fields: Vec<Value> = logs
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .map(|line| line["fields"].clone())
+            .collect();
+        let interrupted: Vec<&Value> = fields
+            .iter()
+            .filter(|entry| {
+                entry["event"] == "upstream_stream_interrupted"
+                    && entry["client_connection_id"].is_string()
+            })
+            .collect();
+        if interrupted.len() == ws_cases.len()
+            && interrupted.iter().all(|request| {
+                fields.iter().any(|entry| {
+                    entry["event"] == "client_websocket_closed"
+                        && entry["client_connection_id"] == request["client_connection_id"]
+                })
+            })
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "missing socket closure diagnostics"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     server.stop();
     let logs = fs::read_to_string(server.dir.path().join("server.log")).unwrap();
@@ -1055,13 +1131,47 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
                 && entry["request_id"] == fields["request_id"]
                 && entry["connection_id"] == started["connection_id"]
         }));
+        assert_eq!(fields["connection_id"], started["connection_id"]);
+        assert_eq!(
+            fields["client_connection_id"],
+            started["client_connection_id"]
+        );
+        assert_eq!(fields["frame_sequence"], started["frame_sequence"]);
+        assert!(fields["connection_age_ms"].as_u64().is_some());
+        assert!(fields["finished_requests"].as_u64().is_some());
+        assert!(fields["pings"].as_u64().is_some());
+        assert!(fields["pongs"].as_u64().is_some());
+        assert_eq!(fields["terminal_event_seen"], false);
+        assert_eq!(fields["response_completed_seen"], false);
+        assert_eq!(
+            fields["failure_side"],
+            if mode.starts_with("client_") {
+                "client"
+            } else {
+                "upstream"
+            }
+        );
         assert!(diagnostics.iter().any(|entry| {
-            entry["event"] == "websocket_request_interrupted"
-                && entry["request_id"] == fields["request_id"]
-                && entry["connection_id"] == started["connection_id"]
-                && entry["client_connection_id"] == started["client_connection_id"]
+            entry["event"] == "client_websocket_closed"
+                && entry["client_connection_id"] == fields["client_connection_id"]
+                && entry["reason"] == reason
         }));
-        if mode == "ws_partial_close" {
+        if mode != "client_close" {
+            let message = &client_errors
+                .iter()
+                .find(|(case, _)| *case == mode)
+                .unwrap()
+                .1;
+            assert!(message.contains(&format!(
+                "request={}",
+                fields["request_id"].as_str().unwrap()
+            )));
+            assert!(message.contains(&format!("stage={}", fields["stage"].as_str().unwrap())));
+        }
+        if matches!(
+            mode,
+            "ws_partial_close" | "ws_normal_partial_close" | "ws_control_close"
+        ) {
             assert!(diagnostics.iter().any(|entry| {
                 entry["event"] == "upstream_websocket_first_event"
                     && entry["request_id"] == fields["request_id"]
@@ -1079,11 +1189,30 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
                 "receive"
             }
         );
-        if matches!(mode, "ws_close" | "ws_partial_close" | "client_close") {
+        if matches!(
+            mode,
+            "ws_close"
+                | "ws_partial_close"
+                | "ws_normal_partial_close"
+                | "ws_control_close"
+                | "client_close"
+        ) {
             assert_eq!(
                 fields["close_code"],
-                if mode == "client_close" { 1000 } else { 1011 }
+                if matches!(mode, "client_close" | "ws_normal_partial_close") {
+                    1000
+                } else {
+                    1011
+                }
             );
+            if mode != "client_close" {
+                let message = &client_errors
+                    .iter()
+                    .find(|(case, _)| *case == mode)
+                    .unwrap()
+                    .1;
+                assert!(message.contains(&format!("close_code={}", fields["close_code"])));
+            }
         }
         if mode == "ws_reset" {
             assert_eq!(
@@ -1091,15 +1220,44 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
                 "reset_without_close_handshake"
             );
         }
-        if mode == "ws_partial_close" {
+        if matches!(
+            mode,
+            "ws_partial_close" | "ws_normal_partial_close" | "ws_control_close"
+        ) {
             assert_eq!(fields["response_created"], true);
             assert_eq!(fields["output_seen"], true);
-            assert_eq!(fields["events_seen"], 2);
-            assert_eq!(fields["last_event_kind"], "response.output_text.delta");
+            assert_eq!(
+                fields["events_seen"],
+                if mode == "ws_partial_close" { 2 } else { 3 }
+            );
+            assert_eq!(
+                fields["last_event_kind"],
+                match mode {
+                    "ws_normal_partial_close" => "response.output_item.done",
+                    "ws_control_close" => "codex.rate_limits",
+                    _ => "response.output_text.delta",
+                }
+            );
+            assert!(fields["last_response_event_age_ms"].as_u64().is_some());
+            assert!(fields["last_output_event_age_ms"].as_u64().is_some());
+            assert!(fields["last_peer_frame_age_ms"].as_u64().is_some());
+            if mode == "ws_control_close" {
+                assert_eq!(fields["pongs"], 1);
+                assert!(
+                    fields["last_pong_age_ms"].as_u64().unwrap()
+                        <= fields["last_output_event_age_ms"].as_u64().unwrap()
+                );
+            }
         } else if !mode.starts_with("client_") && mode != "ws_invalid_event" {
             assert_eq!(fields["response_created"], false);
             assert_eq!(fields["events_seen"], 0);
             assert_eq!(fields["last_event_kind"], "none");
+            assert!(
+                fields["last_peer_frame_age_ms"].is_null()
+                    || matches!(mode, "ws_invalid_json" | "ws_binary")
+            );
+            assert!(fields["last_response_event_age_ms"].is_null());
+            assert!(fields["last_output_event_age_ms"].is_null());
         }
     }
     for entry in fs::read_dir(server.dir.path()).unwrap() {

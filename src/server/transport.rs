@@ -31,6 +31,8 @@ fn ws_retirement_deadline(connected: Instant, idle_since: Instant) -> Instant {
 // Pongs and control frames prove life, not acceptance or semantic progress.
 struct WsLiveness {
     last_frame: Instant,
+    last_peer_frame: Option<Instant>,
+    last_pong: Option<Instant>,
     response_started: bool,
     pings: u64,
     pongs: u64,
@@ -40,6 +42,8 @@ impl WsLiveness {
     fn new(now: Instant) -> Self {
         Self {
             last_frame: now,
+            last_peer_frame: None,
+            last_pong: None,
             response_started: false,
             pings: 0,
             pongs: 0,
@@ -57,8 +61,10 @@ impl WsLiveness {
 
     fn received(&mut self, now: Instant, pong: bool) {
         self.last_frame = now;
+        self.last_peer_frame = Some(now);
         if pong {
             self.pongs = self.pongs.saturating_add(1);
+            self.last_pong = Some(now);
         }
     }
 }
@@ -85,6 +91,32 @@ impl WsInterruption {
     fn at(mut self, stage: &'static str) -> Self {
         self.stage = stage;
         self
+    }
+
+    fn failure_side(&self) -> &'static str {
+        if self.reason.starts_with("upstream_")
+            || matches!(self.reason, "read_timeout" | "pre_response_silence_timeout")
+        {
+            "upstream"
+        } else if self.reason.starts_with("client_") {
+            "client"
+        } else {
+            "router"
+        }
+    }
+
+    fn client_error(&self, id: &RequestId) -> String {
+        let close = self
+            .close_code
+            .map(|code| format!(", close_code={code}"))
+            .unwrap_or_default();
+        ws_error(
+            "upstream_interrupted",
+            &format!(
+                "connection interrupted (reason={}{close}, stage={}, request={})",
+                self.reason, self.stage, id.0
+            ),
+        )
     }
 
     fn transport(reason: &'static str, error: &tokio_tungstenite::tungstenite::Error) -> Self {
@@ -130,6 +162,10 @@ impl std::error::Error for WsInterruption {}
 #[derive(Default)]
 struct LastUpstreamEvent {
     received: Option<(&'static str, i64, Instant)>,
+    response_event: Option<Instant>,
+    output_event: Option<Instant>,
+    terminal_event_seen: bool,
+    response_completed_seen: bool,
 }
 
 impl LastUpstreamEvent {
@@ -171,6 +207,26 @@ impl LastUpstreamEvent {
             .find(|known| *known == kind)
             .unwrap_or("other");
         self.received = Some((kind, at_ms, now));
+        // Classify only the allowlisted name, never arbitrary upstream strings.
+        // Metadata/control events and pongs are not response/output progress.
+        if kind.starts_with("response.") && kind != "response.metadata" {
+            self.response_event = Some(now);
+            if !matches!(
+                kind,
+                "response.created"
+                    | "response.in_progress"
+                    | "response.completed"
+                    | "response.incomplete"
+                    | "response.failed"
+            ) {
+                self.output_event = Some(now);
+            }
+        }
+        self.terminal_event_seen |= matches!(
+            kind,
+            "response.completed" | "response.incomplete" | "response.failed" | "error"
+        );
+        self.response_completed_seen |= kind == "response.completed";
     }
 
     fn fields(&self, now: Instant) -> (&'static str, Option<i64>, Option<u64>) {
@@ -187,6 +243,23 @@ impl LastUpstreamEvent {
             None => ("none", None, None),
         }
     }
+}
+
+fn observed_age_ms(received: Option<Instant>, now: Instant) -> Option<u64> {
+    received.map(|received| {
+        now.saturating_duration_since(received)
+            .as_millis()
+            .min(u64::MAX as u128) as u64
+    })
+}
+
+struct WsRequestDiagnostics<'a> {
+    client_connection_id: &'a str,
+    frame_sequence: u64,
+    connection_id: &'a str,
+    connected: Instant,
+    finished_requests: u64,
+    liveness: &'a WsLiveness,
 }
 
 struct RequestLog {
@@ -408,14 +481,29 @@ impl RequestLog {
             events_seen=self.events_seen,output_seen=self.output_seen,
             last_event_kind,last_event_at_ms,last_event_age_ms,reason);
     }
-    fn ws_interrupted(&self, failure: &WsInterruption) {
-        let (last_event_kind, last_event_at_ms, last_event_age_ms) =
-            self.last_event.fields(Instant::now());
+    fn ws_interrupted(&self, failure: &WsInterruption, socket: Option<&WsRequestDiagnostics<'_>>) {
+        let now = Instant::now();
+        let (last_event_kind, last_event_at_ms, last_event_age_ms) = self.last_event.fields(now);
         tracing::info!(event="upstream_stream_interrupted",request_id=%self.id,
             upstream_transport=self.transport,response_created=self.created,
             events_seen=self.events_seen,output_seen=self.output_seen,
             duration_ms=self.start.elapsed().as_millis() as u64,
             last_event_kind,last_event_at_ms,last_event_age_ms,
+            last_response_event_age_ms=observed_age_ms(self.last_event.response_event, now),
+            last_output_event_age_ms=observed_age_ms(self.last_event.output_event, now),
+            terminal_event_seen=self.last_event.terminal_event_seen,
+            response_completed_seen=self.last_event.response_completed_seen,
+            failure_side=failure.failure_side(),
+            client_connection_id=socket.map(|socket| socket.client_connection_id),
+            frame_sequence=socket.map(|socket| socket.frame_sequence),
+            connection_id=socket.map(|socket| socket.connection_id),
+            connection_age_ms=socket.map(|socket| now.saturating_duration_since(socket.connected).as_millis() as u64),
+            finished_requests=socket.map(|socket| socket.finished_requests),
+            pings=socket.map(|socket| socket.liveness.pings),
+            pongs=socket.map(|socket| socket.liveness.pongs),
+            response_started=socket.map(|socket| socket.liveness.response_started),
+            last_peer_frame_age_ms=socket.and_then(|socket| observed_age_ms(socket.liveness.last_peer_frame, now)),
+            last_pong_age_ms=socket.and_then(|socket| observed_age_ms(socket.liveness.last_pong, now)),
             reason=failure.reason,stage=failure.stage,
             transport_error_kind=failure.transport_error_kind,close_code=failure.close_code);
     }
@@ -1124,7 +1212,7 @@ pub(super) async fn http(
             sent=send_upstream(&mut socket,UpstreamMessage::Text(affinity::upstream_payload(&payload, &state.key, identity.user_id, 0).expect("validated context").to_string().into()))=>sent,
         };
         if let Err(failure) = sent {
-            log.ws_interrupted(&failure.at("request_write"));
+            log.ws_interrupted(&failure.at("request_write"), None);
             if !*stopped.borrow() {
                 let _ = log
                     .health(Some(crate::health::Rejection::Temporary), "transport")
@@ -2715,7 +2803,11 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                         connection_id=%connection_id.0,pings=liveness.pings,
                                         duration_ms=write_started.elapsed().as_millis() as u64);
                                 }
-                                liveness.received(Instant::now(), matches!(message, UpstreamMessage::Pong(_)));
+                                // Closing is not evidence that the peer was alive
+                                // immediately before closure; retain its prior activity.
+                                if !matches!(message, UpstreamMessage::Close(_)) {
+                                    liveness.received(Instant::now(), matches!(message, UpstreamMessage::Pong(_)));
+                                }
                                 message
                             },
                             result => {
@@ -2831,19 +2923,23 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 }
             }.await;
             if let Err(failure) = result {
-                tracing::info!(event="websocket_request_interrupted",request_id=%log.id,
-                    client_connection_id=%client_log.id.0,frame_sequence=client_log.frames,
-                    connection_id=%connection_id.0,connection_age_ms=connected.elapsed().as_millis() as u64,
-                    finished_requests=*finished,reason=failure.reason,stage=failure.stage,
-                    pings=liveness.pings,pongs=liveness.pongs,response_started=liveness.response_started,
-                    last_frame_age_ms=liveness.last_frame.elapsed().as_millis() as u64);
-                log.ws_interrupted(&failure);
+                log.ws_interrupted(
+                    &failure,
+                    Some(&WsRequestDiagnostics {
+                        client_connection_id: &client_log.id.0,
+                        frame_sequence: client_log.frames,
+                        connection_id: &connection_id.0,
+                        connected: *connected,
+                        finished_requests: *finished,
+                        liveness: &liveness,
+                    }),
+                );
+                client_log.reason = failure.reason;
+                if failure.reason == "client_close" {
+                    client_log.close_code = failure.close_code;
+                }
                 let _ = log.finish("interrupted", Counters::default()).await;
-                let _ = send_client(
-                    &mut client,
-                    ws_error("upstream_interrupted", "connection interrupted"),
-                )
-                .await;
+                let _ = send_client(&mut client, failure.client_error(&id)).await;
                 break 'frames;
             }
             if let Some(refusal) = rejected_quota {
@@ -3027,6 +3123,83 @@ mod heartbeat_tests {
             assert_eq!(diagnostic.transport_error_kind, Some(expected));
             assert!(!format!("{diagnostic:?}").contains(private));
             assert_eq!(diagnostic.to_string(), "upstream_read_error");
+        }
+    }
+
+    #[test]
+    fn websocket_interruption_error_preserves_code_and_generated_correlation() {
+        let id = RequestId::new();
+        for (reason, side) in [
+            ("upstream_close", "upstream"),
+            ("upstream_read_error", "upstream"),
+            ("read_timeout", "upstream"),
+            ("pre_response_silence_timeout", "upstream"),
+            ("client_close", "client"),
+            ("client_write_timeout", "client"),
+            ("request_storage_failed", "router"),
+            ("service_stopping", "router"),
+        ] {
+            let failure = WsInterruption::new(reason).at("request_write");
+            assert_eq!(failure.failure_side(), side);
+            let event: Value = serde_json::from_str(&failure.client_error(&id)).unwrap();
+            assert_eq!(event["type"], "error");
+            assert_eq!(event["error"]["code"], "upstream_interrupted");
+            let message = event["error"]["message"].as_str().unwrap();
+            assert!(message.contains(reason));
+            assert!(message.contains(&id.0));
+            assert!(message.contains("stage=request_write"));
+            assert!(!message.contains("close_code="));
+        }
+        let failure = WsInterruption {
+            close_code: Some(1000),
+            ..WsInterruption::new("upstream_close")
+        };
+        assert!(failure.client_error(&id).contains("close_code=1000"));
+    }
+
+    #[test]
+    fn response_progress_is_independent_of_control_frames_and_transport_liveness() {
+        let start = Instant::now();
+        let mut event = LastUpstreamEvent::default();
+        let mut live = WsLiveness::new(start);
+        assert_eq!(observed_age_ms(event.response_event, start), None);
+        assert_eq!(observed_age_ms(event.output_event, start), None);
+        assert_eq!(observed_age_ms(live.last_peer_frame, start), None);
+        event.observe("response.created", 1000, start);
+        assert_eq!(observed_age_ms(event.output_event, start), None);
+        event.observe(
+            "response.output_item.done",
+            2000,
+            start + Duration::from_secs(1),
+        );
+        for kind in [
+            "codex.rate_limits",
+            "response.metadata",
+            "ping",
+            "private-event-type",
+        ] {
+            event.observe(kind, 9000, start + Duration::from_secs(9));
+        }
+        live.received(start + Duration::from_secs(10), true);
+        let now = start + Duration::from_secs(13);
+        assert_eq!(observed_age_ms(event.response_event, now), Some(12000));
+        assert_eq!(observed_age_ms(event.output_event, now), Some(12000));
+        assert_eq!(observed_age_ms(live.last_peer_frame, now), Some(3000));
+        assert_eq!(observed_age_ms(live.last_pong, now), Some(3000));
+        assert!(!event.terminal_event_seen);
+        assert!(!event.response_completed_seen);
+        event.observe("response.completed", 14000, start + Duration::from_secs(14));
+        assert!(event.terminal_event_seen);
+        assert!(event.response_completed_seen);
+        assert_eq!(
+            observed_age_ms(event.output_event, start + Duration::from_secs(14)),
+            Some(13000)
+        );
+        for kind in ["response.failed", "response.incomplete", "error"] {
+            let mut terminal = LastUpstreamEvent::default();
+            terminal.observe(kind, 1000, start);
+            assert!(terminal.terminal_event_seen);
+            assert!(!terminal.response_completed_seen);
         }
     }
 
