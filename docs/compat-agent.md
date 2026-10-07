@@ -56,6 +56,11 @@ consume model inference but does not publish or update durable state. Afterwards
 dispatch with `dry_run=false` or leave the hourly schedule enabled. Scheduled
 events can be delayed or dropped by GitHub and are not a realtime guarantee.
 
+For native baseline diagnosis, manually dispatch with `native_probe=true`.
+This runs one complete pinned release observation against synthetic loopback
+mocks, without any AI request, PR publication or durable state change. It logs
+only fixed diagnostic categories, not client output or fixture payloads.
+
 ## State and failures
 
 `automation/upstream-state` is a metadata-only orphan branch with atomic
@@ -79,14 +84,17 @@ in a PR. A failing native baseline escalates even a negative medium verdict to
 independent xhigh verification. A released patch must also pass native validation.
 No real OAuth/reset/deployment operations are exposed to the model.
 
-Limits: one package per run, 64 model requests, 600,000 confirmed input/output
+Limits: one package per run, 64 model requests, 2,000,000 confirmed input/output
 tokens, 16 turns per analysis/verification session, 12 review turns, 24 coding turns, 20 changed files,
 512 KiB total proposed source, and a 60-minute workflow timeout. Unknown usage
 prevents another inference call. Overflow, missing evidence, unknown capabilities,
 failed checks or a moved target base stop publication. No raw session artifacts
-or candidate diagnostics are uploaded; logs contain fixed categories, phase names,
+or candidate diagnostics are uploaded; logs contain fixed categories, phase/verdict names,
 numeric request/token counters, usage-known status and PR IDs. Source reads are
 line-bounded and may be batched, up to eight ranges per turn. Truncation is explicit.
+The token ceiling counts complete input, including cached tokens, on every call;
+it is not an uncached-token cost estimate. Each phase has fresh context, so the
+global allowance must cover triage, independent verification, coding and review.
 
 ## Development
 

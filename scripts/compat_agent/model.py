@@ -6,6 +6,8 @@ from urllib.parse import urlsplit
 from .core import DECISIONS, MODEL, Stop, decision, request
 
 PHASE_TURNS = {"triage": 16, "verify": 16, "implement": 24, "review": 12}
+MAX_CALLS = 64
+MAX_TOKENS = 2000000
 READ_PROPERTIES = {k: {"type": "string"} for k in ("repository", "sha", "path")}
 READ_PROPERTIES.update({"start_line": {"type": "integer", "minimum": 1},
                         "line_count": {"type": "integer", "minimum": 1, "maximum": 1000}})
@@ -98,7 +100,7 @@ class Model:
                     "Only three tool turns remain. Finish with submit_decision within this budget. "
                     "If evidence remains incomplete, report needs_human and describe the limitation; "
                     "never claim unsupported compatibility or fabricate coverage."})
-            if self.calls >= 64 or self.tokens >= 600000 or not self.usage_known:
+            if self.calls >= MAX_CALLS or self.tokens >= MAX_TOKENS or not self.usage_known:
                 raise Stop("model_budget_or_unknown_usage")
             self.calls += 1
             response = self.call(self.base + "/responses", self.token, "POST", {
@@ -132,6 +134,7 @@ class Model:
                     raise Stop("independent_verdict_missing")
                 result = decision(phase, args)
                 sandbox.validate_citations(result)
+                print("compat_agent: verdict_" + phase + "_" + result["decision"], flush=True)
                 return result
             if name == "submit_preliminary" and phase == "verify" and not revealed:
                 independent = decision("verify", args)

@@ -17,6 +17,24 @@ CHECKS = {
 }
 
 
+def native_category(result):
+    if result.returncode == 0 and b"1 passed" in result.stdout:
+        return "passed"
+    text = result.stdout.lower()
+    for category, needles in (
+        ("version_mismatch", (b"client version does not match",)),
+        ("version_timeout", (b"client version check timed out",)),
+        ("permission_denied", (b"permission denied", b"operation not permitted", b"os error 1")),
+        ("missing_runtime", (b"no such file or directory", b"lacks its code mode host")),
+        ("native_timeout", (b"native client timed out",)),
+        ("compile_failed", (b"could not compile",)),
+        ("fixture_failed", (b"test result: failed",)),
+    ):
+        if any(needle in text for needle in needles):
+            return category
+    return "native_failed_or_filter_missed"
+
+
 def command(args, cwd=None, timeout=1800):
     process = None
     try:
@@ -149,6 +167,7 @@ class Sandbox:
                     env += ["-e", "EXETROUTER_" + client.upper() + "_BIN=" + binary]
                 tests = ["current_clients_complete_tool_cycles_over_http_and_websocket"]
             outputs = []
+            categories = []
             passed = True
             for test in tests:
                 result = command(["docker", "exec"] + env + ["-w", "/work", self.name,
@@ -156,8 +175,9 @@ class Sandbox:
                     "--", "--ignored", "--exact"])
                 # A misspelled filter must never masquerade as a successful fixture.
                 passed = passed and result.returncode == 0 and b"1 passed" in result.stdout
+                categories.append(native_category(result))
                 outputs.append((result.stdout + result.stderr).decode(errors="replace")[-12000:])
-            return {"passed": passed, "diagnostics": outputs}
+            return {"passed": passed, "categories": categories, "diagnostics": outputs}
         finally:
             manifest.write_bytes(original)
 
