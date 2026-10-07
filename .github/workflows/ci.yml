@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: ["**"]
+    branches: ["**", "!automation/upstream-state"]
   pull_request:
 concurrency:
   group: ci-${{ github.ref }}
@@ -9,6 +9,15 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  compat-sandbox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: python3 scripts/test-compat-agent.py
+      - run: python3 scripts/test-compat-sandbox.py
   verify:
     strategy:
       fail-fast: false
@@ -24,6 +33,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Compatibility automation tests
+        run: python3 scripts/test-compat-agent.py
       - name: Publication and installer checks
         run: |
           python3 scripts/check-publication.py

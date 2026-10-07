@@ -1,0 +1,58 @@
+name: Upstream compatibility agent
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Analyze and validate without publishing or changing durable state
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: upstream-compat-agent
+  cancel-in-progress: false
+jobs:
+  compatibility:
+    if: github.ref == 'refs/heads/main' && vars.COMPAT_AGENT_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check configuration
+        env:
+          COMPAT_API_BASE_URL: ${{ vars.COMPAT_API_BASE_URL }}
+          COMPAT_API_TOKEN: ${{ secrets.COMPAT_API_TOKEN }}
+          COMPAT_GITHUB_TOKEN: ${{ secrets.COMPAT_GITHUB_TOKEN }}
+          COMPAT_APP_ID: ${{ vars.COMPAT_APP_ID }}
+          COMPAT_APP_PRIVATE_KEY: ${{ secrets.COMPAT_APP_PRIVATE_KEY }}
+        run: |
+          python3 -c 'import os; assert all(os.environ.get(k) for k in ("COMPAT_API_BASE_URL", "COMPAT_API_TOKEN")) and (os.environ.get("COMPAT_GITHUB_TOKEN") or (os.environ.get("COMPAT_APP_ID") and os.environ.get("COMPAT_APP_PRIVATE_KEY"))), "Compatibility agent credentials are not configured"'
+      - name: Mint repository-scoped GitHub App token
+        id: app
+        if: vars.COMPAT_APP_ID != ''
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.COMPAT_APP_ID }}
+          private-key: ${{ secrets.COMPAT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Offline automation tests
+        run: python3 scripts/test-compat-agent.py
+      - name: Analyze upstream and propose compatibility changes
+        env:
+          COMPAT_API_BASE_URL: ${{ vars.COMPAT_API_BASE_URL }}
+          COMPAT_API_TOKEN: ${{ secrets.COMPAT_API_TOKEN }}
+          COMPAT_GITHUB_TOKEN: ${{ steps.app.outputs.token || secrets.COMPAT_GITHUB_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = true ]; then
+            python3 -m scripts.compat_agent --dry-run
+          else
+            python3 -m scripts.compat_agent
+          fi
