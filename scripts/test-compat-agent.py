@@ -303,6 +303,19 @@ class ModelTests(unittest.TestCase):
             Model(ROOT, api).run("triage", {}, FakeBox())
         self.assertEqual(len(calls), 1)
 
+    def test_analysis_can_finish_after_eight_read_turns(self):
+        queue = [self.response("read_files", {"files": []}) for _ in range(9)]
+        queue.append(self.response("submit_decision", verdict()))
+        model = Model(ROOT, lambda *a: queue.pop(0))
+        self.assertEqual(model.run("triage", {}, FakeBox())["decision"], "no_change")
+        self.assertEqual(model.calls, 10)
+
+    def test_analysis_budget_remains_bounded(self):
+        model = Model(ROOT, lambda *a: self.response("read_file", {}))
+        with self.assertRaisesRegex(Stop, "phase_budget_exceeded"):
+            model.run("triage", {}, FakeBox())
+        self.assertEqual(model.calls, 16)
+
     def test_preflight_fail_closed(self):
         model = Model(ROOT, lambda *a: {"models": [{"slug": MODEL,
                       "supported_reasoning_levels": [{"effort": "medium"}]}]})
@@ -326,6 +339,36 @@ class SandboxTests(unittest.TestCase):
         self.box.changed = set()
         self.box.results = {"tests": True}
         self.box.started = False
+
+    def test_pinned_ranges_and_batched_reads_report_truncation(self):
+        self.box.gh = FakeGH()
+        self.box.allowed_revisions = {("example/upstream", SHA)}
+        self.box.gh.file = lambda *a: "\n".join(str(i) for i in range(1, 451))
+        args = {"repository": "example/upstream", "sha": SHA, "path": "src/example.rs"}
+        first = self.box.dispatch("read_file", args)
+        self.assertEqual(first["content"].splitlines(), [str(i) for i in range(1, 201)])
+        self.assertTrue(first["truncated"])
+        last = self.box.dispatch("read_files", {"files": [{**args, "start_line": 401}]})["files"][0]
+        self.assertEqual(last["total_lines"], 450)
+        self.assertEqual(last["content"].splitlines()[0], "401")
+        self.assertFalse(last["truncated"])
+        for update in ({"start_line": 0}, {"line_count": 1001}, {"line_count": True}, {"sha": NEW}):
+            with self.subTest(update=update), self.assertRaises(Stop):
+                self.box.dispatch("read_file", {**args, **update})
+        for files in ([], [args] * 9, ["invalid"]):
+            with self.subTest(files=files), self.assertRaises(Stop):
+                self.box.dispatch("read_files", {"files": files})
+
+    def test_large_read_ranges_and_batches_are_rejected(self):
+        self.box.gh = FakeGH()
+        self.box.allowed_revisions = {("example/upstream", SHA)}
+        args = {"repository": "example/upstream", "sha": SHA, "path": "src/example.rs"}
+        self.box.gh.file = lambda *a: "x" * 64001
+        with self.assertRaisesRegex(Stop, "read_range_too_large"):
+            self.box.dispatch("read_file", args)
+        self.box.gh.file = lambda *a: "x" * 40000
+        with self.assertRaisesRegex(Stop, "read_batch_too_large"):
+            self.box.dispatch("read_files", {"files": [args] * 8})
 
     def test_check_invalidated_by_edit(self):
         self.box.dispatch("write_file", {"path": "tests/new.rs", "content": "fn example() {}"}, True)
