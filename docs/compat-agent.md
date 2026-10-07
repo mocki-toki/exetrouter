@@ -62,7 +62,9 @@ events can be delayed or dropped by GitHub and are not a realtime guarantee.
 For native baseline diagnosis, manually dispatch with `native_probe=true`.
 This runs one complete pinned release observation against synthetic loopback
 mocks, without any AI request, PR publication or durable state change. It logs
-only fixed diagnostic categories, not client output or fixture payloads.
+only fixed diagnostic categories, validated numeric versions/exit status, fixture
+line/column, a fixed client/transport identifier and allowlisted numeric/boolean
+client counters, not client output or fixture payloads.
 
 ## State and failures
 

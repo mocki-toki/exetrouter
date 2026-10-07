@@ -27,12 +27,40 @@ def native_category(result):
         ("permission_denied", (b"permission denied", b"operation not permitted", b"os error 1")),
         ("missing_runtime", (b"no such file or directory", b"lacks its code mode host")),
         ("native_timeout", (b"native client timed out",)),
+        ("temporary_storage_full", (b"no space left on device",)),
+        ("readonly_storage", (b"read-only file system",)),
         ("compile_failed", (b"could not compile",)),
         ("fixture_failed", (b"test result: failed",)),
     ):
         if any(needle in text for needle in needles):
             return category
     return "native_failed_or_filter_missed"
+
+
+def native_observation(result):
+    import re
+    text = result.stdout.decode(errors="replace")
+    observation = {"category": native_category(result), "exit_code": result.returncode}
+    location = re.search(r"panicked at tests/responses\.rs:(\d+):(\d+)", text)
+    if location:
+        observation["fixture_line"] = int(location[1])
+        observation["fixture_column"] = int(location[2])
+    client = re.search(r"\b(codex|opencode) websocket=(true|false):", text)
+    if client:
+        observation["client"] = client[1]
+        observation["websocket"] = client[2] == "true"
+    fields = {"bytes": int, "json_events": int, "error_events": int,
+              "tool_marker": bool, "smoke_marker": bool}
+    for match in re.finditer(r"\{[^{}\n]{1,1000}\}", text):
+        try:
+            data = json.loads(match[0])
+        except ValueError:
+            continue
+        if isinstance(data, dict) and set(data) == fields.keys() and all(
+                type(data[k]) is kind for k, kind in fields.items()):
+            observation["client_counters"] = data
+            break
+    return observation
 
 
 def command(args, cwd=None, timeout=1800):
@@ -156,7 +184,7 @@ class Sandbox:
         failed_versions = [v for v in versions if v["category"] != "passed"]
         if failed_versions:
             return {"passed": False, "categories": [v["client"] + "_" + v["category"] for v in failed_versions],
-                    "diagnostics": [json.dumps(v) for v in failed_versions]}
+                    "observations": failed_versions, "diagnostics": [json.dumps(v) for v in failed_versions]}
         manifest = self.path / "docs/protocol-sources.json"
         original = manifest.read_bytes()
         try:
@@ -176,6 +204,7 @@ class Sandbox:
                 tests = ["current_clients_complete_tool_cycles_over_http_and_websocket"]
             outputs = []
             categories = []
+            observations = []
             passed = True
             for test in tests:
                 result = command(["docker", "exec"] + env + ["-w", "/work", self.name,
@@ -184,8 +213,9 @@ class Sandbox:
                 # A misspelled filter must never masquerade as a successful fixture.
                 passed = passed and result.returncode == 0 and b"1 passed" in result.stdout
                 categories.append(native_category(result))
+                observations.append(native_observation(result))
                 outputs.append((result.stdout + result.stderr).decode(errors="replace")[-12000:])
-            return {"passed": passed, "categories": categories, "diagnostics": outputs}
+            return {"passed": passed, "categories": categories, "observations": observations, "diagnostics": outputs}
         finally:
             manifest.write_bytes(original)
 

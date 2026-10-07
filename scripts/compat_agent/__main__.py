@@ -73,6 +73,8 @@ def main():
             result = box.native_check()
             for category in result["categories"]:
                 print("compat_agent: native_" + category, flush=True)
+            for observation in result["observations"]:
+                print("compat_agent: native_observation " + json.dumps(observation, sort_keys=True), flush=True)
             if not result["passed"]:
                 raise Stop("native_probe_failed")
         finally:

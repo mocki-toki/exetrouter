@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.compat_agent.core import (GitHub, Ledger, MODEL, STATE_BRANCH, Stop,
                                       collect, decision, digest, source_path, writable)
 from scripts.compat_agent.model import MAX_CALLS, MAX_TOKENS, Model
-from scripts.compat_agent.sandbox import Sandbox, command, native_category
+from scripts.compat_agent.sandbox import Sandbox, command, native_category, native_observation
 from scripts.compat_agent.__main__ import publish
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -336,7 +336,7 @@ class ModelTests(unittest.TestCase):
         module = import_module("scripts.compat_agent.__main__")
         gh = FakeGH()
         box = Mock()
-        box.native_check.return_value = {"passed": True, "categories": ["passed"]}
+        box.native_check.return_value = {"passed": True, "categories": ["passed"], "observations": []}
         event = {"track": "codex", "repository": "example/upstream", "before": NEW,
                  "after": SHA, "version": "1.0.0"}
         with patch.dict(os.environ, {"GITHUB_REPOSITORY": gh.repo, "COMPAT_GITHUB_TOKEN": "synthetic"}), \
@@ -458,6 +458,24 @@ class SandboxTests(unittest.TestCase):
 
 
 class LoaderTests(unittest.TestCase):
+    def test_native_observation_keeps_only_fixed_numeric_and_boolean_fields(self):
+        from types import SimpleNamespace
+        counters = {"bytes": 123, "json_events": 4, "error_events": 1,
+                    "tool_marker": False, "smoke_marker": False}
+        output = ('panicked at tests/responses.rs:4484:9:\n'
+                  'codex websocket=false: PRIVATE_OUTPUT\n' + json.dumps(counters)
+                  + '\n{"credential":"PRIVATE_SECRET"}\ntest result: FAILED').encode()
+        observed = native_observation(SimpleNamespace(returncode=101, stdout=output))
+        self.assertEqual(observed["fixture_line"], 4484)
+        self.assertEqual(observed["client"], "codex")
+        self.assertFalse(observed["websocket"])
+        self.assertEqual(observed["client_counters"], counters)
+        self.assertNotIn("PRIVATE", json.dumps(observed))
+        for invalid in ({**counters, "bytes": "PRIVATE"}, {**counters, "credential": "PRIVATE"}):
+            observed = native_observation(SimpleNamespace(returncode=1, stdout=json.dumps(invalid).encode()))
+            self.assertNotIn("client_counters", observed)
+            self.assertNotIn("PRIVATE", json.dumps(observed))
+
     def test_native_categories_never_echo_candidate_output(self):
         from types import SimpleNamespace
         for output, category in ((b"client version does not match the reviewed matrix", "version_mismatch"),
