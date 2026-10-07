@@ -26,6 +26,7 @@ SCHEMA = {
 
 def tool(name, description, properties, required):
     return {"type": "function", "name": name, "description": description,
+            "strict": False,
             "parameters": {"type": "object", "properties": properties,
                            "required": required, "additionalProperties": False}}
 
@@ -62,7 +63,7 @@ class Model:
                  {k: {"type": "string"} for k in ("repository", "sha", "path")}, ["repository", "sha", "path"]),
             tool("search_code", "Search local ExetRouter tracked sources (literal query).",
                  {"query": {"type": "string"}}, ["query"]),
-            {"type": "function", "name": "submit_decision", "description":
+            {"type": "function", "name": "submit_decision", "strict": False, "description":
              "Finish with a concise evidence-backed verdict, not hidden chain of thought.",
              "parameters": {**SCHEMA, "properties": {**SCHEMA["properties"],
                  "decision": {"type": "string", "enum": sorted(DECISIONS[phase])}}}},
