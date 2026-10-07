@@ -16,7 +16,10 @@ from pathlib import Path
 def fetch(url):
     request = urllib.request.Request(url, headers={"User-Agent": "exetrouter-compatibility"})
     with urllib.request.urlopen(request, timeout=120) as response:
-        return response.read()
+        raw = response.read(512 * 1024 * 1024 + 1)
+    if len(raw) > 512 * 1024 * 1024:
+        raise RuntimeError("Client download exceeds the size bound")
+    return raw
 
 
 def metadata(url):
@@ -82,10 +85,11 @@ def sources(repository, commit, directory):
 
 
 def fetch_v1(args):
-    version = metadata("https://registry.npmjs.org/opencode-ai")["dist-tags"]["latest"]
+    version = selected_version(args, "opencode-v1", "opencode-ai")
     if not re.fullmatch(r"1\.\d+\.\d+", version):
         raise RuntimeError("Expected a stable OpenCode V1 release")
     revision = commit("anomalyco/opencode", f"v{version}")
+    verify_revision(args, "opencode-v1", revision)
     result = {"version": version, "commit": revision}
     if args.resolve_only:
         print(json.dumps(result, indent=2))
@@ -101,7 +105,7 @@ def fetch_v1(args):
     integrity = "sha512-" + base64.b64encode(hashlib.sha512(raw).digest()).decode()
     if integrity != package["dist"]["integrity"]:
         raise RuntimeError("OpenCode V1 distribution integrity mismatch")
-    root = Path(__file__).resolve().parent.parent / "target" / "compat"
+    root = args.output_dir or Path(__file__).resolve().parent.parent / "target" / "compat"
     directory = root / f"opencode-v1-{version}"
     result["binary"] = binary(raw, directory / "bin", "opencode")
     result["integrity"] = integrity
@@ -111,21 +115,37 @@ def fetch_v1(args):
     print(json.dumps(result, indent=2))
 
 
+def selected_version(args, client, package):
+    if args.manifest:
+        return args.pins[client]["version"]
+    return metadata(f"https://registry.npmjs.org/{package}")["dist-tags"]["latest"]
+
+
+def verify_revision(args, client, revision):
+    if args.manifest and args.pins[client]["commit"] != revision:
+        raise RuntimeError("Release tag differs from the pinned manifest commit")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resolve-only", action="store_true")
     parser.add_argument("--sources", action="store_true")
     parser.add_argument("--opencode-v1", action="store_true", help="Resolve/download the separate opencode-ai V1 client only")
+    parser.add_argument("--manifest", type=Path, help="Pin versions and require exact release-tag commits")
+    parser.add_argument("--output-dir", type=Path, help="Isolated runtime destination")
     args = parser.parse_args()
+    args.pins = {p["id"]: p for p in json.loads(args.manifest.read_text())["projects"]} if args.manifest else {}
     if args.opencode_v1:
         fetch_v1(args)
         return
-    codex = metadata("https://registry.npmjs.org/@openai/codex")["dist-tags"]["latest"]
-    opencode = metadata("https://registry.npmjs.org/@opencode/cli")["dist-tags"]["latest"]
+    codex = selected_version(args, "codex", "@openai/codex")
+    opencode = selected_version(args, "opencode", "@opencode/cli")
     if any(not re.fullmatch(r"\d+\.\d+\.\d+", version) for version in (codex, opencode)):
         raise RuntimeError("The client matrix requires stable releases, not prereleases")
     codex_commit = commit("openai/codex", f"rust-v{codex}")
     opencode_commit = commit("anomalyco/opencode", f"v{opencode}")
+    verify_revision(args, "codex", codex_commit)
+    verify_revision(args, "opencode", opencode_commit)
     result = {"codex": {"version": codex, "commit": codex_commit}, "opencode": {"version": opencode, "commit": opencode_commit}}
     if args.resolve_only:
         print(json.dumps(result, indent=2))
@@ -134,7 +154,7 @@ def main():
     architecture = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "AMD64": "x64"}.get(platform.machine())
     if not os_name or not architecture:
         raise RuntimeError("This test downloader supports macOS/Linux on arm64/x64")
-    root = Path(__file__).resolve().parent.parent / "target" / "compat"
+    root = args.output_dir or Path(__file__).resolve().parent.parent / "target" / "compat"
     for client, package_name, version, filename in (
         ("codex", "@openai/codex", f"{codex}-{os_name}-{architecture}", "codex"),
         ("opencode", f"@opencode/cli-{os_name}-{architecture}", opencode, "opencode"),
