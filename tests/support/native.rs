@@ -52,7 +52,12 @@ pub struct Continuation {
     pub resume: bool,
 }
 
-fn codex_sandbox_mode(requested: bool, isolated: bool, url: &str, model: &str) -> Result<&'static str> {
+fn codex_sandbox_mode(
+    requested: bool,
+    isolated: bool,
+    url: &str,
+    model: &str,
+) -> Result<&'static str> {
     if !requested {
         return Ok("read-only");
     }
