@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -74,6 +75,14 @@ class FakeGH:
 
 
 class PolicyTests(unittest.TestCase):
+    def test_packaging_excludes_python_bytecode(self):
+        import fnmatch
+        patterns = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["include"]
+        for name in ("scripts/compat_agent/__pycache__/core.cpython-312.pyc",
+                     "scripts/compat_agent/core.pyc"):
+            self.assertFalse(any(fnmatch.fnmatch(name, p) for p in patterns))
+        self.assertTrue(any(fnmatch.fnmatch("scripts/compat_agent/core.py", p) for p in patterns))
+
     def test_paths(self):
         for path in ("../secret", "/secret", "src/../secret", "src\\secret", "src//test.rs", "src/\nsecret"):
             with self.subTest(path=path), self.assertRaises(Stop):
