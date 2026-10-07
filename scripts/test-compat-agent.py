@@ -14,8 +14,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.compat_agent.core import (GitHub, Ledger, MODEL, STATE_BRANCH, Stop,
                                       collect, decision, digest, source_path, writable)
-from scripts.compat_agent.model import Model
-from scripts.compat_agent.sandbox import Sandbox, command
+from scripts.compat_agent.model import MAX_CALLS, MAX_TOKENS, Model
+from scripts.compat_agent.sandbox import Sandbox, command, native_category
 from scripts.compat_agent.__main__ import publish
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -224,6 +224,10 @@ class FakeBox:
 
 class ModelTests(unittest.TestCase):
     def setUp(self):
+        # Synthetic model telemetry must not look like real inference in CI logs.
+        logger = patch("builtins.print")
+        logger.start()
+        self.addCleanup(logger.stop)
         self.env = patch.dict(os.environ, {"COMPAT_API_BASE_URL": "https://api.example.com/v1",
                                           "COMPAT_API_TOKEN": "synthetic-secret"})
         self.env.start()
@@ -315,6 +319,40 @@ class ModelTests(unittest.TestCase):
         with self.assertRaisesRegex(Stop, "phase_budget_exceeded"):
             model.run("triage", {}, FakeBox())
         self.assertEqual(model.calls, 16)
+
+    def test_global_limits_stop_before_another_request(self):
+        for field, value in (("calls", MAX_CALLS), ("tokens", MAX_TOKENS)):
+            count = []
+            model = Model(ROOT, lambda *a: count.append(1))
+            setattr(model, field, value)
+            with self.subTest(field=field), self.assertRaisesRegex(Stop, "model_budget_or_unknown_usage"):
+                model.run("triage", {}, FakeBox())
+            self.assertEqual(count, [])
+
+    def test_native_probe_never_calls_ai_or_writes_state(self):
+        from importlib import import_module
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        module = import_module("scripts.compat_agent.__main__")
+        gh = FakeGH()
+        box = Mock()
+        box.native_check.return_value = {"passed": True, "categories": ["passed"]}
+        event = {"track": "codex", "repository": "example/upstream", "before": NEW,
+                 "after": SHA, "version": "1.0.0"}
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": gh.repo, "COMPAT_GITHUB_TOKEN": "synthetic"}), \
+                patch.object(sys, "argv", ["compat_agent", "--native-probe"]), \
+                patch.object(module, "GitHub", return_value=gh), \
+                patch.object(module, "command", return_value=SimpleNamespace(stdout=SHA.encode())), \
+                patch.object(module, "collect", return_value=[event]), \
+                patch.object(module, "Sandbox", return_value=box), \
+                patch.object(module, "Model") as model:
+            module.main()
+        model.assert_not_called()
+        box.prepare_native.assert_called_once()
+        box.start.assert_called_once()
+        box.native_check.assert_called_once()
+        box.close.assert_called_once()
+        self.assertEqual(gh.writes, [])
 
     def test_preflight_fail_closed(self):
         model = Model(ROOT, lambda *a: {"models": [{"slug": MODEL,
@@ -420,6 +458,16 @@ class SandboxTests(unittest.TestCase):
 
 
 class LoaderTests(unittest.TestCase):
+    def test_native_categories_never_echo_candidate_output(self):
+        from types import SimpleNamespace
+        for output, category in ((b"client version does not match the reviewed matrix", "version_mismatch"),
+                                 (b"Operation not permitted: PRIVATE_PAYLOAD", "permission_denied"),
+                                 (b"test result: FAILED PRIVATE_PAYLOAD", "fixture_failed"),
+                                 (b"PRIVATE_PAYLOAD", "native_failed_or_filter_missed")):
+            self.assertEqual(native_category(SimpleNamespace(returncode=1, stdout=output)), category)
+        self.assertEqual(native_category(SimpleNamespace(returncode=0, stdout=b"1 passed")), "passed")
+        self.assertNotEqual(native_category(SimpleNamespace(returncode=0, stdout=b"0 passed")), "passed")
+
     def test_pinned_version_and_tag(self):
         from types import SimpleNamespace
         spec = importlib.util.spec_from_file_location("client_loader", ROOT / "scripts/fetch-test-clients.py")

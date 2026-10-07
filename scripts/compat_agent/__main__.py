@@ -48,6 +48,8 @@ def publish(gh, event, base, key, files, report):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--native-probe", action="store_true",
+                        help="Run one pinned synthetic native baseline, without AI or state writes")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     gh = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["COMPAT_GITHUB_TOKEN"])
@@ -59,6 +61,22 @@ def main():
     events = collect(gh, manifest, ledger.value["cursors"])
     if not events:
         print("compat_agent: no_drift")
+        return
+    if args.native_probe:
+        event = next((e for e in events if e["version"] is not None and not e.get("blocked")), None)
+        if event is None:
+            raise Stop("no_complete_native_observation")
+        box = Sandbox(root, gh, event, base)
+        try:
+            box.prepare_native()
+            box.start()
+            result = box.native_check()
+            for category in result["categories"]:
+                print("compat_agent: native_" + category, flush=True)
+            if not result["passed"]:
+                raise Stop("native_probe_failed")
+        finally:
+            box.close()
         return
     model = Model(root)
     model.preflight()
@@ -108,6 +126,7 @@ def main():
                 box.prepare_native()
                 box.start()
                 native_before = box.native_check()
+                print("compat_agent: native_baseline_" + ("passed" if native_before["passed"] else "failed"), flush=True)
                 context["native_baseline"] = native_before
                 if status == "no_change" and not native_before["passed"]:
                     status = "code_change"  # Independent verification must explain the failure.

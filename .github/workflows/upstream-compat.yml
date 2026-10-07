@@ -8,6 +8,10 @@ on:
         description: Analyze and validate without publishing or changing durable state
         type: boolean
         default: true
+      native_probe:
+        description: Run only the synthetic native baseline, without AI or state writes
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -50,8 +54,11 @@ jobs:
           COMPAT_API_TOKEN: ${{ secrets.COMPAT_API_TOKEN }}
           COMPAT_GITHUB_TOKEN: ${{ steps.app.outputs.token || secrets.COMPAT_GITHUB_TOKEN }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          NATIVE_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.native_probe }}
         run: |
-          if [ "$DRY_RUN" = true ]; then
+          if [ "$NATIVE_PROBE" = true ]; then
+            python3 -m scripts.compat_agent --native-probe
+          elif [ "$DRY_RUN" = true ]; then
             python3 -m scripts.compat_agent --dry-run
           else
             python3 -m scripts.compat_agent
