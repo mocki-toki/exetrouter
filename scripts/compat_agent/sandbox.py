@@ -123,6 +123,9 @@ class Sandbox:
         if result.returncode:
             raise Stop("sandbox_start_failed")
         self.started = True
+        result = command(["docker", "exec", self.name, "mkdir", "-m", "700", "-p", "/tmp/compat-home"])
+        if result.returncode:
+            raise Stop("sandbox_home_initialization_failed")
         # Wait for cache initialization synchronously; detached entrypoint copying
         # would race the first offline Cargo invocation.
         result = command(["docker", "exec", self.name, "cp", "-R", "/usr/local/cargo/.", "/cache/"])
@@ -149,6 +152,11 @@ class Sandbox:
     def native_check(self):
         if self.pins is None or not self.started:
             raise Stop("native_check_not_prepared")
+        versions = self.native_versions()
+        failed_versions = [v for v in versions if v["category"] != "passed"]
+        if failed_versions:
+            return {"passed": False, "categories": [v["client"] + "_" + v["category"] for v in failed_versions],
+                    "diagnostics": [json.dumps(v) for v in failed_versions]}
         manifest = self.path / "docs/protocol-sources.json"
         original = manifest.read_bytes()
         try:
@@ -180,6 +188,27 @@ class Sandbox:
             return {"passed": passed, "categories": categories, "diagnostics": outputs}
         finally:
             manifest.write_bytes(original)
+
+    def native_versions(self):
+        import re
+        if self.event["track"] == "opencode-v1":
+            records = {"opencode-v1": json.loads((self.clients / "current-opencode-v1.json").read_text())}
+        else:
+            records = json.loads((self.clients / "current-clients.json").read_text())
+        expected = {p["id"]: p["version"] for p in self.pins["projects"]}
+        versions = []
+        for client in ("opencode-v1",) if self.event["track"] == "opencode-v1" else ("codex", "opencode"):
+            binary = "/clients/" + str(Path(records[client]["binary"]).relative_to(self.clients))
+            result = command(["docker", "exec", self.name, binary, "--version"], timeout=30)
+            # Never expose arbitrary native output. Record only validated version
+            # tokens and exit status, distinguishing startup failure from mismatch.
+            reported = sorted({token.removeprefix("v") for token in result.stdout.decode(errors="replace").split()
+                               if re.fullmatch(r"v?\d+\.\d+\.\d+", token)})[:10]
+            category = "version_probe_failed" if result.returncode else (
+                "passed" if expected[client] in reported else "version_mismatch")
+            versions.append({"client": client, "category": category, "expected": expected[client],
+                             "reported": reported, "exit_code": result.returncode})
+        return versions
 
     def close(self):
         if self.started:

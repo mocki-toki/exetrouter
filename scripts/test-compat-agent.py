@@ -497,10 +497,48 @@ class LoaderTests(unittest.TestCase):
             manifest = box.path / "docs/protocol-sources.json"
             manifest.parent.mkdir()
             manifest.write_text("original")
-            with patch("scripts.compat_agent.sandbox.command", return_value=SimpleNamespace(
-                    returncode=0, stdout=b"0 passed", stderr=b"")):
+            with patch.object(box, "native_versions", return_value=[]), \
+                    patch("scripts.compat_agent.sandbox.command", return_value=SimpleNamespace(
+                     returncode=0, stdout=b"0 passed", stderr=b"")):
                 self.assertFalse(box.native_check()["passed"])
             self.assertEqual(manifest.read_text(), "original")
+
+    def test_native_version_startup_failure_is_not_version_mismatch(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as temp:
+            box = object.__new__(Sandbox)
+            box.clients = Path(temp)
+            binary = box.clients / "v1/bin/opencode"
+            (box.clients / "current-opencode-v1.json").write_text(json.dumps({"binary": str(binary)}))
+            box.event = {"track": "opencode-v1"}
+            box.pins = {"projects": [{"id": "opencode-v1", "version": "1.0.0"}]}
+            box.name = "synthetic"
+            for code, output, category, reported in (
+                    (1, b"PRIVATE_ERROR", "version_probe_failed", []),
+                    (0, b"1.0.1", "version_mismatch", ["1.0.1"]),
+                    (0, b"v1.0.0\nPRIVATE_OUTPUT", "passed", ["1.0.0"])):
+                with self.subTest(code=code, output=output), patch(
+                        "scripts.compat_agent.sandbox.command", return_value=SimpleNamespace(
+                            returncode=code, stdout=output)):
+                    result = box.native_versions()[0]
+                self.assertEqual(result["category"], category)
+                self.assertEqual(result["reported"], reported)
+                self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_sandbox_home_is_private_writable_tmpfs_not_readonly_root(self):
+        from types import SimpleNamespace
+        box = object.__new__(Sandbox)
+        box.root = ROOT
+        box.path = ROOT / "target/synthetic"
+        box.clients = ROOT / "target/synthetic-clients"
+        box.image = "synthetic-image"
+        box.name = "synthetic-container"
+        with patch.object(Path, "mkdir"), patch("scripts.compat_agent.sandbox.command",
+                return_value=SimpleNamespace(returncode=0)) as run:
+            box.start()
+        calls = [c.args[0] for c in run.call_args_list]
+        self.assertIn(["docker", "exec", box.name, "mkdir", "-m", "700", "-p", "/tmp/compat-home"], calls)
+        self.assertIn("ENV HOME=/tmp/compat-home", (ROOT / "scripts/compat_agent/Dockerfile").read_text())
 
 
 if __name__ == "__main__":

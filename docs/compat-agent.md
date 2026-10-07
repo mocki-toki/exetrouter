@@ -22,6 +22,9 @@ changes require a human. Production fixes require a test-first observed failure.
 Formatting, offline clippy/tests and publication checks must pass before a PR.
 Candidate execution runs as an unprivileged user in a bounded, credential-free,
 networkless container; the server's root-execution prohibition stays intact.
+Its HOME is initialized inside the bounded temporary filesystem, not the
+read-only image root. Native version preflight distinguishes startup failures
+from version mismatches and exposes only numeric versions and exit status.
 Its temporary dev/test profiles omit debug symbols and incremental caches to fit
 the bounded target volume; debug assertions and all named checks stay enabled.
 Upstream source/config is never executed or loaded as agent instructions.
