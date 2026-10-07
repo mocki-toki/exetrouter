@@ -202,7 +202,9 @@ class Sandbox:
         try:
             # Test-only compile-time pins, never included in the proposed PR.
             manifest.write_text(json.dumps(self.pins))
-            env = []
+            # Only this named synthetic fixture can opt out of Codex's nested
+            # bwrap. The hardened outer container remains the security boundary.
+            env = ["-e", "EXETROUTER_NATIVE_OUTER_SANDBOX=1"]
             if self.event["track"] == "opencode-v1":
                 record = json.loads((self.clients / "current-opencode-v1.json").read_text())
                 binary = "/clients/" + str(Path(record["binary"]).relative_to(self.clients))

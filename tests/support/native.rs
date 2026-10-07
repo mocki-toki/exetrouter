@@ -51,6 +51,48 @@ pub struct Continuation {
     pub token_limit: u64,
     pub resume: bool,
 }
+
+fn codex_sandbox_mode(requested: bool, isolated: bool, url: &str, model: &str) -> Result<&'static str> {
+    if !requested {
+        return Ok("read-only");
+    }
+    let endpoint = reqwest::Url::parse(url)
+        .map_err(|_| "outer sandbox mode requires a synthetic loopback fixture")?;
+    let loopback = endpoint.host_str().is_some_and(|host| {
+        host.trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+    });
+    if !isolated
+        || model != "gpt-test"
+        || endpoint.scheme() != "http"
+        || !loopback
+        || endpoint.port().is_none_or(|port| port == 0)
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.path() != "/"
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err("outer sandbox mode requires an isolated synthetic loopback fixture".into());
+    }
+    // The controller's non-root, networkless, capability-free, read-only Docker
+    // container is the isolation boundary. Do not ask bwrap to nest namespaces.
+    Ok("danger-full-access")
+}
+
+fn outer_sandbox_present() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        Path::new("/.dockerenv").is_file() && unsafe { libc::geteuid() } != 0
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 impl Run<'_> {
     pub async fn execute(&self) -> Result<Output> {
         self.execute_with(None).await
@@ -64,6 +106,16 @@ impl Run<'_> {
     }
 
     async fn execute_with(&self, policy: Option<&Continuation>) -> Result<Output> {
+        let sandbox = if self.client == "codex" {
+            codex_sandbox_mode(
+                std::env::var("EXETROUTER_NATIVE_OUTER_SANDBOX").as_deref() == Ok("1"),
+                outer_sandbox_present(),
+                self.url,
+                self.model,
+            )?
+        } else {
+            "read-only"
+        };
         let work = self.directory.join("workspace");
         let config = self.directory.join("client-config");
         fs::create_dir_all(&work)?;
@@ -130,7 +182,7 @@ impl Run<'_> {
                     "never",
                     "--json",
                     "--sandbox",
-                    "read-only",
+                    sandbox,
                 ]);
                 if policy.is_none() {
                     command.arg("--ephemeral");
@@ -269,4 +321,44 @@ pub fn diagnostic(stdout: &[u8]) -> Value {
         "error_events":events.iter().filter(|e|e["type"]=="error").count(),
         "tool_marker":text.contains("EXETROUTER_TOOL_OK"),
         "smoke_marker":text.contains("EXETROUTER_SMOKE_OK")})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::codex_sandbox_mode;
+
+    #[test]
+    fn normal_native_runs_keep_codex_read_only() {
+        assert_eq!(
+            codex_sandbox_mode(false, false, "https://router.example", "real-model").unwrap(),
+            "read-only"
+        );
+    }
+
+    #[test]
+    fn outer_sandbox_opt_in_is_limited_to_isolated_synthetic_loopback() {
+        for url in ["http://127.0.0.1:8080", "http://[::1]:8080/"] {
+            assert_eq!(
+                codex_sandbox_mode(true, true, url, "gpt-test").unwrap(),
+                "danger-full-access"
+            );
+        }
+        assert!(codex_sandbox_mode(true, false, "http://127.0.0.1:8080", "gpt-test").is_err());
+        assert!(codex_sandbox_mode(true, true, "http://127.0.0.1:8080", "real-model").is_err());
+        for url in [
+            "https://127.0.0.1:8080",
+            "http://router.example:8080",
+            "http://localhost:8080",
+            "http://0.0.0.0:8080",
+            "http://127.0.0.1",
+            "http://127.0.0.1:0",
+            "http://user@127.0.0.1:8080",
+            "http://127.0.0.1:8080/v1",
+            "http://127.0.0.1:8080/?secret=test",
+            "http://127.0.0.1:8080/#fragment",
+            "invalid",
+        ] {
+            assert!(codex_sandbox_mode(true, true, url, "gpt-test").is_err());
+        }
+    }
 }
