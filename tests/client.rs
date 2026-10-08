@@ -1010,8 +1010,8 @@ fn first_run_wizard_saves_standalone_and_settings_work_without_ssh() {
     dashboard.wait("Save these settings?");
     dashboard.send(b"y");
     dashboard.wait("[ Check updates ]");
-    dashboard.send(b"\r");
-    dashboard.wait("is up to date");
+    // Setup must work offline. Explicit update checks contact the real GitHub
+    // release API; version handling and update notices have synthetic unit tests.
     dashboard.quit();
     let saved: serde_json::Value =
         serde_json::from_slice(&fs::read(client.dir.path().join("config.json")).unwrap()).unwrap();
