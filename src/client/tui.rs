@@ -712,9 +712,11 @@ fn settings_lines(connection: &Connection, state: &State, width: u16) -> Vec<Lin
             update_text(state).trim().trim_start_matches("Updates · ")
         )),
         Line::default(),
-        Line::from(vec![Span::raw("  "), mode_badge(connection)]),
-        Line::default(),
         heading("CONNECTION"),
+        Line::from(vec![
+            Span::styled("  Connection type", Style::default().fg(Color::Gray)),
+            mode_badge(connection),
+        ]),
     ];
     if connection.mode == super::config::Mode::Standalone {
         let address = connection
