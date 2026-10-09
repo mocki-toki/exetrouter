@@ -273,7 +273,6 @@ struct RequestLog {
     finalized: bool,
     account_id: i64,
     account_generation: i64,
-    order: i64,
     rejection_until: Option<i64>,
     user_id: i64,
     context_key: Arc<[u8]>,
@@ -325,19 +324,16 @@ impl RequestLog {
     ) -> Result<Self> {
         let id = record.request_id.clone();
         let user_id = record.user_id;
-        let (order, health_order) = state
+        let health_order = state
             .db
             .call(move |conn| {
                 let tx = conn.transaction()?;
                 usage::begin_request(&tx, &record)?;
-                let order = tx.query_row(
-                    "SELECT id FROM usage_events WHERE request_id=?1",
-                    [&record.request_id],
-                    |row| row.get(0),
-                )?;
+                // Quota and health observations share the same clock as live
+                // limits; usage row IDs are not comparable to that clock.
                 let health_order = crate::health::next(&tx)?;
                 tx.commit()?;
-                Ok((order, health_order))
+                Ok(health_order)
             })
             .await?;
         Ok(Self {
@@ -351,7 +347,6 @@ impl RequestLog {
             finalized: false,
             account_id: account.info.id,
             account_generation: account.info.generation,
-            order,
             rejection_until: None,
             user_id,
             context_key: state.key.clone(),
@@ -367,7 +362,8 @@ impl RequestLog {
         if observation.is_empty() {
             return Ok(());
         }
-        let (account, generation, order) = (self.account_id, self.account_generation, self.order);
+        let (account, generation, order) =
+            (self.account_id, self.account_generation, self.health_order);
         let result = self
             .db
             .call(move |conn| {

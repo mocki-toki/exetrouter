@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Order inference quota observations with the shared upstream operation clock, so live limits refreshes do not suppress later HTTP/WS updates. Preserve stale-observation and credential-generation fences without a schema change.
+
 ## 0.5.2
 
 - Raise the bounded opaque-context snapshot limit from 128 to 16,384 unique values so long native histories can continue before compaction. Preserve ownership proofs, account affinity and request-size limits, and avoid quadratic reference deduplication.

@@ -1965,6 +1965,71 @@ async fn quotas_observe_http_headers_and_ws_events_without_blocking_at_one_hundr
 }
 
 #[tokio::test]
+async fn inference_quota_updates_follow_shared_clock_after_live_limits() {
+    for websocket in [false, true] {
+        let fixture = Fixture::start(false).await;
+        let now = chrono::Utc::now().timestamp();
+        let reset = now + 600;
+        // Live limits use the operation clock, which can be far ahead of usage IDs.
+        fixture
+            .db
+            .call(move |conn| {
+                conn.execute("UPDATE upstream_operation_clock SET sequence=10000", [])?;
+                conn.execute("INSERT INTO oauth_quota_windows(account_id,kind,used_percent,window_minutes,reset_at,observed_at,request_order) VALUES(1,'primary',10,300,?1,?2,10000)", rusqlite::params![reset, now])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        if websocket {
+            *fixture.mock.quota_event.lock().unwrap() = Some(json!({
+                "type":"codex.rate_limits",
+                "rate_limits":{"primary":{"used_percent":42.5,"window_minutes":300,"reset_at":reset}}
+            }));
+            let mut socket = fixture.ws().await;
+            let mut body = request();
+            body["type"] = json!("response.create");
+            socket
+                .send(Message::Text(body.to_string().into()))
+                .await
+                .unwrap();
+            assert_eq!(terminal(&mut socket).await["type"], "response.completed");
+        } else {
+            fixture.mock.reject_websocket.store(true, Ordering::SeqCst);
+            {
+                let mut headers = fixture.mock.quota_headers.lock().unwrap();
+                headers.insert("x-codex-primary-used-percent", "42.5".parse().unwrap());
+                headers.insert("x-codex-primary-window-minutes", "300".parse().unwrap());
+                headers.insert(
+                    "x-codex-primary-reset-at",
+                    reset.to_string().parse().unwrap(),
+                );
+            }
+            let response = fixture.post(request()).await;
+            assert_eq!(response.status(), 200);
+            assert!(response
+                .text()
+                .await
+                .unwrap()
+                .contains("response.completed"));
+        }
+        let (quota, order, usage_id) = fixture
+            .db
+            .call(|conn| {
+                let quota = exetrouter::quota::summary(conn, 1, chrono::Utc::now().timestamp())?;
+                let order: i64 = conn.query_row("SELECT request_order FROM oauth_quota_windows WHERE account_id=1 AND kind='primary'", [], |row| row.get(0))?;
+                let usage_id: i64 = conn.query_row("SELECT MAX(id) FROM usage_events", [], |row| row.get(0))?;
+                Ok((quota, order, usage_id))
+            })
+            .await
+            .unwrap();
+        assert_eq!(quota.windows[0].used_percent, 42.5);
+        assert!(usage_id < 10000);
+        assert!(order > 10000);
+        fixture.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn http_quota_rejection_persists_and_blocks_new_inference_across_transports() {
     let fixture = Fixture::start(false).await;
     let mut body = request();
