@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.5.3
 
 - Order inference quota observations with the shared upstream operation clock, so live limits refreshes do not suppress later HTTP/WS updates. Preserve stale-observation and credential-generation fences without a schema change.
+- Revoke the previous bearer immediately when rotating an API token.
+- Rename encrypted token labels in the CLI/dashboard and show decrypted labels in user-scoped usage reports, including revoked tokens without merging identical names.
+- Improve privacy-safe WebSocket interruption diagnostics and label the connection type in Settings.
+- Add bounded upstream compatibility automation and isolated synthetic native-client fixtures; keep first-run dashboard tests independent of GitHub availability.
 
 ## 0.5.2
 
