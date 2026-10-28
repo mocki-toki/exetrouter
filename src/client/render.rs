@@ -433,7 +433,7 @@ pub(super) fn account_details(account: &Value, now: i64) -> String {
         return text;
     };
     let scope = if account["clients"]["scope"] == "server" {
-        "all users' recently active tokens"
+        "Recently active clients across the server"
     } else {
         "your recently active tokens"
     };

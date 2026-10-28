@@ -3724,7 +3724,7 @@ mod tests {
         assert!(details.contains("Laptop - Codex"));
         assert!(details.contains("12s ago"));
         assert!(details.contains("Running: 1"));
-        assert!(details.contains("all users' recently active tokens"));
+        assert!(details.contains("Recently active clients across the server"));
         assert!(details.contains("Other user's client"));
         state.modal = Some(Modal::Account { id: 1, scroll: 7 });
         terminal
