@@ -17,6 +17,10 @@
           version = manifest.package.version;
           src = pkgs.lib.cleanSource self;
           cargoLock.lockFile = ./Cargo.lock;
+          cargoLock.outputHashes = {
+            "tokio-tungstenite-0.28.0" = "sha256-V1xmnrfRWOcZZogelZEA4vvyMj2awCfHVA5/glQ6KAI=";
+            "tungstenite-0.27.0" = "sha256-VVHhk7l9J/sEmG3q/UuV/sQ3f+fGsmq5vumSy8vbMvw=";
+          };
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
           # The upstream suite assumes host timezone data in its CLI fixtures.
