@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.2
+
+- Refresh catalog freshness without deleting/reinserting unchanged account model metadata. Preserve the 60-second refresh, active-generation fence, catalog changes, SQLite durability and accounting without a schema migration.
+- Include the OpenCode V1 request-copy context plugin and its synthetic compaction-recovery tests, plus corrected Nix hashes for the pinned WebSocket dependencies.
+
 ## 0.8.1
 
 - Make account `Clients` counts and activity lists server-wide. Keep the 15-minute idle window, running-request visibility and bounded lists; expose other users' clients only through stable keyed aliases, never private names or raw token/user identities. Keep `Best` and target shares identical for every viewer of the same server snapshot.
