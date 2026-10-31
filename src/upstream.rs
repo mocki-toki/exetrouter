@@ -353,15 +353,11 @@ impl Upstream {
             .await?;
         let cache = models.clone();
         let generation = account.info.generation;
-        self.db.call(move |conn| {
-            let tx=conn.transaction()?;
-            let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts WHERE id=?1 AND generation=?2 AND state='active')",params![id,generation],|r|r.get(0))?;
-            if !valid { return Err("OAuth account changed during model discovery".into()); }
-            tx.execute("DELETE FROM oauth_models WHERE account_id=?1",[id])?;
-            for model in cache { tx.execute("INSERT INTO oauth_models(account_id,model,display_name,metadata) VALUES(?1,?2,?3,?4)",params![id,model.id,model.display_name,model.metadata.map(|value|value.to_string())])?; }
-            tx.execute("UPDATE oauth_accounts SET catalog_updated_at=?1 WHERE id=?2",params![Utc::now().timestamp(),id])?;
-            tx.commit()?;Ok(())
-        }).await?;
+        self.db
+            .call(move |conn| {
+                store_model_catalog(conn, id, generation, cache, Utc::now().timestamp())
+            })
+            .await?;
         Ok(models)
     }
 
@@ -1246,9 +1242,207 @@ pub(crate) async fn next_ws(
         .map_err(|_| "upstream stream interrupted".into())
 }
 
+fn store_model_catalog(
+    conn: &mut rusqlite::Connection,
+    id: i64,
+    generation: i64,
+    models: Vec<Model>,
+    updated_at: i64,
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    let valid: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM oauth_accounts WHERE id=?1 AND generation=?2 AND state='active')",
+        params![id, generation],
+        |row| row.get(0),
+    )?;
+    if !valid {
+        return Err("OAuth account changed during model discovery".into());
+    }
+    let mut incoming = models
+        .into_iter()
+        .map(|model| {
+            (
+                model.id,
+                model.display_name,
+                model.metadata.map(|value| value.to_string()),
+            )
+        })
+        .collect::<Vec<_>>();
+    incoming.sort();
+    let existing = {
+        let mut statement = tx.prepare(
+            "SELECT model,display_name,metadata FROM oauth_models WHERE account_id=?1 ORDER BY model",
+        )?;
+        let rows = statement
+            .query_map([id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+    // The generation fence and comparison share the write transaction. A normal
+    // refresh must renew freshness without rewriting an unchanged catalog/index.
+    if existing != incoming {
+        tx.execute("DELETE FROM oauth_models WHERE account_id=?1", [id])?;
+        for (model, display_name, metadata) in incoming {
+            tx.execute(
+                "INSERT INTO oauth_models(account_id,model,display_name,metadata) VALUES(?1,?2,?3,?4)",
+                params![id, model, display_name, metadata],
+            )?;
+        }
+    }
+    tx.execute(
+        "UPDATE oauth_accounts SET catalog_updated_at=?1 WHERE id=?2",
+        params![updated_at, id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn catalog_database() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE oauth_accounts(id INTEGER PRIMARY KEY,generation INTEGER,state TEXT,catalog_updated_at INTEGER);
+             CREATE TABLE oauth_models(account_id INTEGER,model TEXT,display_name TEXT,metadata TEXT,PRIMARY KEY(account_id,model));
+             INSERT INTO oauth_accounts VALUES(1,2,'active',NULL),(2,2,'active',NULL);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn catalog_model(id: &str) -> Model {
+        Model {
+            id: id.into(),
+            display_name: id.into(),
+            object: "model".into(),
+            owned_by: "openai".into(),
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn unchanged_catalog_only_renews_freshness_even_when_reordered() {
+        let mut conn = catalog_database();
+        let models = vec![catalog_model("model-a"), catalog_model("model-b")];
+        store_model_catalog(&mut conn, 1, 2, models.clone(), 100).unwrap();
+        store_model_catalog(&mut conn, 2, 2, models.clone(), 101).unwrap();
+        let before = conn.total_changes();
+        store_model_catalog(&mut conn, 1, 2, models.into_iter().rev().collect(), 160).unwrap();
+        assert_eq!(conn.total_changes() - before, 1);
+        let timestamps: (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT catalog_updated_at FROM oauth_accounts WHERE id=1),(SELECT catalog_updated_at FROM oauth_accounts WHERE id=2)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(timestamps, (160, 101));
+    }
+
+    #[test]
+    fn catalog_changes_replace_metadata_names_membership_and_empty_sets() {
+        let mut conn = catalog_database();
+        let mut model = catalog_model("model-a");
+        for revision in 0..4 {
+            if revision == 1 {
+                model.display_name = "Renamed".into();
+            } else if revision == 2 {
+                model.metadata = Some(serde_json::json!({"context_window":1234}));
+            } else if revision == 3 {
+                model.id = "model-b".into();
+            }
+            let before = conn.total_changes();
+            store_model_catalog(&mut conn, 1, 2, vec![model.clone()], 100 + revision).unwrap();
+            assert_eq!(
+                conn.total_changes() - before,
+                if revision == 0 { 2 } else { 3 }
+            );
+            let stored: (String, String, Option<String>) = conn
+                .query_row(
+                    "SELECT model,display_name,metadata FROM oauth_models WHERE account_id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                stored,
+                (
+                    model.id.clone(),
+                    model.display_name.clone(),
+                    model.metadata.as_ref().map(Value::to_string)
+                )
+            );
+        }
+        store_model_catalog(&mut conn, 1, 2, vec![], 200).unwrap();
+        let before = conn.total_changes();
+        store_model_catalog(&mut conn, 1, 2, vec![], 260).unwrap();
+        assert_eq!(conn.total_changes() - before, 1);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM oauth_models", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn stale_or_disabled_catalog_refresh_cannot_mutate_rows_or_freshness() {
+        let mut conn = catalog_database();
+        store_model_catalog(&mut conn, 1, 2, vec![catalog_model("model-a")], 100).unwrap();
+        for (generation, state) in [(3, "active"), (2, "disabled")] {
+            conn.execute(
+                "UPDATE oauth_accounts SET generation=?1,state=?2 WHERE id=1",
+                params![generation, state],
+            )
+            .unwrap();
+            let before = conn.total_changes();
+            assert!(store_model_catalog(&mut conn, 1, 2, vec![], 200).is_err());
+            assert_eq!(conn.total_changes(), before);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT catalog_updated_at FROM oauth_accounts WHERE id=1",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                100
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM oauth_models WHERE account_id=1",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_duplicate_catalog_rolls_back_the_previous_catalog() {
+        let mut conn = catalog_database();
+        store_model_catalog(&mut conn, 1, 2, vec![catalog_model("model-a")], 100).unwrap();
+        assert!(store_model_catalog(
+            &mut conn,
+            1,
+            2,
+            vec![catalog_model("model-b"), catalog_model("model-b")],
+            200
+        )
+        .is_err());
+        let stored: (String, i64) = conn.query_row("SELECT model,catalog_updated_at FROM oauth_models JOIN oauth_accounts ON account_id=id WHERE id=1", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(stored, ("model-a".into(), 100));
+    }
+
     #[test]
     fn http_preference_is_not_an_input_limit_or_a_generating_warmup() {
         let mut body = serde_json::json!({"input":[{"role":"user","content":"small"}]});
