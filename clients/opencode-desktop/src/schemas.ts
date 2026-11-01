@@ -22,6 +22,12 @@ export const Window = Schema.Struct({
 })
 export type Window = typeof Window.Type
 
+export const QuotaHistory = Schema.Struct({
+  from: Schema.Number, to: Schema.Number,
+  points: Schema.Array(Schema.Struct({ kind: Schema.String, hour: Schema.Number, observedAt: Schema.Number, used: Schema.Number, minutes: Schema.NullOr(Schema.Number), resetAt: Schema.NullOr(Schema.Number) })),
+})
+export type QuotaHistory = typeof QuotaHistory.Type
+
 export const ClientActivity = Schema.Struct({
   count: Schema.NullOr(Schema.Number), scope: Schema.String, observedAt: Schema.NullOr(Schema.Number), truncated: Schema.Boolean,
   rows: Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, running: Schema.Number, lastRequestAt: Schema.NullOr(Schema.Number) })),
@@ -31,6 +37,7 @@ export const Account = Schema.Struct({
   observationKey: Schema.NullOr(Schema.String),
   id: Schema.Number, label: Schema.String, enabled: Schema.NullOr(Schema.Boolean), locked: Schema.Boolean,
   windows: Schema.Array(Window), quotaStatus: Schema.String, cooldownSource: Schema.String, cooldownUntil: Schema.NullOr(Schema.Number),
+  history: Schema.NullOr(QuotaHistory),
   routing: Schema.Struct({ reason: Schema.String, best: Schema.Boolean, observedAt: Schema.NullOr(Schema.Number), validUntil: Schema.NullOr(Schema.Number), deadline: Schema.NullOr(Schema.Number), targetShare: Schema.NullOr(Schema.Number) }),
   credits: Schema.Struct({ count: Schema.NullOr(Schema.Number), observedAt: Schema.NullOr(Schema.Number), expiries: Schema.Array(Schema.Number) }),
   automaticReset: Schema.String, activation: Schema.NullOr(Schema.String), refreshError: Schema.Boolean,

@@ -229,6 +229,13 @@ test("rendered panel has five native web views, account details, usage graph, to
     click("View Synthetic account details")
     assert.match(window.document.querySelector('[role="dialog"]')!.textContent, /Synthetic client/)
     const accountDialog = window.document.querySelector('[role="dialog"]')!
+    const history = accountDialog.querySelector('svg[aria-label^="Hourly subscription"]')!
+    assert.ok(history)
+    assert.equal(history.querySelectorAll("[data-window]").length,2,"both windows share the same chart")
+    history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"End",bubbles:true}))
+    assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/8-hour.*100% used.*Weekly.*50% used/)
+    history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"Home",bubbles:true}))
+    assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/Not observed/)
     const accountPane = root.querySelector('[role="tabpanel"]')!
     accountPane.scrollTop = 90
     setState((old) => ({ ...old, refreshing: true }))
@@ -241,6 +248,8 @@ test("rendered panel has five native web views, account details, usage graph, to
     setState((old) => ({ ...old, refreshing:false, snapshot:{...old.snapshot, accounts:old.snapshot.accounts.map((a) => ({...a,cooldownUntil:a.windows[0].resetAt,cooldownSource:"upstream_reset",clients:{...a.clients,rows:a.clients.rows.map((c)=>({...c,name:"Updated client"}))}}))} }))
     assert.equal(window.document.querySelector('[role="dialog"]'), accountDialog)
     assert.match(accountDialog.textContent, /Updated client/)
+    assert.equal(accountDialog.querySelector('svg[aria-label^="Hourly subscription"]'),history,"background refresh preserves the chart and cursor owner")
+    assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/Not observed/)
     assert.equal(root.querySelector('[role="tabpanel"]'), accountPane)
     assert.equal(accountPane.scrollTop, 90)
     assert.match(root.querySelector('.exr-quota-pause')!.textContent,/Paused until/)

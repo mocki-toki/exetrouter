@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, createUniqueId } from "solid-js"
+import { For, Show, createMemo, createSignal } from "solid-js"
 import { createLatest } from "@opencode/plugin/gui"
 import { activity, activityDate, activityIndex, activityValue, compact } from "./chart"
 import { Dashboard } from "./contract"
@@ -15,15 +15,16 @@ function ActivityChart(props: { report: Usage; selected: string; metric: "tokens
   const [hover, setHover] = createSignal<number>()
   const index = () => hover() === undefined || !data().buckets.length ? undefined : Math.min(hover()!, data().buckets.length - 1)
   const x = () => 44 + (index() ?? 0) / Math.max(1, data().buckets.length - 1) * 600
-  const gradient = createUniqueId()
+  const ticks = createMemo(() => [...new Set([0, 1, 2, 3, 4].map((i) => Math.round(i / 4 * (data().buckets.length - 1))))])
   const label = (at: number) => new Date(at * 1000).toLocaleString("en", props.report.period === "day" || props.report.period === "24h" ? { hour: "2-digit", minute: "2-digit" } : { month: "short", day: "numeric" })
   return <>
     <div class="exr-compact-stats"><Stat label="Requests" value={compact(data().requests)} detail={props.selected ? "Selected group" : "All groups"} />
       <Stat label="Reported tokens" value={<span title={count(data().reported)}>{compact(data().reported)}</span>} detail="Input + output" />
     </div>
-    <div class="exr-chart">
+    <div class="exr-chart exr-activity-chart">
       <Show when={data().buckets.length && data().series.length} fallback={<EmptyState title="No activity yet" description="Activity will appear here when requests are recorded in this period." icon="archive" />}>
-        <div class="exr-chart-plot"><svg viewBox="0 0 668 220" role="img" tabIndex={0} aria-label={`${props.metric === "tokens" ? "Reported token" : "Request"} activity over time. Hover or use left and right arrows for interval values.`}
+        <header class="exr-history-heading"><div><h3>{props.metric === "tokens" ? "Reported tokens" : "Requests"}</h3><p class="exr-caption">{props.report.period === "day" || props.report.period === "24h" ? "Hourly" : "Daily"} activity</p></div><div class="exr-history-legend"><For each={data().series}>{(series) => <span><i style={{ background: series.color }} />{series.name}</span>}</For></div></header>
+        <div class="exr-chart-plot"><svg viewBox="0 0 668 240" role="img" tabIndex={0} aria-label={`${props.metric === "tokens" ? "Reported token" : "Request"} activity over time. Hover or use left and right arrows for interval values.`}
           onPointerMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setHover(activityIndex(data().buckets.length, event.clientX, rect.left, rect.width)) }} onPointerLeave={() => setHover(undefined)}
           onFocus={() => setHover(data().buckets.length - 1)} onBlur={() => setHover(undefined)} onKeyDown={(event) => {
             const current = index() ?? data().buckets.length - 1
@@ -31,20 +32,17 @@ function ActivityChart(props: { report: Usage; selected: string; metric: "tokens
             if (next === null) return
             event.preventDefault(); setHover(next)
           }}>
-          <defs><linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--exr-accent)" stop-opacity=".2" /><stop offset="100%" stop-color="var(--exr-accent)" stop-opacity="0" /></linearGradient></defs>
-          <For each={[0, .5, 1]}>{(ratio) => <g><line x1="44" x2="644" y1={178 - ratio * 154} y2={178 - ratio * 154} class="exr-chart-grid" /><text x="34" y={182 - ratio * 154} text-anchor="end">{compact(data().maximum * ratio)}</text></g>}</For>
-          <Show when={data().series.length === 1 && data().buckets.length > 1}><polygon points={`44,178 ${data().series[0].points} 644,178`} fill={`url(#${gradient})`} /></Show>
+          <For each={[0, .25, .5, .75, 1]}>{(ratio) => <g><line x1="44" x2="644" y1={204 - ratio * 184} y2={204 - ratio * 184} class="exr-chart-grid" /><text x="34" y={208 - ratio * 184} text-anchor="end">{compact(data().maximum * ratio)}</text></g>}</For>
           <For each={data().series}>{(series) => <>
-            <polyline points={series.points} fill="none" stroke={series.color} stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"><title>{series.name}</title></polyline>
-            <Show when={data().buckets.length === 1}><circle cx="44" cy={178 - series.values[0] / data().maximum * 154} r="4" fill={series.color} /></Show>
+            <For each={series.segments}>{(points)=><polyline points={points} fill="none" stroke={series.color} stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><title>{series.name}</title></polyline>}</For>
+            <For each={series.isolated}>{(p)=><circle cx={p.x} cy={p.y} r="3" fill={series.color} />}</For>
           </>}</For>
-          <Show when={index() !== undefined}><g class="exr-chart-cursor" data-slot="activity-cursor"><line x1={x()} x2={x()} y1="24" y2="178" /><For each={data().series}>{(series) => <circle cx={x()} cy={178 - series.values[index()!] / data().maximum * 154} r="3" fill={series.color} />}</For></g></Show>
-          <text x="44" y="210">{label(data().buckets[0].from)}</text><text x="644" y="210" text-anchor="end">{label(data().buckets.at(-1)!.from)}</text>
+          <Show when={index() !== undefined}><g class="exr-chart-cursor" data-slot="activity-cursor"><line x1={x()} x2={x()} y1="20" y2="204" /><For each={data().series}>{(series) => <Show when={series.values[index()!] !== null}><circle cx={x()} cy={204 - series.values[index()!]! / data().maximum * 184} r="3.5" fill={series.color} /></Show>}</For></g></Show>
+          <For each={ticks()}>{(i) => <text x={44 + i / Math.max(1, data().buckets.length - 1) * 600} y="231" text-anchor={i === 0 ? "start" : i === data().buckets.length - 1 ? "end" : "middle"}>{label(data().buckets[i].from)}</text>}</For>
         </svg><Show when={index() !== undefined}><div class="exr-chart-tooltip" role="status" style={{ left: x() > 334 ? undefined : `calc(${x() / 668 * 100}% + 24px)`, right: x() > 334 ? `calc(${100 - x() / 668 * 100}% + 24px)` : undefined, "max-width": `calc(${Math.max(x(), 668 - x()) / 668 * 100}% - 32px)` }}>
           <strong>{activityDate(data().buckets[index()!], props.report.period)}</strong>
-          <For each={data().series}>{(series) => { const value = () => activityValue(data().buckets[index()!], series.key, props.metric); return <div><span>{series.name}</span><span>{count(value().value)} {props.metric === "requests" ? "requests" : "tokens"}</span></div> }}</For>
+           <For each={data().series}>{(series) => { const value = () => activityValue(data().buckets[index()!], series.key, props.metric); return <div><span class="exr-inline-start"><i style={{ background: series.color }} />{series.name}</span><span>{count(value().value)} {props.metric === "requests" ? "requests" : "tokens"}</span></div> }}</For>
         </div></Show></div>
-        <div class="exr-chart-legend"><For each={data().series}>{(series) => <span><i style={{ background: series.color }} />{series.name}</span>}</For></div>
       </Show>
     </div>
   </>

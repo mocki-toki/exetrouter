@@ -4,10 +4,13 @@ import { best, fresh, priority, routingFresh, routingReason, visibleWindows, typ
 import { count, date, duration, freshness, percent } from "./format"
 import type { Account, DashboardState, Window } from "./schemas"
 import { Badge, EmptyState, Fields, List, Notice, Row, Section, Stat, useDashboardState, useDialog, useHost } from "./ui"
+import { QuotaHistoryView } from "./quota-history-view"
 
 function AccountDetails(props: { account: Account; now: number }) {
   const a = () => props.account
   return <div class="exr exr-dialog-content">
+    <div class="exr-detail-quotas"><For each={visibleWindows(a())}>{(window) => <div class="exr-detail-quota"><Quota window={window} historical={props.account.refreshError || freshness(window, props.now) !== "current"} /></div>}</For></div>
+    <QuotaHistoryView account={a()} />
     <Section title="Routing">
       <Fields rows={[
         ["Selection", <>{routingReason(a())}{!routingFresh(a(), props.now) ? " · historical" : ""}</>],

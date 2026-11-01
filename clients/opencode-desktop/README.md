@@ -61,6 +61,12 @@ last confirmed account. Completion, idle periods and metadata without an account
 alias do not clear it; a confirmed transfer updates it and switching to another
 provider clears it.
 Observations are bounded in memory only; loading the panel never submits inference.
+Account details show short and weekly windows together in a seven-day hourly
+quota chart, with distinct colors and pointer/keyboard values. The router collects
+numeric history through existing metadata observations, including while this
+panel is closed. This requires router/native exr 0.8.4 or later; collection starts
+after upgrade and missing hours remain gaps. See the reviewed
+[schema-14 migration/rollback](../../docs/quota-history.md).
 There is no separate ExetRouter page in OpenCode Settings.
 
 The panel follows the TUI's five views with a compact, theme-aware web layout.

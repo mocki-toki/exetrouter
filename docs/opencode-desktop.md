@@ -56,8 +56,12 @@ does not expose account management through the OpenCode HTTP RPC surface.
    updated router/profile, the pill is absent. No inference is submitted to discover
    the account.
   Overview includes router/account status, credits, forecasts and detailed
-  routing/client activity. Usage includes the TUI periods/groups and activity
-  chart. Tokens exposes metadata and native management actions; Models exposes
+   routing/client activity. Account details include a shared short/weekly
+   [seven-day hourly quota chart](quota-history.md), current-window summaries and
+   a pointer/keyboard cursor that survives background snapshots. Missing hours
+   remain gaps; an updated router and native client are required to collect and
+   retain history. Usage includes the TUI periods/groups, fine multi-color charts
+   and interval values. Tokens exposes metadata and native management actions; Models exposes
   the same catalog and clipboard action as the TUI.
 - Views use the host's menus, dialogs, search inputs, buttons, tooltips and
   loading indicators. Shared primitives, shell and views are separate modules.

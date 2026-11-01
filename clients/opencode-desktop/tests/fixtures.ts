@@ -20,6 +20,12 @@ export function doctor() {
       reset_credits: { available_count: 2, observed_at: 1800000000, credits: [{ expires_at: 1800003600 }] },
       automatic_reset: { status: "waiting" }, weekly_activation: "pending",
       clients: { count: 1, scope: "server", observed_at: 1800000000, truncated: false, rows: [{ id: "client-alias", name: "Synthetic client", in_flight: 2, last_request_at: 1800000000 }] },
+      quota_history: { from_utc: 1800000000 - 167 * 3600, to_utc: 1800003600, interval_seconds: 3600, points: [
+        {kind:"primary",hour:1800000000-3600,observed_at:1800000000-3500,used_percent:80,window_minutes:480,reset_at:1800003600},
+        {kind:"secondary",hour:1800000000-3600,observed_at:1800000000-3500,used_percent:40,window_minutes:10080,reset_at:1800604800},
+        {kind:"primary",hour:1800000000,observed_at:1800000000,used_percent:100,window_minutes:480,reset_at:1800003600},
+        {kind:"secondary",hour:1800000000,observed_at:1800000000,used_percent:50,window_minutes:10080,reset_at:1800604800},
+      ] },
       quota: {
       status: "current", windows: [{ kind: "primary", remaining_percent: 0, used_percent: 100, window_minutes: 480,
         reset_at: 1800003600, observed_at: 1800000000, status: "current" }],

@@ -4,7 +4,7 @@ import { constants } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import type { Options } from "./options"
-import type { Snapshot, Usage, UsageInput, Profile, Tokens, Models, Update } from "./schemas"
+import type { Snapshot, Usage, UsageInput, Profile, Tokens, Models, Update, QuotaHistory } from "./schemas"
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid exr report.")
@@ -24,6 +24,21 @@ function string(value: unknown, fallback = "Unknown"): string { return value == 
 function list(value: unknown, max: number): unknown[] {
   if (!Array.isArray(value) || value.length > max) throw new Error("Invalid exr report.")
   return value
+}
+
+export function quotaHistory(value: unknown): QuotaHistory | null {
+  if (value == null) return null
+  const h = record(value), from = number(h.from_utc), to = number(h.to_utc)
+  if (h.interval_seconds !== 3600 || from % 3600 || to % 3600 || to <= from || to - from > 168 * 3600) throw new Error("Invalid quota history.")
+  const seen = new Set<string>()
+  const points = list(h.points, 336).map((entry) => {
+    const p = record(entry), hour = number(p.hour), observedAt = number(p.observed_at), kind = text(p.kind, 16)
+    const key = `${kind}:${hour}`
+    if (!["primary", "secondary"].includes(kind) || hour % 3600 || hour < from || hour >= to || observedAt < hour || observedAt >= hour + 3600 || seen.has(key)) throw new Error("Invalid quota history.")
+    seen.add(key)
+    return { kind, hour, observedAt, used: number(p.used_percent), minutes: nullable(p.window_minutes), resetAt: nullable(p.reset_at) }
+  }).sort((a, b) => a.hour - b.hour)
+  return { from, to, points }
 }
 
 export function snapshot(value: unknown): Snapshot {
@@ -60,6 +75,7 @@ export function snapshot(value: unknown): Snapshot {
         locked: preference?.locked === true,
         cooldownUntil: nullable(quota.cooldown_until),
         quotaStatus: string(quota.status), cooldownSource: string(quota.cooldown_source, "Not reported"),
+        history: quotaHistory(account.quota_history),
         routing: { reason: string(routing.reason, "unknown"), best: routing.best === true, observedAt: nullable(routing.observed_at), validUntil: nullable(routing.valid_until), deadline: nullable(routing.deadline), targetShare: nullable(routing.target_share_percent) },
         credits: { count: nullable(credits.available_count), observedAt: nullable(credits.observed_at), expiries: list(credits.credits ?? [], 4096).map((entry) => nullable(record(entry).expires_at)).filter((at): at is number => at !== null) },
         automaticReset: string(object(account.automatic_reset).status, "idle"),
