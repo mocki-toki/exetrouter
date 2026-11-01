@@ -32,8 +32,11 @@ export class SessionAccounts {
 
   private observe(event: Request, key: unknown) {
     if (event.kind !== "primary" || event.model.providerID !== "exetrouter") return
-    this.set(event.sessionID, typeof key === "string" && /^[a-f0-9]{64}$/.test(key)
-      ? { key, model: event.model.id, observedAt: Math.floor(Date.now() / 1000) } : null)
+    // Other metadata frames can carry only turn state or timing. Their missing
+    // alias says nothing about account selection: keep the last confirmation
+    // through completion/idle until another valid alias or provider switch.
+    if (typeof key !== "string" || !/^[a-f0-9]{64}$/.test(key)) return
+    this.set(event.sessionID, { key, model: event.model.id, observedAt: Math.floor(Date.now() / 1000) })
   }
 
   private set(sessionID: string, account: SessionAccount | null) {

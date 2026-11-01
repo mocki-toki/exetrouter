@@ -50,8 +50,11 @@ does not expose account management through the OpenCode HTTP RPC surface.
    A user-scoped HMAC alias matches the authenticated native doctor's account,
    without exposing upstream identities, credentials, content or turn state.
    Account transfers update immediately; auxiliary calls and parallel chats stay
-   isolated. Without an observation or a matching updated router/profile, the
-   pill is absent. No inference is submitted to discover the account.
+   isolated. The last confirmed account remains visible after completion and while
+   idle; metadata lacking an account alias cannot clear it. An explicit switch to
+   another provider still clears attribution. Without an observation or a matching
+   updated router/profile, the pill is absent. No inference is submitted to discover
+   the account.
   Overview includes router/account status, credits, forecasts and detailed
   routing/client activity. Usage includes the TUI periods/groups and activity
   chart. Tokens exposes metadata and native management actions; Models exposes

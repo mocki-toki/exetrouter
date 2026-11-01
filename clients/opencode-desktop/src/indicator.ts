@@ -13,5 +13,5 @@ export function quotaIndicator(state: DashboardState | undefined, now: number, o
   const selected = [short, weekly].filter((w) => w !== undefined)
   const label = selected.map((w) => `${duration(w.minutes)} ${w.status === "current" && fresh(w.observedAt, report.checkedAt) && (w.resetAt === null || w.resetAt > report.checkedAt) ? percent(w.remaining) : "Unknown"}`).join(" · ")
   const cached = state?.error || !fresh(report.checkedAt, now)
-  return { id: account.id, label: label || "ExetRouter", title: `ExetRouter · ${account.label} · account used by this chat${cached ? "; cached quota snapshot" : ""}` }
+  return { id: account.id, label: label || "ExetRouter", title: `ExetRouter · ${account.label} · last confirmed account used by this chat${cached ? "; cached quota snapshot" : ""}` }
 }

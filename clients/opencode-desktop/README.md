@@ -56,6 +56,10 @@ token activity. Title/compaction/auxiliary requests and other chats do not chang
 This requires router/native `exr` version 0.8.3 or later and a matching
 router user in the native profile and OpenCode connection. Until an attributable
 primary response is observed (or on older servers), no account pill is shown.
+After that first confirmation it stays visible between responses, showing the
+last confirmed account. Completion, idle periods and metadata without an account
+alias do not clear it; a confirmed transfer updates it and switching to another
+provider clears it.
 Observations are bounded in memory only; loading the panel never submits inference.
 There is no separate ExetRouter page in OpenCode Settings.
 

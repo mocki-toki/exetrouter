@@ -38,7 +38,31 @@ test("observation storage is bounded and malformed or absent metadata never gues
     assert.equal(accounts.get("three")!.key,a)
   }
   accounts.websocket({...request,sessionID:"three",frame:frame("invalid")})
-  assert.equal(accounts.get("three"),null)
+  assert.equal(accounts.get("three")!.key,a)
   accounts.http({...request,sessionID:"two",response:new Response()})
-  assert.equal(accounts.get("two"),null)
+  assert.equal(accounts.get("two")!.key,a)
+  accounts.websocket({...request,sessionID:"unobserved",frame:frame("invalid")})
+  assert.equal(accounts.get("unobserved"),null)
+})
+
+test("completion and metadata without an account alias retain the last confirmation while idle", () => {
+  const changes: Array<string|null> = []
+  const accounts = new SessionAccounts((_,account)=>changes.push(account?.key ?? null))
+  accounts.websocket({...request,frame:frame(a)})
+  const confirmed = accounts.get(request.sessionID)
+  for (const event of [
+    {type:"response.metadata",headers:{"x-codex-turn-state":"private-marker"}},
+    {type:"response.metadata",headers:{"x-openai-model":"synthetic"}},
+    {type:"response.metadata"},
+    {type:"response.completed",response:{id:"synthetic-response"}},
+    {type:"ping"},
+  ]) accounts.websocket({...request,frame:JSON.stringify(event)})
+  accounts.http({...request,response:new Response()})
+  assert.equal(accounts.get(request.sessionID),confirmed,"idle keeps the exact confirmed observation")
+  assert.deepEqual(changes,[a],"ordinary metadata must not emit a null and hide the pill")
+  accounts.websocket({...request,frame:frame(b)})
+  assert.equal(accounts.get(request.sessionID)!.key,b,"real account transfer still applies immediately")
+  accounts.request({...request,model:{...request.model,providerID:"other"}})
+  assert.equal(accounts.get(request.sessionID),null,"an explicit provider switch still clears attribution")
+  assert.deepEqual(changes,[a,b,null])
 })
