@@ -528,6 +528,144 @@ async fn shared_cache_threads_are_distinct_scoped_and_stable_across_restart_and_
 }
 
 #[tokio::test]
+async fn opt_in_account_observations_match_user_scoped_diagnostics_on_http_reuse_and_transfer() {
+    let fixture = Fixture::start(false).await;
+    fixture.add_account(&["gpt-test"], false).await;
+    let aliases = fixture
+        .db
+        .call(|conn| {
+            let mut report = json!({"quota_accounts":[{"id":1},{"id":2}]});
+            exetrouter::account_preferences::annotate(conn, &[1; 32], 1, &mut report)?;
+            let mut foreign = json!({"quota_accounts":[{"id":1},{"id":2}]});
+            exetrouter::account_preferences::annotate(conn, &[1; 32], 2, &mut foreign)?;
+            for i in 0..2 {
+                assert_ne!(
+                    report["quota_accounts"][i]["observation_key"],
+                    foreign["quota_accounts"][i]["observation_key"]
+                );
+            }
+            Ok(report["quota_accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["observation_key"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap();
+    let mut body = request();
+    body["stream"] = json!(false);
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/v1/responses", fixture.url))
+        .bearer_auth(&fixture.secret)
+        .header("x-exetrouter-observe-account", "true")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let alias = response.headers()["x-exetrouter-account"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(aliases.contains(&alias));
+    response.bytes().await.unwrap();
+    let response = client
+        .post(format!("{}/v1/responses", fixture.url))
+        .bearer_auth(&fixture.secret)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        !response.headers().contains_key("x-exetrouter-account"),
+        "ordinary clients keep the existing wire contract"
+    );
+    response.bytes().await.unwrap();
+    let mut upgrade = format!("{}/v1/responses", fixture.url.replace("http://", "ws://"))
+        .into_client_request()
+        .unwrap();
+    upgrade.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", fixture.secret).parse().unwrap(),
+    );
+    upgrade
+        .headers_mut()
+        .insert("x-exetrouter-observe-account", "true".parse().unwrap());
+    let (mut socket, _) = connect_async(upgrade).await.unwrap();
+    body["type"] = json!("response.create");
+    let mut previous = None;
+    for turn in 0..3 {
+        socket
+            .send(Message::Text(body.to_string().into()))
+            .await
+            .unwrap();
+        let mut created = false;
+        let mut observation = None;
+        loop {
+            let event: Value =
+                serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            match event["type"].as_str() {
+                Some("response.created") => created = true,
+                Some("response.metadata") => {
+                    assert!(
+                        created,
+                        "observation must follow this request's response.created"
+                    );
+                    observation = Some(
+                        event["headers"]["x-exetrouter-account"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned(),
+                    );
+                    assert!(!event.to_string().contains("upstream-account"));
+                }
+                Some("response.completed") => break,
+                Some("error" | "response.failed") => panic!("synthetic request failed"),
+                _ => {}
+            }
+        }
+        let observed = observation
+            .expect("every opted-in turn, including a reused socket, has an observation");
+        let selected = if fixture
+            .mock
+            .request_accounts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            == "upstream-account"
+        {
+            1
+        } else {
+            2
+        };
+        assert_eq!(observed, aliases[(selected - 1) as usize]);
+        if turn == 1 {
+            assert_eq!(previous.as_ref(), Some(&observed));
+        }
+        if turn == 2 {
+            assert_ne!(previous.as_ref(), Some(&observed));
+        }
+        previous = Some(observed);
+        if turn == 1 {
+            fixture
+                .db
+                .call(move |conn| {
+                    oauth::disable(conn, selected)?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+    socket.close(None).await.unwrap();
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn ws_turn_metadata_pins_http_and_new_ws_continuations_without_leaking_headers() {
     let mut fixture = Fixture::start(false).await;
     fixture.add_account(&["gpt-test"], false).await;

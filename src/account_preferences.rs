@@ -1,7 +1,19 @@
 //! Operator-owned availability only. Routing economics cannot be overridden.
 use crate::Result;
+use hmac::{Hmac, Mac};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+
+/// Content-free correlation only: not an account selector or authorization proof.
+/// Domain/user scoping keeps inference metadata opaque outside this user's doctor.
+pub(crate) fn observation_key(key: &[u8], user: i64, account: i64) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(b"exetrouter/account-observation/v1\0");
+    mac.update(&user.to_be_bytes());
+    mac.update(&account.to_be_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
 
 /// Decode retired wire fields only to explicitly reject old-client mutations.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -108,6 +120,7 @@ fn annotate_at(
         let mut clients = crate::usage::clients_by_account(conn, key, user, now)?;
         for row in rows.iter_mut() {
             if let Some(id) = row["id"].as_i64() {
+                row["observation_key"] = observation_key(key, user, id).into();
                 let preference = effective(conn, id)?;
                 let quota = crate::quota::summary(conn, id, now)?;
                 row["preference"] = serde_json::to_value(&preference)?;
@@ -194,6 +207,10 @@ mod tests {
             let mut other_value = serde_json::json!({"quota_accounts":[{"id":1},{"id":2}]});
             annotate_at(conn, &[1; 32], other, &mut other_value, now).unwrap();
             for i in 0..2 {
+                assert_ne!(
+                    value["quota_accounts"][i]["observation_key"],
+                    other_value["quota_accounts"][i]["observation_key"]
+                );
                 assert_eq!(value["quota_accounts"][i]["routing"]["scope"], "server");
                 assert_eq!(
                     value["quota_accounts"][i]["routing"],

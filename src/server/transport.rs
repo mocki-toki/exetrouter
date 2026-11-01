@@ -1012,8 +1012,20 @@ fn response_metadata(headers: &HeaderMap) -> HeaderMap {
 fn ws_response_metadata(
     headers: &HeaderMap,
     log: &RequestLog,
+    observe_account: bool,
 ) -> std::result::Result<Option<String>, WsInterruption> {
     let mut safe = response_metadata(headers);
+    if observe_account {
+        safe.insert(
+            "x-exetrouter-account",
+            HeaderValue::from_str(&crate::account_preferences::observation_key(
+                &log.context_key,
+                log.user_id,
+                log.account_id,
+            ))
+            .expect("hex metadata"),
+        );
+    }
     if let Some(value) = headers.get("x-codex-turn-state") {
         let turn = value
             .to_str()
@@ -1492,6 +1504,14 @@ pub(super) async fn http(
         tracing::info!(event="upstream_stream_opened",request_id=%log.id,turn_state_returned=response_turn_state.is_some());
         Source::Http(response)
     };
+    let observation = identity.observe_account.then(|| {
+        HeaderValue::from_str(&crate::account_preferences::observation_key(
+            &state.key,
+            identity.user_id,
+            account.info.id,
+        ))
+        .expect("hex metadata")
+    });
     let (send, receive) = mpsc::channel::<Bytes>(crate::payload::SSE_QUEUE_CHUNKS);
     let (mut json_send, json_receive) = tokio::sync::oneshot::channel::<Result<JsonReply>>();
     state.jobs.spawn(async move {
@@ -1685,6 +1705,11 @@ pub(super) async fn http(
         }
     };
     response.headers_mut().extend(response_headers);
+    if let Some(observation) = observation.filter(|_| response.status().is_success()) {
+        response
+            .headers_mut()
+            .insert("x-exetrouter-account", observation);
+    }
     if let Some(value) = response_turn_state {
         response.headers_mut().insert("x-codex-turn-state", value);
     }
@@ -3183,7 +3208,11 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             let mut recovery_output = Some(super::output::CompletionOutput::default());
             let mut liveness = WsLiveness::new(Instant::now());
             let result: std::result::Result<(), WsInterruption> = async {
-                let mut handshake_metadata = metadata.take().map(|headers| ws_response_metadata(&headers, &log)).transpose()?.flatten();
+                let mut handshake_metadata = match metadata.take() {
+                    Some(headers) => ws_response_metadata(&headers, &log, identity.observe_account)?,
+                    None if identity.observe_account => ws_response_metadata(&HeaderMap::new(), &log, true)?,
+                    None => None,
+                };
                 log.sent().await.map_err(|_| WsInterruption::new("request_storage_failed").at("before_submission"))?;
                 tracing::info!(event="upstream_websocket_request_started",request_id=%log.id,
                     connection_id=%connection_id.0,connection_age_ms=connected.elapsed().as_millis() as u64,
@@ -3218,7 +3247,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         }).await?;
                         // As on HTTP, an unbindable header is omitted while the
                         // accepted inference is still drained and accounted for.
-                        handshake_metadata = ws_response_metadata(&headers, &log).ok().flatten();
+                        handshake_metadata = ws_response_metadata(&headers, &log, identity.observe_account).ok().flatten();
                         source
                     },
                 };

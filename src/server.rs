@@ -75,6 +75,7 @@ struct AppState {
 
 #[derive(Clone)]
 struct Identity {
+    observe_account: bool,
     user_id: i64,
     token_id: String,
     bearer: String,
@@ -628,11 +629,16 @@ async fn authorize(
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned);
             let turn_state = request.headers().get("x-codex-turn-state").cloned();
+            let observe_account = request
+                .headers()
+                .get("x-exetrouter-observe-account")
+                .is_some_and(|value| value == "true");
             let lite_mode = request
                 .headers()
                 .get("x-openai-internal-codex-responses-lite")
                 .cloned();
             request.extensions_mut().insert(Identity {
+                observe_account,
                 user_id,
                 token_id,
                 bearer,

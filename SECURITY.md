@@ -48,6 +48,13 @@ Management exposes account identities, usage totals, model IDs and operational m
 
 Account client-presence reports share server-wide token counts and pseudonymous last-request/running activity with authenticated management users. Viewers receive their own token IDs and encrypted names; other users' clients expose only domain-separated keyed aliases and timing/count metadata, never names, ciphertext, raw token IDs or user identities. Token management and detailed per-token usage remain user-scoped.
 
+Opt-in inference account observations expose a separate user/account HMAC alias,
+matched only through the same user's authenticated diagnostics. They contain no
+upstream identity and authorize nothing. The desktop plugin correlates primary
+response metadata with its own session in bounded transient memory; it never
+stores frames, response bodies, turn state or raw router session IDs for this
+feature. No account-observation database or public management endpoint is added.
+
 [Personal metadata](docs/private-metadata.md) uses a separate client-held key created automatically by the native client. Existing plaintext token names are encrypted when the native client next loads them; server snapshots do not contain the client key. Confidentiality depends on a trusted client/device, and does not hide access patterns or prevent server rollback/deletion.
 
 ## Verification and publication

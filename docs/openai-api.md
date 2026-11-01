@@ -152,4 +152,15 @@ Quota, deactivation or automatic soft transfer drops old account-specific state 
 
 Additional metadata is limited to bounded `openai-model`, `x-openai-model`, `x-models-etag`, boolean `x-reasoning-included`, and validated numeric `x-codex-primary/secondary-used-percent`, `window-minutes` and `reset-at`. Quota headers report the selected account's observations for native HTTP `/status`; missing values/credits are not fabricated. Credentials and arbitrary headers are excluded.
 
+Clients may opt into content-free account observation with
+`x-exetrouter-observe-account: true`. Successful HTTP replies add
+`x-exetrouter-account`; native WS adds it in `response.metadata` after each
+generation's `response.created`, including reused connections and account
+transfers. It is a domain-separated user/account HMAC alias matching that user's
+authenticated management `quota_accounts[].observation_key`, not an upstream
+identity, account selector, ownership proof or credential. Other users receive
+different aliases. The opt-in header is not forwarded upstream; ordinary clients
+keep the existing metadata behavior. There is no inference-side management API,
+new state table or conversation payload retention.
+
 Reviewed session/thread identities are scoped consistently in headers, frame metadata and serialized `x-codex-turn-metadata`. Tool inventory and other turn fields are preserved. Malformed serialized metadata fails before submission with a fixed error, without echoing content.
