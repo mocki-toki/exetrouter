@@ -27,6 +27,8 @@ pub struct ServerReport {
 
 #[derive(Serialize, Deserialize)]
 pub struct AccountQuota {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_key: Option<String>,
     #[serde(default)]
     pub id: i64,
     pub label: String,
@@ -38,9 +40,61 @@ pub struct AccountQuota {
     pub weekly_activation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preference: Option<crate::account_preferences::Preference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<AccountRouting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clients: Option<AccountClients>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_reset: Option<AutomaticReset>,
     #[serde(default)]
     pub threshold_reached: bool,
     pub quota: crate::quota::Summary,
+}
+
+// These fields are appended by account_preferences::annotate after the core
+// report is built. Keep their typed, metadata-only projection when the remote
+// CLI decodes/re-encodes Doctor; otherwise it silently loses TUI information.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccountRouting {
+    pub reason: String,
+    pub best: bool,
+    pub scope: Option<String>,
+    pub observed_at: Option<i64>,
+    pub valid_until: Option<i64>,
+    pub deadline: Option<i64>,
+    pub target_share_percent: Option<f64>,
+    pub urgent: Option<bool>,
+    pub short_window: Option<bool>,
+    pub expiring_resets: Option<usize>,
+    pub next_credit_expiry: Option<i64>,
+    pub switch_at: Option<u8>,
+    pub pacing_weight: Option<f64>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccountClients {
+    pub count: Option<u64>,
+    pub scope: Option<String>,
+    pub observed_at: Option<i64>,
+    pub truncated: bool,
+    pub rows: Vec<AccountClient>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccountClient {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub owned: Option<bool>,
+    pub in_flight: Option<u64>,
+    pub last_request_at: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct AutomaticReset {
+    pub status: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -170,9 +224,13 @@ pub(crate) fn snapshot(
             pool.stale_quota_accounts += 1;
         }
         quota_accounts.push(AccountQuota {
+            observation_key: None,
             id,
             label: "Email unavailable".into(),
             preference: None,
+            routing: None,
+            clients: None,
+            automatic_reset: None,
             threshold_reached: false,
             reset_credits: None,
             refresh_error: None,
@@ -272,6 +330,36 @@ mod tests {
             now,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn remote_doctor_round_trip_preserves_annotated_tui_metadata_without_unknown_payloads() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::init(&conn).unwrap();
+        conn.execute("INSERT INTO oauth_accounts(account_id,state,encrypted_credentials,expires_at,catalog_updated_at,created_at) VALUES('synthetic-account','active',X'00',2000,1000,1000)",[]).unwrap();
+        let mut value = serde_json::to_value(report(&conn, 1050)).unwrap();
+        let account = &mut value["quota_accounts"][0];
+        account["routing"] = serde_json::json!({"reason":"short_window_first","best":true,"observed_at":1050,"valid_until":1110,"target_share_percent":75,"secret":"private-body-marker"});
+        account["automatic_reset"] =
+            serde_json::json!({"status":"waiting","payload":"private-body-marker"});
+        account["clients"] = serde_json::json!({"count":3,"scope":"server","observed_at":1050,"truncated":true,"rows":[{"id":"client_alias","name":"Other user's client","owned":false,"in_flight":2,"last_request_at":1040,"secret":"private-body-marker"}]});
+        let encoded =
+            serde_json::to_value(serde_json::from_value::<ServerReport>(value).unwrap()).unwrap();
+        let account = &encoded["quota_accounts"][0];
+        assert_eq!(account["routing"]["best"], true);
+        assert_eq!(
+            account["routing"]["target_share_percent"].as_f64(),
+            Some(75.0)
+        );
+        assert_eq!(account["clients"]["count"], 3);
+        assert_eq!(account["clients"]["rows"][0]["in_flight"], 2);
+        assert_eq!(account["automatic_reset"]["status"], "waiting");
+        assert!(!encoded.to_string().contains("private-body-marker"));
+        let unknown: AccountClients = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(
+            unknown.count.is_none(),
+            "Missing client counts must not become zero"
+        );
     }
 
     #[test]
