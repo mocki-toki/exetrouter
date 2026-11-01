@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.3
+
+- Refactor the experimental OpenCode Desktop plugin (0.2.0) into a compact native-component panel with Overview, Usage, Tokens, Models and Settings. Add TUI-equivalent native actions, connection editing, OAuth and clipboard-safe token management through a private bounded stdio bridge; never return token secrets to the GUI.
+- Keep snapshots, account dialogs, drafts, filters and scroll stable during background refresh. Use one shared refresh action, highlight available updates first in Settings, preserve proportional typography, and add a contained activity chart with offset hover/keyboard values and concise timestamps.
+- Show the actual current chat's account quotas in the native composer indicator instead of the global Best recommendation. Add opt-in HTTP/per-turn WebSocket account observations using user-scoped HMAC aliases, including socket reuse and account transfer, without new persistent state, public management endpoints or inference probes.
+- Preserve routing, server-wide client activity and automatic-reset metadata when the native client decodes remote doctor reports. Keep missing counts unknown and avoid a false pool-wide cooldown when only some accounts are paused. No database schema change is required.
+
 ## 0.8.2
 
 - Refresh catalog freshness without deleting/reinserting unchanged account model metadata. Preserve the 60-second refresh, active-generation fence, catalog changes, SQLite durability and accounting without a schema migration.
