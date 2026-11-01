@@ -103,6 +103,132 @@ cat > "$EXETROUTER_TEST_CLIPBOARD"
     }
 }
 #[test]
+fn desktop_stdio_uses_native_mutations_and_never_returns_secrets_or_reissues_for_copy() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    let client = Client::configured();
+    let mut child = client
+        .command()
+        .arg("desktop")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut sequence = 0;
+    let mut call = |action: serde_json::Value| {
+        sequence += 1;
+        writeln!(
+            input,
+            "{}",
+            serde_json::json!({"id":sequence,"input":action})
+        )
+        .unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        assert!(
+            !line.contains("SYNTHETIC_TEST_SECRET") && !line.contains("SYNTHETIC_ROTATED_SECRET")
+        );
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["id"], sequence);
+        value
+    };
+    assert_eq!(
+        call(serde_json::json!({"action":"profile"}))["value"]["profile"]["mode"],
+        "Remote Server"
+    );
+    assert_eq!(
+        call(serde_json::json!({"action":"token_create","name":"Desktop synthetic","days":90}))
+            ["value"]["copied"],
+        true
+    );
+    assert_eq!(
+        fs::read_to_string(client.dir.path().join("clipboard")).unwrap(),
+        "SYNTHETIC_TEST_SECRET"
+    );
+    assert_eq!(
+        call(
+            serde_json::json!({"action":"token_rename","id":"tok_test","name":"New desktop label"})
+        )["value"]["status"],
+        "saved"
+    );
+    assert!(
+        call(serde_json::json!({"action":"token_rotate","id":"tok_test","confirmed":false}))
+            ["error"]
+            .is_string()
+    );
+    fs::write(client.dir.path().join("clipboard-failure"), "").unwrap();
+    assert_eq!(
+        call(serde_json::json!({"action":"token_rotate","id":"tok_test","confirmed":true}))
+            ["value"]["retryCopy"],
+        true
+    );
+    fs::remove_file(client.dir.path().join("clipboard-failure")).unwrap();
+    assert_eq!(
+        call(serde_json::json!({"action":"copy_retry"}))["value"]["copied"],
+        true
+    );
+    assert_eq!(
+        fs::read_to_string(client.dir.path().join("clipboard")).unwrap(),
+        "SYNTHETIC_ROTATED_SECRET"
+    );
+    assert_eq!(
+        call(serde_json::json!({"action":"token_revoke","id":"tok_test","confirmed":true}))
+            ["value"]["status"],
+        "revoked"
+    );
+    let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    let actions: Vec<serde_json::Value> = requests
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for action in [
+        "token_create",
+        "token_rename",
+        "token_rotate",
+        "token_revoke",
+    ] {
+        assert_eq!(actions.iter().filter(|r| r["action"] == action).count(), 1);
+    }
+    assert!(!requests.contains("Desktop synthetic") && !requests.contains("New desktop label"));
+    drop(input);
+    assert!(child.wait_with_output().unwrap().status.success());
+}
+
+#[test]
+fn desktop_clipboard_unavailable_refuses_issuance_before_any_remote_request() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let client = Client::configured();
+    let mut child = client
+        .command()
+        .env("PATH", "/nonexistent")
+        .arg("desktop")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(
+        input,
+        "{}",
+        serde_json::json!({"id":1,"input":{"action":"token_create","name":"Synthetic","days":90}})
+    )
+    .unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["value"]["status"], "clipboard_unavailable");
+    assert!(!client.dir.path().join("requests.log").exists());
+    assert!(!client.dir.path().join("clipboard").exists());
+}
+
+#[test]
 fn cli_renames_without_clipboard_or_secret_and_usage_shows_labels() {
     let client = Client::configured();
     let output = client.run(&["tokens", "rename", "tok_test", "Private new label"]);

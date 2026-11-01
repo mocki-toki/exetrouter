@@ -1,5 +1,6 @@
 mod clipboard;
 mod config;
+mod desktop;
 mod privacy;
 mod quota_forecast;
 mod render;
@@ -65,6 +66,9 @@ struct Args {
 
 #[derive(Subcommand)]
 enum CommandLine {
+    /// Private, bounded stdio bridge for the desktop dashboard (no secret output).
+    #[command(hide = true)]
+    Desktop,
     /// Check for or install the latest published release.
     Update {
         #[arg(long)]
@@ -183,6 +187,9 @@ async fn run() -> Result<()> {
         }
     }
     let mut connection = config::load(&options)?;
+    if matches!(options.command, Some(CommandLine::Desktop)) {
+        return desktop::run(connection, config::path(&options)?).await;
+    }
     if matches!(options.command, Some(CommandLine::Configure)) {
         config::configure(&options, &mut connection)?;
         return Ok(());
@@ -369,6 +376,7 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
         },
         CommandLine::Models { .. } => ControlRequest::Models,
         CommandLine::Update { .. }
+        | CommandLine::Desktop
         | CommandLine::Doctor
         | CommandLine::Limits
         | CommandLine::Configure
