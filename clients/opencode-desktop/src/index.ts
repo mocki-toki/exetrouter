@@ -1,7 +1,8 @@
 import { Integration, Plugin, Provider } from "@opencode/plugin"
 import { Catalog, providerID, providerPackage } from "./catalog"
 import { options } from "./options"
-import { ExetRouter } from "./rpc"
+import { Accounts, ExetRouter } from "./rpc"
+import { SessionAccounts, observeHeader } from "./session-account"
 
 export default Plugin.define({
   id: "exetrouter",
@@ -42,6 +43,14 @@ export default Plugin.define({
       status: async () => catalog.status,
       refresh: () => catalog.refresh(),
     })
+    const accounts = new SessionAccounts((sessionID, account) => { void accountRpc.events.emit("changed", { sessionID, account }).catch(() => {}) })
+    const accountRpc = await ctx.rpc.register(Accounts, { get: async ({ sessionID }) => accounts.get(sessionID) })
+    await ctx.session.hook("model.request", (event) => {
+      accounts.request(event)
+      if (event.kind === "primary" && event.model.providerID === providerID) event.headers[observeHeader] = "true"
+    })
+    await ctx.session.hook("http.response", (event) => accounts.http(event), { providerID })
+    await ctx.session.hook("experimental.ws.receive", (event) => accounts.websocket(event), { providerID })
 
     const events = new AbortController()
     const watch = (async () => {

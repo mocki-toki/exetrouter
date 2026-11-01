@@ -38,6 +38,7 @@ test("formats unknowns, actual durations and historical quota honestly", () => {
   assert.equal(percent(1), "1%")
   assert.equal(percent(1.23), "1.2%")
   assert.equal(date(null), "Unknown")
+  assert.doesNotMatch(date(1800000000), /GMT|UTC/)
   assert.equal(duration(480), "8-hour")
   assert.equal(duration(10080), "Weekly")
   assert.equal(duration(null), "Unknown duration")
@@ -72,9 +73,12 @@ test("refuses excessive concurrent reads instead of building a queue", async () 
   const signal = new AbortController().signal
   const first = client.snapshot(signal)
   const second = client.snapshot(signal)
+  const available = client.whenAvailable()
+  assert.equal(client.whenAvailable(),available,"background refresh shares one bounded slot notification")
   await assert.rejects(client.snapshot(signal), /busy/)
   gate.resolve(doctor())
   await Promise.all([first, second])
+  await available
 })
 
 test("subprocess JSON accepts nonzero doctor diagnostics only when explicitly requested", async () => {

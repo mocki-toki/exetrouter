@@ -1,6 +1,6 @@
 {
   "name": "opencode-exetrouter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@types/node": "22.19.7",
+    "happy-dom": "21.0.4",
     "solid-js": "1.9.17",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
