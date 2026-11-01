@@ -321,11 +321,20 @@ pub(crate) fn save(
         )?;
     }
     for window in observation.windows {
-        tx.execute("INSERT INTO oauth_quota_windows(account_id,kind,used_percent,window_minutes,reset_at,observed_at,request_order) SELECT ?1,?2,?3,?4,?5,?6,?7 WHERE NOT EXISTS(SELECT 1 FROM oauth_quota_absences WHERE account_id=?1 AND kind=?2 AND request_order>=?7)
+        let accepted = tx.execute("INSERT INTO oauth_quota_windows(account_id,kind,used_percent,window_minutes,reset_at,observed_at,request_order) SELECT ?1,?2,?3,?4,?5,?6,?7 WHERE NOT EXISTS(SELECT 1 FROM oauth_quota_absences WHERE account_id=?1 AND kind=?2 AND request_order>=?7)
             ON CONFLICT(account_id,kind) DO UPDATE SET used_percent=excluded.used_percent,window_minutes=excluded.window_minutes,reset_at=excluded.reset_at,observed_at=excluded.observed_at,request_order=excluded.request_order
             WHERE excluded.request_order >= oauth_quota_windows.request_order",
             params![account,window.kind,window.used,window.minutes,window.reset,now,order])?;
+        if accepted > 0 && now >= 0 {
+            tx.execute("INSERT INTO oauth_quota_history(account_id,kind,hour,observed_at,used_percent,window_minutes,reset_at,request_order) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+                ON CONFLICT(account_id,kind,hour) DO UPDATE SET observed_at=excluded.observed_at,used_percent=excluded.used_percent,window_minutes=excluded.window_minutes,reset_at=excluded.reset_at,request_order=excluded.request_order
+                WHERE excluded.request_order>=oauth_quota_history.request_order AND excluded.observed_at>=oauth_quota_history.observed_at",
+                params![account,window.kind,now/3600*3600,now,window.used,window.minutes,window.reset,order])?;
+            // Retain a hard per-window bound even if the host clock moves backward.
+            tx.execute("DELETE FROM oauth_quota_history WHERE account_id=?1 AND kind=?2 AND hour NOT IN (SELECT hour FROM oauth_quota_history WHERE account_id=?1 AND kind=?2 ORDER BY hour DESC LIMIT 168)",params![account,window.kind])?;
+        }
     }
+    crate::quota_history::prune(&tx, now)?;
     if let Some((until, source)) = observation.cooldown {
         // Concurrent successful requests never clear a rejection. Multiple
         // rejections may extend cooldown but cannot shorten it.

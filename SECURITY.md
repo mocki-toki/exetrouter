@@ -15,7 +15,7 @@ Use [GitHub private vulnerability reporting](https://github.com/mocki-toki/exetr
 | Personal metadata | Client-encrypted token names and dashboard preferences; user key never sent to service. Retired encrypted account labels may remain in older state |
 | Usage | User/token IDs, validated model ID, numeric usage, fixed statuses, timings and request/response identifiers |
 | Conversation affinity | Client-carried authenticated ownership envelopes and encrypted digest-only transfer receipts; legacy digest overrides remain readable without new rows. Unwrapped client context is rejected. Bounded current WS history exists only in transient memory |
-| Subscription limits | Percentages, durations, reset/observation times, cooldowns, sanitized credit expiry/count metadata and digest-only automatic-redemption audit outcomes; upstream credit IDs remain transient |
+| Subscription limits | Percentages, durations, reset/observation times, bounded seven-day hourly numeric history, cooldowns, sanitized credit expiry/count metadata and digest-only automatic-redemption audit outcomes; upstream credit IDs remain transient |
 | Native tools | Fixed account/feature pause metadata and bounded user-scoped search-session HMAC/account bindings; no image bytes, prompts, raw session IDs, queries, reference strings or search results |
 | MCP | No persistent protocol sessions or payloads; authenticated user-scoped session correlations and bounded in-flight cancellation digests/signals in memory only. Same router bearer, account controls and accounting as native operations |
 | Account identity | Operator-owned account metadata and display email extracted from encrypted issuer credentials |

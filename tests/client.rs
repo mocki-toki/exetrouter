@@ -621,6 +621,10 @@ fn real_terminal_dashboard_copies_secrets_without_rendering_and_restores_screen(
     clear_history(&mut output);
     master.write_all(b"\r").unwrap();
     wait(&mut master, &mut output, "Account details");
+    wait(&mut master, &mut output, "Limit history");
+    // Current limits and the weekly chart precede routing/client metadata.
+    // Verify that the new scrollable layout still exposes the legacy fallback.
+    master.write_all(b"\x1b[6~\x1b[6~\x1b[6~").unwrap();
     wait(
         &mut master,
         &mut output,

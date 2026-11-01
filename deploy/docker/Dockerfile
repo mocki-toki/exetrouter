@@ -20,7 +20,7 @@ LABEL org.opencontainers.image.source="https://github.com/mocki-toki/exetrouter"
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="$EXETROUTER_VERSION" \
       org.opencontainers.image.revision="$EXETROUTER_REVISION" \
-       io.exetrouter.schema-version="13"
+      io.exetrouter.schema-version="14"
 USER 10001:10002
 ENTRYPOINT ["/usr/local/bin/exrd"]
 CMD ["serve", "--allow-container-listen"]

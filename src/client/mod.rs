@@ -1,3 +1,4 @@
+mod account_details;
 mod clipboard;
 mod config;
 mod desktop;

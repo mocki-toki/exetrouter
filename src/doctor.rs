@@ -49,6 +49,8 @@ pub struct AccountQuota {
     #[serde(default)]
     pub threshold_reached: bool,
     pub quota: crate::quota::Summary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_history: Option<crate::quota_history::History>,
 }
 
 // These fields are appended by account_preferences::annotate after the core
@@ -236,6 +238,7 @@ pub(crate) fn snapshot(
             refresh_error: None,
             weekly_activation: conn.query_row("SELECT CASE WHEN status='pending' AND attempted_at<=?3 THEN 'unknown' ELSE status END FROM quota_activation_attempts WHERE account_id=?1 AND attempted_at>?2 ORDER BY attempted_at DESC,id DESC LIMIT 1", rusqlite::params![id,now-604800,now-60], |row| row.get(0)).optional()?,
             quota,
+            quota_history: Some(crate::quota_history::snapshot(conn, id, now)?),
         });
     }
     let oauth_status = if !configured {

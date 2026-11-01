@@ -259,11 +259,13 @@ struct State {
     values: [Option<Value>; 5],
     selected: usize,
     account_selected: usize,
+    account_hour: Option<i64>,
     model_selected: usize,
     scroll: u16,
     period: usize,
     group: usize,
     usage_selected: usize,
+    usage_cursor: Option<i64>,
     request_metric: bool,
     statuses: [String; 5],
     notices: [Option<String>; 5],
@@ -751,6 +753,14 @@ fn account_detail_text(state: &State, id: i64) -> String {
             |row| render::account_details(row, chrono::Utc::now().timestamp()),
         )
 }
+fn account_row(state: &State, id: i64) -> Option<&Value> {
+    state.values[OVERVIEW]
+        .as_ref()?
+        .get("quota_accounts")?
+        .as_array()?
+        .iter()
+        .find(|row| row["id"].as_i64() == Some(id))
+}
 fn action_menu(state: &State, _connection: &Connection) -> (String, Vec<(String, KeyCode)>) {
     let entries = match state.tab {
         TOKENS => {
@@ -1088,8 +1098,16 @@ fn render_hits(
             ("↑ / ↓", "select"),
             ("PgUp / PgDn", "page"),
         ]),
-        USAGE if state.group != 0 => keys(&[("← / →", "view"), ("↑ / ↓", "select")]),
-        USAGE => keys(&[("← / →", "view")]),
+        USAGE if state.group != 0 => keys(&[
+            ("← / →", "view"),
+            ("↑ / ↓", "select"),
+            ("Shift+←/→", "chart"),
+        ]),
+        USAGE => keys(&[
+            ("← / →", "view"),
+            ("Shift+←/→", "chart"),
+            ("Home/End", "first/latest"),
+        ]),
         MODELS => keys(&[
             ("← / →", "view"),
             ("↑ / ↓", "select"),
@@ -1106,7 +1124,11 @@ fn render_hits(
 
     if let Some(modal) = &state.modal {
         footer = vec![match modal {
-            Modal::Account { .. } => keys(&[("↑ / ↓", "scroll"), ("PgUp / PgDn", "page")]),
+            Modal::Account { .. } => keys(&[
+                ("← / →", "hour"),
+                ("↑ / ↓", "scroll"),
+                ("Home / End", "first / latest"),
+            ]),
             Modal::Actions { .. } => keys(&[("↑ / ↓", "select")]),
             Modal::Rename { .. } => keys(&[("← / →", "cursor"), ("Ctrl-U", "clear")]),
             _ => Line::default(),
@@ -1237,11 +1259,20 @@ fn render_hits(
         } else {
             popup(frame.area())
         };
-        let needed = Paragraph::new(styled_text(&text))
-            .wrap(Wrap { trim: false })
-            .line_count(area.width.saturating_sub(2))
-            .saturating_add(4)
-            .clamp(6, usize::from(area.height));
+        let lines = if let Modal::Account { id, .. } = modal {
+            account_row(state, *id).map_or(1, |row| {
+                super::account_details::height(
+                    row,
+                    chrono::Utc::now().timestamp(),
+                    area.width.saturating_sub(4),
+                )
+            })
+        } else {
+            Paragraph::new(styled_text(&text))
+                .wrap(Wrap { trim: false })
+                .line_count(area.width.saturating_sub(2))
+        };
+        let needed = lines.saturating_add(4).clamp(6, usize::from(area.height));
         area.height = needed as u16;
         area.y = frame.area().y + (frame.area().height - area.height) / 2;
         frame.render_widget(Clear, area);
@@ -1250,25 +1281,29 @@ fn render_hits(
             .borders(Borders::ALL)
             .title(title)
             .border_style(Style::default().fg(Color::Cyan));
-        if let Modal::Account { scroll, .. } = modal {
+        if let Modal::Account { id, scroll } = modal {
             frame.render_widget(block, area);
             let content = Rect::new(
-                area.x + 1,
+                area.x + 2,
                 area.y + 1,
-                area.width.saturating_sub(2),
+                area.width.saturating_sub(4),
                 area.height.saturating_sub(4),
             );
-            let max = Paragraph::new(styled_text(&text))
-                .wrap(Wrap { trim: false })
-                .line_count(content.width)
+            let max = lines
                 .saturating_sub(content.height as usize)
                 .min(u16::MAX as usize) as u16;
-            frame.render_widget(
-                Paragraph::new(styled_text(&text))
-                    .wrap(Wrap { trim: false })
-                    .scroll(((*scroll).min(max), 0)),
-                content,
-            );
+            if let Some(row) = account_row(state, *id) {
+                super::account_details::draw(
+                    frame,
+                    content,
+                    row,
+                    chrono::Utc::now().timestamp(),
+                    (*scroll).min(max),
+                    state.account_hour,
+                );
+            } else {
+                frame.render_widget(Paragraph::new(text), content);
+            }
         } else {
             frame.render_widget(
                 Paragraph::new(styled_text(&text))
@@ -1715,6 +1750,20 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
         .iter()
         .filter_map(|r| r["unknown_usage"].as_i64())
         .sum();
+    let palette = super::account_details::COLORS;
+    let mut identities: Vec<_> = value["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r["name"].as_str())
+        .collect();
+    identities.sort_unstable();
+    identities.dedup();
+    let color = |name: &str| {
+        palette[(identities.iter().position(|n| *n == name).unwrap_or(0)
+            + usize::from(!state.request_metric))
+            % palette.len()]
+    };
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
@@ -1738,10 +1787,30 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
                 ),
                 Style::default().fg(Color::Gray),
             ),
+            Line::from(
+                rows.iter()
+                    .map(|r| {
+                        Span::styled(
+                            format!("● {}   ", render::safe(render::usage_name(r))),
+                            Style::default().fg(color(r["name"].as_str().unwrap_or("all"))),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         ]),
         chunks[0],
     );
-    let timeline = value["timeline"].as_array().cloned().unwrap_or_default();
+    let timeline: Vec<_> = value["timeline"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| {
+            b["from_utc"]
+                .as_i64()
+                .is_some_and(|at| at <= chrono::Utc::now().timestamp())
+        })
+        .cloned()
+        .collect();
     if timeline.is_empty() {
         frame.render_widget(
             Paragraph::new("No timeline available from this server.").block(panel("Activity")),
@@ -1763,61 +1832,78 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
             timeline
                 .iter()
                 .enumerate()
-                .filter(|(_, b)| {
-                    b["from_utc"]
-                        .as_i64()
-                        .is_some_and(|at| at <= chrono::Utc::now().timestamp())
-                })
-                .map(|(i, b)| {
-                    let count = b["rows"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|r| r["name"].as_str() == Some(name))
-                        .map(|r| {
-                            if !state.request_metric {
-                                r["input_tokens"].as_i64().unwrap_or(0)
-                                    + r["output_tokens"].as_i64().unwrap_or(0)
-                            } else {
-                                r["requests"].as_i64().unwrap_or(0)
-                            }
-                        })
-                        .sum::<i64>();
-                    (i as f64, count as f64)
-                })
+                .map(|(i, b)| usage_value(b, name, state.request_metric).map(|v| (i as f64, v)))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let max = usage_axis_max(series.iter().flatten().map(|(_, v)| *v).fold(1., f64::max));
-    let palette = [
-        Color::Cyan,
-        Color::Magenta,
-        Color::Green,
-        Color::Yellow,
-        Color::Blue,
-    ];
-    let datasets = names
-        .iter()
-        .zip(&series)
-        .enumerate()
-        .map(|(i, (name, data))| {
-            let label = rows
-                .iter()
-                .find(|row| row["name"].as_str() == Some(name))
-                .map_or(name.as_str(), render::usage_name);
-            Dataset::default()
-                .name(format!("  {}  ", render::safe(label)))
-                .marker(Marker::HalfBlock)
-                .graph_type(GraphType::Line)
-                .style(
-                    Style::default()
-                        .fg(palette[i % palette.len()])
-                        .add_modifier(Modifier::BOLD),
-                )
-                .data(data)
-        })
-        .collect::<Vec<_>>();
+    let max = usage_axis_max(
+        series
+            .iter()
+            .flatten()
+            .flatten()
+            .map(|(_, v)| *v)
+            .fold(1., f64::max),
+    );
+    let mut segments = Vec::new();
+    for (i, line) in series.iter().enumerate() {
+        let mut points = Vec::new();
+        for p in line {
+            if let Some(p) = p {
+                points.push(*p)
+            } else if !points.is_empty() {
+                segments.push((i, std::mem::take(&mut points)));
+            }
+        }
+        if !points.is_empty() {
+            segments.push((i, points));
+        }
+    }
     let last = timeline.len().saturating_sub(1);
+    let selected = state
+        .usage_cursor
+        .and_then(|at| {
+            timeline
+                .iter()
+                .position(|b| b["from_utc"].as_i64() == Some(at))
+        })
+        .unwrap_or(last);
+    let cursor = [(selected as f64, 0.0), (selected as f64, max)];
+    let grids: Vec<_> = (1..=4)
+        .map(|i| {
+            [
+                (0.0, max * i as f64 / 4.0),
+                (last.max(1) as f64, max * i as f64 / 4.0),
+            ]
+        })
+        .collect();
+    let mut datasets: Vec<_> = grids
+        .iter()
+        .map(|points| {
+            Dataset::default()
+                .data(points)
+                .marker(Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(Color::DarkGray))
+        })
+        .collect();
+    datasets.push(
+        Dataset::default()
+            .data(&cursor)
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::DarkGray)),
+    );
+    datasets.extend(segments.iter().map(|(i, data)| {
+        Dataset::default()
+            .marker(Marker::Braille)
+            .graph_type(if data.len() == 1 {
+                GraphType::Scatter
+            } else {
+                GraphType::Line
+            })
+            .style(Style::default().fg(color(&names[*i])))
+            .data(data)
+    }));
     let labels = [0, last / 2, last]
         .into_iter()
         .map(|i| {
@@ -1859,7 +1945,9 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
                     .bounds([0., max])
                     .labels([
                         Line::from("0"),
+                        Line::from(format!("{}", max / 4.)),
                         Line::from(format!("{}", max / 2.)),
+                        Line::from(format!("{}", max * 3. / 4.)),
                         Line::from(format!("{max:.0}")),
                     ])
                     .style(Style::default().fg(Color::Gray)),
@@ -1871,16 +1959,82 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
     } else {
         "Cached input and reasoning output are already included in token totals.".into()
     };
+    let bucket = &timeline[selected];
+    let at = if state.period <= 1 {
+        bucket["to_utc"]
+            .as_i64()
+            .or_else(|| bucket["from_utc"].as_i64())
+    } else {
+        bucket["from_utc"].as_i64()
+    };
+    let label = at
+        .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+        .map(|d| {
+            d.with_timezone(&chrono::Local)
+                .format(if state.period <= 1 {
+                    "%b %-d, %I:%M %p"
+                } else {
+                    "%b %-d"
+                })
+                .to_string()
+        })
+        .unwrap_or_else(|| "Unknown time".into());
+    let values = names.iter().map(|name| {
+        let rows: Vec<_> = bucket["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| r["name"].as_str() == Some(name))
+            .collect();
+        let value = if state.request_metric {
+            rows.iter()
+                .filter_map(|r| r["requests"].as_i64())
+                .sum::<i64>()
+                .to_string()
+        } else if !rows.is_empty()
+            && rows
+                .iter()
+                .all(|r| r["input_tokens"].is_null() && r["output_tokens"].is_null())
+        {
+            "Unknown".into()
+        } else {
+            rows.iter()
+                .flat_map(|r| [r["input_tokens"].as_i64(), r["output_tokens"].as_i64()])
+                .flatten()
+                .sum::<i64>()
+                .to_string()
+        };
+        Span::styled(
+            format!(
+                "  {value} {}",
+                if state.request_metric {
+                    "requests"
+                } else {
+                    "tokens"
+                }
+            ),
+            Style::default().fg(color(name)),
+        )
+    });
+    let selection = Line::from(
+        std::iter::once(Span::styled(label, Style::default().fg(Color::White)))
+            .chain(values)
+            .collect::<Vec<_>>(),
+    );
     frame.render_widget(
-        Paragraph::new(format!(
-            "{} · {}\n{note}",
-            render::system_timezone(),
-            if state.period <= 1 {
-                "Hourly activity"
-            } else {
-                "Daily activity"
-            }
-        ))
+        Paragraph::new(vec![
+            selection,
+            Line::from(format!(
+                "{} · {}",
+                render::system_timezone(),
+                if state.period <= 1 {
+                    "Hourly activity"
+                } else {
+                    "Daily activity"
+                }
+            )),
+            Line::from(note),
+        ])
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(if unknown > 0 {
             Color::Yellow
@@ -1889,6 +2043,66 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
         })),
         chunks[2],
     );
+}
+fn seek_usage(state: &mut State, key: KeyEvent) -> bool {
+    if state.tab != USAGE
+        || !matches!(key.code, KeyCode::Home | KeyCode::End)
+            && !(matches!(key.code, KeyCode::Left | KeyCode::Right)
+                && key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        return false;
+    }
+    let hours: Vec<_> = state.values[USAGE]
+        .as_ref()
+        .into_iter()
+        .flat_map(|v| v["timeline"].as_array())
+        .flatten()
+        .filter_map(|b| b["from_utc"].as_i64())
+        .filter(|at| *at <= chrono::Utc::now().timestamp())
+        .collect();
+    if !hours.is_empty() {
+        let last = hours.len() - 1;
+        let current = state
+            .usage_cursor
+            .and_then(|at| hours.iter().position(|h| *h == at))
+            .unwrap_or(last);
+        let index = match key.code {
+            KeyCode::Home => 0,
+            KeyCode::End => last,
+            KeyCode::Left => current.saturating_sub(1),
+            _ => (current + 1).min(last),
+        };
+        state.usage_cursor = Some(hours[index]);
+    }
+    true
+}
+fn usage_value(bucket: &Value, name: &str, requests: bool) -> Option<f64> {
+    let rows: Vec<_> = bucket["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["name"].as_str() == Some(name))
+        .collect();
+    if requests {
+        return Some(
+            rows.iter()
+                .filter_map(|r| r["requests"].as_i64())
+                .sum::<i64>() as f64,
+        );
+    }
+    if !rows.is_empty()
+        && rows
+            .iter()
+            .all(|r| r["input_tokens"].is_null() && r["output_tokens"].is_null())
+    {
+        return None;
+    }
+    Some(
+        rows.iter()
+            .flat_map(|r| [r["input_tokens"].as_i64(), r["output_tokens"].as_i64()])
+            .flatten()
+            .sum::<i64>() as f64,
+    )
 }
 fn keyboard_help(state: &State, connection: &Connection) -> String {
     let actions = match state.tab {
@@ -2135,10 +2349,18 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                         let next=scroll.saturating_add(step);
                         let size=terminal.size()?;
                         let area=account_popup(Rect::new(0,0,size.width,size.height));
-                        let max=Paragraph::new(account_detail_text(&state,account)).wrap(Wrap{trim:false}).line_count(area.width.saturating_sub(2)).saturating_sub(area.height.saturating_sub(4) as usize).min(u16::MAX as usize) as u16;
+                        let max=account_row(&state,account).map_or(1,|row|super::account_details::height(row,chrono::Utc::now().timestamp(),area.width.saturating_sub(4))).saturating_sub(area.height.saturating_sub(4) as usize).min(u16::MAX as usize) as u16;
                         state.modal=Some(Modal::Account{id:account,scroll:next.min(max)});
                     }
                     KeyCode::Up | KeyCode::PageUp => *scroll=scroll.saturating_sub(if key.code==KeyCode::PageUp {10} else {1}),
+                    KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => {
+                        let id=*id;
+                        if let Some((from,to))=account_row(&state,id).and_then(super::account_details::range) {
+                            let last=to-3600;
+                            let current=state.account_hour.unwrap_or(last);
+                            state.account_hour=Some(match key.code {KeyCode::Home=>from,KeyCode::End=>last,KeyCode::Left=>(current-3600).clamp(from,last),_=>(current+3600).clamp(from,last)});
+                        }
+                    }
                     KeyCode::Char('r') if pending.is_none() => pending=Some(start(&args.connection,ControlRequest::Limits,OVERVIEW,false)),
                     _ => {}
                 },
@@ -2248,6 +2470,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                 },
             }
         } else {
+            if seek_usage(&mut state,key) {continue}
             let old_tab = state.tab;
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => {
@@ -2390,7 +2613,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                 KeyCode::Enter if matches!(state.tab,OVERVIEW|TOKENS) => {
                     if state.tab==OVERVIEW {
                         if let Some(id)=state.values[OVERVIEW].as_ref().and_then(|v|v["quota_accounts"].as_array()).and_then(|rows|rows.get(state.account_selected)).and_then(|row|row["id"].as_i64()) {
-                            state.modal=Some(Modal::Account{id,scroll:0});
+                            state.account_hour=None; state.modal=Some(Modal::Account{id,scroll:0});
                         }
                     } else {
                         let (title,entries)=action_menu(&state,&args.connection);
@@ -3472,6 +3695,41 @@ mod tests {
             assert!(upper >= value);
         }
     }
+    #[test]
+    fn usage_cursor_keeps_tab_navigation_and_unknown_counts_intact() {
+        let now = chrono::Utc::now().timestamp();
+        let mut state = State {
+            tab: USAGE,
+            ..Default::default()
+        };
+        state.values[USAGE] = Some(
+            serde_json::json!({"timeline":[{"from_utc":now-7200},{"from_utc":now-3600},{"from_utc":now}]}),
+        );
+        assert!(seek_usage(
+            &mut state,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT)
+        ));
+        assert_eq!(state.usage_cursor, Some(now - 3600));
+        assert_eq!(state.tab, USAGE);
+        assert!(!seek_usage(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
+        ));
+        assert!(seek_usage(
+            &mut state,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)
+        ));
+        assert_eq!(state.usage_cursor, Some(now - 7200));
+        assert!(seek_usage(
+            &mut state,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE)
+        ));
+        assert_eq!(state.usage_cursor, Some(now));
+        let unknown = serde_json::json!({"rows":[{"name":"synthetic","requests":1,"input_tokens":null,"output_tokens":null}]});
+        assert_eq!(usage_value(&unknown, "synthetic", false), None);
+        assert_eq!(usage_value(&unknown, "synthetic", true), Some(1.0));
+        assert_eq!(usage_value(&unknown, "absent", false), Some(0.0));
+    }
 
     #[test]
     fn usage_legend_shows_token_labels_on_small_terminals() {
@@ -3726,7 +3984,7 @@ mod tests {
         assert!(details.contains("Running: 1"));
         assert!(details.contains("all users' recently active tokens"));
         assert!(details.contains("Other user's client"));
-        state.modal = Some(Modal::Account { id: 1, scroll: 7 });
+        state.modal = Some(Modal::Account { id: 1, scroll: 32 });
         terminal
             .draw(|f| render(f, &state, &Connection::default(), false))
             .unwrap();
@@ -3980,10 +4238,10 @@ mod tests {
             assert!(text.contains("Reported tokens · Today"));
             assert!(text.contains("Today p"));
             assert!(text.contains("Tokens m"));
-            assert!(buffer
-                .content
-                .iter()
-                .any(|c| c.symbol().chars().any(|ch| matches!(ch, '▀' | '▄' | '█'))));
+            assert!(buffer.content.iter().any(|c| c
+                .symbol()
+                .chars()
+                .any(|ch| matches!(ch, '▀' | '▄' | '█' | '\u{2801}'..='\u{28ff}'))));
             assert!(buffer.content.iter().any(|c| c.fg == Color::Cyan));
         }
     }

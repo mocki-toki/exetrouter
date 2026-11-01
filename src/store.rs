@@ -17,6 +17,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/011_cooldown_recovery.sql"),
     include_str!("migrations/012_automatic_routing.sql"),
     include_str!("migrations/013_native_tools.sql"),
+    include_str!("migrations/014_quota_history.sql"),
 ];
 pub const SCHEMA_VERSION: usize = MIGRATIONS.len();
 const QUEUE_CAPACITY: usize = 32;
@@ -36,6 +37,7 @@ pub fn init(conn: &Connection) -> Result<()> {
     }
     tx.execute("UPDATE quota_activation_attempts SET status='unknown' WHERE status='pending' AND attempted_at<=?1", [chrono::Utc::now().timestamp()-60])?;
     tx.execute("UPDATE automatic_reset_attempts SET status='unknown' WHERE status='submitted' AND attempted_at<=?1", [chrono::Utc::now().timestamp()-120])?;
+    crate::quota_history::prune(&tx, chrono::Utc::now().timestamp())?;
     tx.commit()?;
     Ok(())
 }

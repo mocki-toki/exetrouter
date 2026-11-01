@@ -114,6 +114,7 @@ fn annotate_at(
     value["capabilities"]["automatic_account_routing"] = serde_json::json!(1);
     value["capabilities"]["automatic_reset_credits"] = serde_json::json!(1);
     value["capabilities"]["global_account_clients"] = serde_json::json!(1);
+    value["capabilities"]["hourly_quota_history"] = serde_json::json!(1);
     if let Some(rows) = value["quota_accounts"].as_array_mut() {
         let mut candidates = Vec::new();
         // Scan activity once per snapshot, not once per account.

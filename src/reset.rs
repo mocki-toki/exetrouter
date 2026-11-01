@@ -235,6 +235,7 @@ impl Upstream {
                     },
                     Err(_)=>row.refresh_error=Some("Live subscription limits unavailable; showing stored observations".into()),
                 }
+                row.quota_history = self.db.call(move |conn| crate::quota_history::snapshot(conn, id, chrono::Utc::now().timestamp())).await.ok();
             }
         }).await;
         if activated.load(std::sync::atomic::Ordering::Relaxed) {
