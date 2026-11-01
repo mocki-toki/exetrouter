@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.4
+
+- Add durable, bounded hourly subscription history to account details in the native TUI and OpenCode Desktop plugin (0.3.0). Plot short and weekly windows together over seven days with separate colors, shared percentage axes and an hourly cursor; show used/remaining quota without inventing missing hours or smoothing quota resets.
+- Refresh account detail layouts with compact current-window summaries and stable background updates. Restyle Usage charts with fine lines, restrained containers, readable axes, identity-based colors and interval selection; retain unknown token counts as gaps. TUI Usage uses Shift+Left/Right and Home/End without changing tab navigation.
+- Keep the actual-chat account indicator visible between responses; metadata without an account alias no longer clears the last confirmation.
+- Introduce additive schema 14 for numeric hourly observations only, collected through existing quota metadata paths without new inference or reset-credit actions. Existing days cannot be backfilled. Deployment requires the reviewed migration/rollback in `docs/quota-history.md`; routine Docker updates still refuse a schema mismatch.
+
 ## 0.8.3
 
 - Refactor the experimental OpenCode Desktop plugin (0.2.0) into a compact native-component panel with Overview, Usage, Tokens, Models and Settings. Add TUI-equivalent native actions, connection editing, OAuth and clipboard-safe token management through a private bounded stdio bridge; never return token secrets to the GUI.
