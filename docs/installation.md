@@ -51,6 +51,10 @@ exrd --version
 
 These commands follow the repository's default branch. For a reproducible installation, replace `github:mocki-toki/exetrouter` with `github:mocki-toki/exetrouter/COMMIT_SHA`, using a reviewed commit that contains the flake. Older release tags without a flake cannot be used with these commands. The first source build can take several minutes; no separate Rust installation is needed.
 
+For declarative connections, profile commands and standalone services, see
+the [NixOS and Home Manager modules](nix.md). Both use `programs.exetrouter`;
+importing the NixOS module also makes `pkgs.exetrouter` available through an overlay.
+
 To build and check a reviewed local checkout without installing it:
 
 ```sh

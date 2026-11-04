@@ -409,7 +409,7 @@ test("the built main entry polls a synthetic exr once for all windows, publishes
   let cleanup: (() => void | Promise<void>) | void = undefined
   try {
     const binary = join(root, "exr-fixture")
-    await writeFile(binary, `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.includes("doctor") ? ${JSON.stringify(doctor())} : ${JSON.stringify(usage())}));\n`, { mode: 0o700 })
+    await writeFile(binary, `#!${process.execPath}\nprocess.stdout.write(JSON.stringify(process.argv.includes("doctor") ? ${JSON.stringify(doctor())} : ${JSON.stringify(usage())}));\n`, { mode: 0o700 })
     const { plugin, timers } = await bundle(true)
     let impl: { state(): { snapshot: { version: string } | null }; refresh(): Promise<void> } | undefined
     const ctx = {

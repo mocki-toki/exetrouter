@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ROOT_FILES = {"AGENTS.md", "CLAUDE.md", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md", ".gitignore", ".dockerignore", "flake.nix", "flake.lock"}
-SOURCE_DIRS = {"src", "tests", "docs", "deploy", "scripts", "skills", "prompts", ".github", "Formula"}
+SOURCE_DIRS = {"src", "tests", "docs", "deploy", "scripts", "skills", "prompts", ".github", "Formula", "nix"}
 DESKTOP_PLUGIN = "clients/opencode-desktop"
 DESKTOP_ROOT_FILES = {".gitignore", "README.md", "package.json", "package-lock.json", "tsconfig.json", "vite.config.ts"}
 V1_FILES = {"README.md", "package.json", "context.js", "context.test.js"}
