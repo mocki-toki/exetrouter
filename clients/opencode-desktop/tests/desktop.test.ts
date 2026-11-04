@@ -10,7 +10,7 @@ const result = { status: "copied", copied: true, retryCopy: false, login: null, 
 async function fixture(source: string, run: (client: DesktopClient) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), "exr-desktop-test-"))
   const path = join(root, "exr-fixture")
-  await writeFile(path, `#!/usr/bin/env node\n${source}`, { mode: 0o700 })
+  await writeFile(path, `#!${process.execPath}\n${source}`, { mode: 0o700 })
   const client = new DesktopClient(options({ exrBinary: path, exrConfig: join(root, "profile.json") }))
   try { await run(client) } finally { await client.close(); await rm(root, { recursive: true, force: true }) }
 }

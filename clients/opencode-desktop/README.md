@@ -7,6 +7,9 @@ published to npm. See [the integration guide](../../docs/opencode-desktop.md).
 
 ## Build
 
+Nix users can build `.#exetrouter-opencode-plugin` or use the Home Manager
+`programs.opencode.exr` integration. See [Nix integration](../../docs/nix.md#opencode-plugin-integration).
+
 Requires Node.js 22.12+ and npm. From this directory:
 
 ```sh
