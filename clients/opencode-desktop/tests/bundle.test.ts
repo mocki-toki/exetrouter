@@ -23,7 +23,7 @@ const inert: unknown = new Proxy(function () {}, {
 
 async function bundle(main: boolean, runtime?: { solid: unknown; web: unknown; createLatest: unknown; usePlugin(): unknown }) {
   const code = await readFile(new URL("../dist/gui-experimental.cjs", import.meta.url), "utf8")
-  const tokens = Object.fromEntries(["Command", "MenuItem", "Panel", "SettingsPage", "ComposerPill", "Style"].map((id) => [id, { id }]))
+  const tokens = Object.fromEntries(["CodeBlock", "Command", "MenuItem", "Panel", "SettingsPage", "ComposerPill", "Style"].map((id) => [id, { id }]))
   const sdk = {
     ...tokens,
     Plugin: { define: (value: unknown) => value },
@@ -71,7 +71,7 @@ test("the built GUI evaluates in a window with inert Node modules and registers 
     main: () => ({ state: () => undefined }),
   }
   plugin.setup!(ctx as unknown as Parameters<Plugin.Setup>[0])
-  assert.deepEqual([...contributions.keys()].sort(), ["Command", "MenuItem", "Panel", "Style", "ComposerPill"].sort())
+  assert.deepEqual([...contributions.keys()].sort(), ["CodeBlock", "Command", "MenuItem", "Panel", "Style", "ComposerPill"].sort())
   const command = contributions.get("Command")![0] as { run(): void }
   command.run()
   assert.deepEqual(opened, [])

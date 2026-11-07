@@ -1,4 +1,6 @@
-import { ComposerPill, Command, MenuItem, Panel, Style, createKeyed, type Context, type Plugin } from "@opencode/plugin/gui"
+import { CodeBlock, ComposerPill, Command, MenuItem, Panel, Style, createKeyed, type Context, type Plugin } from "@opencode/plugin/gui"
+import { installInlineImages } from "./image-inline.mjs"
+import { collectImages } from "./image-files.mjs"
 import { createMemo, createSignal, getOwner, onCleanup, runWithOwner } from "solid-js"
 import type { DashboardState, SessionAccount } from "./schemas"
 import { Accounts } from "./rpc"
@@ -9,6 +11,7 @@ import { DashboardView } from "./panel"
 import css from "./window.css?inline"
 
 export const setup: Plugin.Setup = (ctx) => {
+  installInlineImages(ctx, { CodeBlock, Style, createKeyed, onCleanup, collectImages })
   const owner = getOwner()
   const state = createMemo((previous: DashboardState | undefined) => ctx.main(Dashboard).state() ?? previous)
   const [accounts, setAccounts] = createSignal(new Map<string, SessionAccount>())

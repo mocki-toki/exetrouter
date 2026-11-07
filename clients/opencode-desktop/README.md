@@ -2,7 +2,7 @@
 
 A local OpenCode V2 plugin with a dynamically discovered **ExetRouter** provider,
 a single native-web dashboard panel. Targets the
-OpenCode **2.2.0** plugin contract; GUI APIs are experimental. This package is not
+OpenCode **2.2.6** plugin contract; GUI APIs are experimental. This package is not
 published to npm. See [the integration guide](../../docs/opencode-desktop.md).
 
 ## Build
@@ -201,3 +201,27 @@ credits. npm installation in the test is offline and needs dependencies already
 cached by `npm ci`. The regular tests use only synthetic data and loopback HTTP.
 The native test does not verify the rendered Electron UI or renew ExetRouter's
 full inference compatibility matrix.
+
+## Inline image results
+
+OpenCode Desktop 2.2.6+ uses this extension's `CodeBlock` renderer for ExetRouter
+MCP image results. A `fleet-image` reference emitted immediately before each call
+binds to the next image tool in the same assistant message. The server hook supplies
+the instructions and a unique response prefix. Existing references stay readable;
+history is never rewritten. A missing reference cannot be inserted by the GUI API.
+
+Previews are 300 × 300 CSS pixels (shrinking on narrow screens). Waiting shows a
+compositor-driven shimmer and 72 particles cycling through ten shapes: circle,
+heart, star, triangle, square, hexagon, spiral, infinity, flower and diamond.
+Each formation takes 2.8 seconds, holds for one second, then disperses smoothly
+before the next shape. Offscreen/hidden animations pause; Reduce Motion is static.
+This is indeterminate decoration, not intermediate generated frames or progress.
+
+Click opens a modal covering the app viewport. Wheel/pinch, +/− buttons and keys
+zoom; drag pans; Fit/0 resets, double-click toggles 2×, Escape closes and restores
+focus. Original-file download remains available on the preview.
+
+Only validated inline PNG/JPEG/WebP from the owning session are shown. No external
+image requests, new RPC, persistent image cache, generation replay or quota use
+is introduced by the viewer. It reconciles on lifecycle/reconnect events without
+polling and releases images, animations and dialogs on unload or navigation.

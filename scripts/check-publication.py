@@ -35,7 +35,7 @@ def allowed_path(name):
         if len(parts) < 3 or parts[1] != "opencode-desktop":
             return False
         if not (len(parts) == 3 and parts[2] in DESKTOP_ROOT_FILES) and not (
-            parts[2] in {"src", "tests"} and Path(name).suffix in {".ts", ".tsx", ".css"}
+            parts[2] in {"src", "tests"} and Path(name).suffix in {".ts", ".tsx", ".css", ".mjs", ".mts"}
         ):
             return False
     elif parts[0] not in ROOT_FILES | SOURCE_DIRS:
