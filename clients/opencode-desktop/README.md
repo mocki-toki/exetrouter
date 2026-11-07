@@ -210,16 +210,20 @@ binds to the next image tool in the same assistant message. The server hook supp
 the instructions and a unique response prefix. Existing references stay readable;
 history is never rewritten. A missing reference cannot be inserted by the GUI API.
 
-Previews are 300 × 300 CSS pixels (shrinking on narrow screens). Waiting shows a
-compositor-driven shimmer and 72 particles cycling through ten shapes: circle,
-heart, star, triangle, square, hexagon, spiral, infinity, flower and diamond.
-Each formation takes 2.8 seconds, holds for one second, then disperses smoothly
-before the next shape. Offscreen/hidden animations pause; Reduce Motion is static.
+Previews preserve the image's aspect ratio within 300 × 300 CSS pixels (shrinking
+on narrow screens), with no caption, download row or extra padding. Waiting shows a
+continuous tiled shimmer (1.8-second compositor-driven loop, without a blank reset)
+and 72 particles cycling through eight shapes: circle, star, triangle, square,
+hexagon, spiral, infinity and diamond.
+Each figure holds for one second, then morphs directly into the next over 1.4
+seconds without a scattered intermediate state. Offscreen/hidden animations pause;
+Reduce Motion is static. A streaming reference stays pending until its image call
+is saved or the execution ends, rather than briefly showing an unavailable error.
 This is indeterminate decoration, not intermediate generated frames or progress.
 
-Click opens a modal covering the app viewport. Wheel/pinch, +/− buttons and keys
-zoom; drag pans; Fit/0 resets, double-click toggles 2×, Escape closes and restores
-focus. Original-file download remains available on the preview.
+Click opens a modal covering the entire app viewport without a toolbar or text.
+Wheel/pinch and +/− keys zoom; drag pans; 0 resets, double-click toggles 2×,
+Escape closes and restores focus.
 
 Only validated inline PNG/JPEG/WebP from the owning session are shown. No external
 image requests, new RPC, persistent image cache, generation replay or quota use

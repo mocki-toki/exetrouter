@@ -115,7 +115,8 @@ test("a streaming marker not yet present in the message read is resolved on the 
     read: async () => page(++reads === 1 ? [] : [message("m1", "running")]),
     readMessage: async () => message(), onChange: state => views.push(state) })
   await card.refresh()
-  assert.equal(views.at(-1).status, "unavailable")
+  assert.equal(views.at(-1).status, "waiting")
+  assert.ok(views.every(state => state.status !== "unavailable"))
   card.event("session.tool.called", { data: { assistantMessageID: "m1", id: "t1" } })
   await tick()
   assert.equal(views.at(-1).status, "running")
@@ -123,6 +124,26 @@ test("a streaming marker not yet present in the message read is resolved on the 
   await tick()
   assert.equal(views.at(-1).status, "complete")
   card.dispose()
+})
+
+test("an unsaved marker stays pending until execution ends, including interruption during its read", async () => {
+  const views = []
+  const card = inline.createCard({ token, collectImages: files.collectImages,
+    read: async () => page([]), onChange: state => views.push(state) })
+  await card.refresh()
+  assert.equal(views.at(-1).status, "waiting")
+  card.event("session.execution.succeeded", { data: {} })
+  await tick()
+  assert.equal(views.at(-1).status, "unavailable")
+  card.dispose()
+  let finish
+  const interrupted = inline.createCard({ token, collectImages: files.collectImages,
+    read: () => new Promise(resolve => { finish = resolve }), onChange: state => views.push(state) })
+  const reading = interrupted.refresh()
+  interrupted.event("session.execution.interrupted", { data: {} })
+  finish(page([])); await reading
+  assert.equal(views.at(-1).status, "interrupted")
+  interrupted.dispose()
 })
 
 test("lifecycle events arriving during a read are coalesced and a later completion is not lost", async () => {
@@ -148,7 +169,7 @@ test("repeated cursors terminate and failed reads disclose no private exception 
     read: async () => { reads++; return page([], "same") }, onChange: state => views.push(state) })
   await card.refresh()
   assert.equal(reads, 2)
-  assert.equal(views.at(-1).status, "unavailable")
+  assert.equal(views.at(-1).status, "waiting")
   card.dispose()
   const failed = inline.createCard({ token, collectImages: files.collectImages,
     read: async () => { reads++; throw Error("PRIVATE") }, onChange: state => views.push(state) })
@@ -214,10 +235,11 @@ function dom() {
 test("inline card preserves running timelines, opens fullscreen and offers non-generating read retry", () => {
   const { nodes, document } = dom(), root = new Element()
   let reads = 0
-  inline.renderCard(root, { status: "running", images: [] }, () => reads++, document)
+  inline.renderCard(root, { status: "loading", images: [] }, () => reads++, document)
   assert.equal(root.attrs["aria-busy"], "true")
   assert.ok(nodes.some(node => node.attrs.role === "status"))
   const waitingBox = root.children[0], count = nodes.length
+  inline.renderCard(root, { status: "waiting", images: [] }, () => reads++, document)
   inline.renderCard(root, { status: "running", images: [] }, () => reads++, document)
   assert.equal(root.children[0], waitingBox)
   assert.equal(nodes.length, count)
@@ -225,17 +247,34 @@ test("inline card preserves running timelines, opens fullscreen and offers non-g
   assert.equal(root.attrs["aria-busy"], "false")
   const img = nodes.find(node => node.tag === "img")
   assert.equal(img.src, png)
-  const download = nodes.find(node => node.tag === "a")
-  assert.equal(download.href, png)
-  assert.ok(download.download.endsWith(".png"))
+  assert.equal(root.children.length, 1)
+  assert.equal(nodes.some(node => node.tag === "a"), false)
+  assert.equal(nodes.some(node => /Image ready|Download original/.test(node.textContent ?? "")), false)
   const zoom = nodes.find(node => node.attrs["aria-haspopup"] === "dialog")
   assert.equal(typeof zoom.onclick, "function")
-  img.onerror(); assert.ok(nodes.some(node => node.textContent?.includes("download original")))
+  img.onerror(); assert.ok(nodes.some(node => node.textContent === "Cannot display image"))
+  assert.equal(zoom.disabled, true)
   inline.renderCard(root, { status: "read-error" }, () => reads++, document)
   nodes.find(node => node.textContent === "Read result again").onclick()
   assert.equal(reads, 1)
   assert.match(inline.css, /prefers-reduced-motion:reduce/)
   assert.doesNotMatch(inline.css, /https?:/)
+})
+
+test("decoded previews fit their natural aspect ratio within 300 pixels and stale loads cannot resize another card", () => {
+  for (const [width, height, expected] of [[1000,1000,300],[600,1000,180],[1000,600,300]]) {
+    const { nodes, document } = dom(), root = new Element()
+    inline.renderCard(root, find([message()]), () => {}, document)
+    const img = nodes.find(node => node.tag === "img"), button = root.children[0]
+    img.naturalWidth = width; img.naturalHeight = height; img.onload()
+    assert.equal(root.style.width, `${expected}px`)
+    assert.equal(button.style.width, `${expected}px`)
+    assert.equal(img.loading, "eager")
+    inline.renderCard(root, { status: "waiting", images: [] }, () => {}, document)
+    assert.equal(root.style.width, "")
+    img.onload()
+    assert.equal(root.style.width, "", "an old image load must not resize the replacement placeholder")
+  }
 })
 
 test("public renderer reads its owning session/server, not the selected chat, and never registers a panel", async t => {

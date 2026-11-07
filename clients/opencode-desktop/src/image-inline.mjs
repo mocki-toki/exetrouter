@@ -94,7 +94,9 @@ function createCard({ token, read, readMessage, collectImages, onChange }) {
           } while (cursor)
         }
         if (disposed) return
-        publish(card ?? { status: "unavailable", images: [] })
+        // The closed fence can render before the streaming message/tool is saved.
+        // A missing snapshot is not a failed image until the execution has ended.
+        publish(card ?? { status: finished ? "unavailable" : "waiting", images: [] })
       } while (again && !disposed)
     } catch {
       // Reads can be retried explicitly. An image-generation call never is.
@@ -136,25 +138,35 @@ function createCard({ token, read, readMessage, collectImages, onChange }) {
 const css = imageCss
 
 function renderCard(root, state, refresh, document) {
+  const pending = status => ["loading", "waiting", "running"].includes(status)
+  const labels = { loading: "Preparing image…", waiting: "Preparing image…", running: "Creating image…",
+    error: "Image generation failed", interrupted: "Generation interrupted",
+    ambiguous: "Ambiguous image reference", unavailable: "Image unavailable", "read-error": "Could not read image" }
+  root.setAttribute("data-fleet-image-card", "")
+  root.setAttribute("data-image-status", state.status)
+  root.setAttribute("aria-busy", String(pending(state.status)))
   // Lifecycle/reconnect reads can repeat the running state. Keep the existing
   // compositor timeline rather than snapping particles and shimmer back to zero.
-  if (state.status === "running" && root._imageStatus === "running" && root.children.length) return
+  if (pending(state.status) && pending(root._imageStatus) && root.children.length) {
+    root._imageStatus = state.status
+    root._imageLabel.textContent = labels[state.status]
+    return
+  }
   root._imageStatus = state.status
   root._imageCleanup?.()
   root._imageCleanup = undefined
   root.replaceChildren()
-  root.setAttribute("data-fleet-image-card", "")
-  root.setAttribute("aria-busy", String(state.status === "running"))
+  root.style.width = ""
+  root._imageLabel = undefined
   if (state.status !== "complete") {
     const box = document.createElement("div")
     box.className = "fleet-image-wait"
     box.setAttribute("role", "status")
     const label = document.createElement("strong")
-    label.textContent = ({ loading: "Reading image…", waiting: "Waiting to generate", running: "Creating image…",
-      error: "Image generation failed", interrupted: "Generation interrupted",
-      ambiguous: "Ambiguous image reference", unavailable: "Image unavailable", "read-error": "Could not read image" })[state.status]
+    label.textContent = labels[state.status]
+    root._imageLabel = label
     const detail = document.createElement("small")
-    detail.textContent = state.status === "running" ? "It will appear here when ready" : "Generation is never retried automatically"
+    detail.textContent = pending(state.status) ? "It will appear here when ready" : "Generation is never retried automatically"
     box.append(label, detail)
     if (state.status === "read-error") {
       const retry = document.createElement("button")
@@ -163,35 +175,44 @@ function renderCard(root, state, refresh, document) {
       box.append(retry)
     }
     root.append(box)
-    if (state.status === "running" && document.createElementNS) root._imageCleanup = animateParticles(box, document)
+    if (pending(state.status) && document.createElementNS) root._imageCleanup = animateParticles(box, document)
     return
   }
+  const widths = []
   for (const [index, image] of state.images.entries()) {
     const zoom = document.createElement("button")
     zoom.className = "fleet-image-zoom"
+    zoom.type = "button"
     zoom.setAttribute("aria-label", `Open image ${index + 1} fullscreen`)
     zoom.setAttribute("aria-haspopup", "dialog")
     const img = document.createElement("img")
     img.src = image.uri
     img.alt = `Generated image ${index + 1}`
-    img.loading = "lazy"
+    // Data is already in memory. Lazy loading plus intrinsic sizing can leave a
+    // zero-size preview permanently undecoded in a hidden/virtualized timeline.
+    img.loading = "eager"
     img.decoding = "async"
+    img.onload = () => {
+      if (!img.naturalWidth || !img.naturalHeight || ![...root.children].includes(zoom)) return
+      const width = Math.min(300, 300 * img.naturalWidth / img.naturalHeight)
+      widths[index] = width
+      zoom.style.width = `${width}px`
+      root.style.width = `${Math.max(...widths.filter(Number.isFinite))}px`
+    }
     zoom.onclick = () => {
       root._imageCleanup?.()
       root._imageCleanup = openImageViewer(image, document)
     }
-    const actions = document.createElement("div")
-    actions.className = "fleet-image-actions"
-    const label = document.createElement("span")
-    label.textContent = "Image ready"
-    img.onerror = () => { label.textContent = "Cannot display image — download original" }
-    const download = document.createElement("a")
-    download.textContent = "Download original"
-    download.href = image.uri
-    download.download = image.name
-    actions.append(label, download)
+    img.onerror = () => {
+      const error = document.createElement("span")
+      error.className = "fleet-image-error"
+      error.setAttribute("role", "alert")
+      error.textContent = "Cannot display image"
+      zoom.disabled = true
+      zoom.replaceChildren(error)
+    }
     zoom.append(img)
-    root.append(zoom, actions)
+    root.append(zoom)
   }
 }
 

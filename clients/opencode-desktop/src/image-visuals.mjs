@@ -1,5 +1,6 @@
 // Pure geometry and compositor-driven motion; no model calls, timers or image cache.
-export const shapeNames = ["circle", "heart", "star", "triangle", "square", "hexagon", "spiral", "infinity", "flower", "diamond"]
+export const shapeNames = ["circle", "star", "triangle", "square", "hexagon", "spiral", "infinity", "diamond"]
+export const particleTiming = { hold: 1000, transition: 1400 }
 const tau = Math.PI * 2
 function polygon(t, sides, radius = 78, alternating = false) {
   const n = alternating ? sides * 2 : sides, edge = t * n, i = Math.floor(edge), f = edge - i
@@ -9,34 +10,28 @@ function polygon(t, sides, radius = 78, alternating = false) {
 }
 export function shapePoint(shape, t) {
   const a = t * tau
-  switch (shape) {
-    case 0: return [Math.cos(a) * 76, Math.sin(a) * 76]
-    case 1: return [4.6 * 16 * Math.sin(a) ** 3, -4.6 * (13 * Math.cos(a) - 5 * Math.cos(2*a) - 2 * Math.cos(3*a) - Math.cos(4*a))]
-    case 2: return polygon(t, 5, 86, true)
-    case 3: return polygon(t, 3)
-    case 4: return polygon((t + .125) % 1, 4, 87)
-    case 5: return polygon(t, 6)
-    case 6: return [Math.cos(a * 2) * (12 + 66*t), Math.sin(a * 2) * (12 + 66*t)]
-    case 7: return [88 * Math.cos(a) / (1 + Math.sin(a)**2), 88 * Math.sin(a) * Math.cos(a) / (1 + Math.sin(a)**2)]
-    case 8: { const r = 55 + 24 * Math.cos(5*a); return [r * Math.cos(a), r * Math.sin(a)] }
+  switch (shapeNames[shape]) {
+    case "circle": return [Math.cos(a) * 76, Math.sin(a) * 76]
+    case "star": return polygon(t, 5, 86, true)
+    case "triangle": return polygon(t, 3)
+    case "square": return polygon((t + .125) % 1, 4, 87)
+    case "hexagon": return polygon(t, 6)
+    case "spiral": return [Math.cos(a * 2) * (12 + 66*t), Math.sin(a * 2) * (12 + 66*t)]
+    case "infinity": return [88 * Math.cos(a) / (1 + Math.sin(a)**2), 88 * Math.sin(a) * Math.cos(a) / (1 + Math.sin(a)**2)]
     default: return polygon(t, 4)
   }
 }
 export function particleFrames(index, count = 72) {
-  const scatter = cycle => {
-    const angle = (index * 2.399963 + cycle * 1.71), r = 88 + 42 * ((index * 17 + cycle * 29) % 71) / 70
-    return `translate(${Math.cos(angle)*r}px, ${Math.sin(angle)*r}px)`
-  }
   const frames = []
-  for (let cycle = 0; cycle < 10; cycle++) {
-    const [x,y] = shapePoint((cycle * 7) % 10, index/count)
+  const hold = particleTiming.hold / (particleTiming.hold + particleTiming.transition)
+  for (let cycle = 0; cycle < shapeNames.length; cycle++) {
+    const [x,y] = shapePoint((cycle * 7) % shapeNames.length, index/count)
     const figure = `translate(${x}px, ${y}px)`
-    frames.push({ offset: cycle/10, transform: scatter(cycle), opacity: .2, easing: "cubic-bezier(.45,0,.15,1)" },
-      { offset: (cycle + .4)/10, transform: figure, opacity: .9, easing: "linear" },
-      { offset: (cycle + .4 + 1/7)/10, transform: figure, opacity: .9, easing: "cubic-bezier(.45,0,.25,1)" },
-      { offset: (cycle + .943)/10, transform: scatter((cycle+1)%10), opacity: .2, easing: "linear" })
+    // Hold each shape, then morph directly to the next, without a scatter phase.
+    frames.push({ offset: cycle/shapeNames.length, transform: figure, opacity: .9, easing: "linear" },
+      { offset: (cycle + hold)/shapeNames.length, transform: figure, opacity: .9, easing: "cubic-bezier(.45,0,.15,1)" })
   }
-  frames.push({ offset: 1, transform: scatter(0), opacity: .2 })
+  frames.push({ ...frames[0], offset: 1 })
   return frames
 }
 export function animateParticles(box, document) {
@@ -51,8 +46,10 @@ export function animateParticles(box, document) {
     const dot = document.createElement("i")
     layer.append(dot)
     const frames = particleFrames(i)
-    dot.style.transform = frames[1].transform
-    if (dot.animate) animations.push(dot.animate(frames, { duration: 70000, iterations: Infinity }))
+    dot.style.transform = frames[0].transform
+    if (dot.animate) animations.push(dot.animate(frames, {
+      duration: shapeNames.length * (particleTiming.hold + particleTiming.transition), iterations: Infinity,
+    }))
   }
   const start = document.timeline?.currentTime
   if (typeof start === "number") animations.forEach(animation => { animation.startTime = start })
@@ -60,7 +57,7 @@ export function animateParticles(box, document) {
   const update = () => {
     box.classList.toggle("exr-image-still", !!motion?.matches || document.hidden || !visible)
     for (const animation of animations) {
-      if (motion?.matches) { animation.pause(); animation.currentTime = 2800 }
+      if (motion?.matches) { animation.pause(); animation.currentTime = 0 }
       else if (document.hidden || !visible) animation.pause()
       else animation.play()
     }
@@ -78,12 +75,11 @@ export function openImageViewer(image, document) {
   const dialog = document.createElement("dialog")
   dialog.className = "exr-image-viewer"
   dialog.setAttribute("aria-label", "Generated image viewer")
-  const toolbar = document.createElement("div"), stage = document.createElement("div"), img = document.createElement("img")
-  toolbar.className = "exr-image-viewer-toolbar"
+  dialog.tabIndex = -1
+  const stage = document.createElement("div"), img = document.createElement("img")
   stage.className = "exr-image-stage"
   img.src = image.uri; img.alt = "Generated image"; img.draggable = false
   stage.append(img)
-  const label = document.createElement("output")
   let scale = 1, x = 0, y = 0, closed = false
   const points = new Map()
   const paint = () => {
@@ -91,7 +87,6 @@ export function openImageViewer(image, document) {
     x = Math.max(-rect.width*Math.max(0,scale-1)/2, Math.min(rect.width*Math.max(0,scale-1)/2, x))
     y = Math.max(-rect.height*Math.max(0,scale-1)/2, Math.min(rect.height*Math.max(0,scale-1)/2, y))
     img.style.transform = `translate(${x}px,${y}px) scale(${scale})`
-    label.textContent = `${Math.round(scale*100)}%`
   }
   const zoom = (factor, ax = 0, ay = 0) => {
     const next = Math.max(.25, Math.min(12, scale*factor)), ratio = next/scale
@@ -101,11 +96,6 @@ export function openImageViewer(image, document) {
     if (closed) return
     closed = true; points.clear(); document.defaultView?.removeEventListener("resize", paint); dialog.remove(); previous?.focus?.()
   }
-  const button = (title, action) => { const b = document.createElement("button"); b.type = "button"; b.textContent = title; b.setAttribute("aria-label", title); b.onclick = action; toolbar.append(b) }
-  button("Zoom out", () => zoom(1/1.25)); toolbar.append(label)
-  button("Zoom in", () => zoom(1.25))
-  button("Fit", () => { scale=1; x=y=0; paint() })
-  button("Close", close)
   stage.addEventListener("wheel", event => {
     event.preventDefault()
     const rect = stage.getBoundingClientRect()
@@ -125,7 +115,7 @@ export function openImageViewer(image, document) {
   }
   const release = event => points.delete(event.pointerId)
   stage.onpointerup = release; stage.onpointercancel = release; stage.onlostpointercapture = release
-  stage.ondblclick = () => { if (scale > 1) { scale=1;x=y=0;paint() } else zoom(2) }
+  stage.ondblclick = () => { if (scale > 1) { scale=1;x=y=0;paint() } else zoom(2/scale) }
   dialog.oncancel = event => { event.preventDefault(); close() }
   dialog.onclose = close
   dialog.onkeydown = event => {
@@ -133,33 +123,31 @@ export function openImageViewer(image, document) {
     if (event.key === "-") { event.preventDefault(); zoom(1/1.25) }
     if (event.key === "0") { event.preventDefault(); scale=1;x=y=0;paint() }
   }
-  dialog.append(toolbar, stage); document.body.append(dialog)
+  dialog.append(stage); document.body.append(dialog)
   document.defaultView?.addEventListener("resize", paint)
-  dialog.showModal(); paint()
+  dialog.showModal(); dialog.focus(); paint()
   return close
 }
 
 export const imageCss = `
-[data-fleet-image-card]{width:300px;max-width:100%;color:var(--v2-text-text-base);border:1px solid var(--v2-border-border-muted);border-radius:12px;overflow:hidden;background:var(--v2-background-bg-layer-01)}
-[data-fleet-image-card] .fleet-image-wait{position:relative;isolation:isolate;box-sizing:border-box;width:100%;height:300px;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;padding:18px 12px;gap:5px;text-align:center;background:var(--v2-background-bg-layer-02)}
+[data-fleet-image-card]{box-sizing:border-box;width:300px;max-width:100%;margin:0;padding:0;line-height:0;color:var(--v2-text-text-base);border:0;border-radius:12px;overflow:hidden;background:var(--v2-background-bg-layer-01)}
+[data-fleet-image-card][data-image-status=complete]{background:transparent}
+[data-fleet-image-card] .fleet-image-wait{position:relative;isolation:isolate;box-sizing:border-box;width:100%;aspect-ratio:1;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;padding:18px 12px;gap:5px;text-align:center;line-height:1.4;background:var(--v2-background-bg-layer-02)}
 [data-fleet-image-card] .fleet-image-wait strong{font-size:13px;font-weight:500;z-index:1;max-width:100%;overflow-wrap:anywhere}
 [data-fleet-image-card] small{font-size:10px;color:var(--v2-text-text-muted);z-index:1;max-width:100%}
-[data-fleet-image-card][aria-busy=true] .fleet-image-wait::before{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 10%,var(--v2-background-bg-layer-03) 50%,transparent 90%);will-change:transform,opacity;animation:exr-image-shimmer 5s linear infinite;pointer-events:none;z-index:-1}
-@keyframes exr-image-shimmer{0%{transform:translate3d(-110%,0,0);opacity:0}15%,85%{opacity:.65}100%{transform:translate3d(110%,0,0);opacity:0}}
+[data-fleet-image-card][aria-busy=true] .fleet-image-wait::before{content:"";position:absolute;inset:0 -100%;background-image:linear-gradient(90deg,transparent,color-mix(in srgb,var(--v2-text-text-base,#888) 12%,transparent),transparent);background-size:calc(100% / 3) 100%;background-repeat:repeat-x;will-change:transform;animation:exr-image-shimmer 1.8s linear infinite;pointer-events:none;z-index:-1}
+@keyframes exr-image-shimmer{from{transform:translate3d(0,0,0)}to{transform:translate3d(calc(100% / 3),0,0)}}
 .exr-image-particles{position:absolute;top:40%;left:50%;width:0;height:0;pointer-events:none}
 .exr-image-particles i{position:absolute;width:3px;height:3px;border-radius:50%;background:var(--v2-text-text-base);opacity:.7;will-change:transform,opacity}
 .exr-image-still::before{animation-play-state:paused!important;opacity:0!important}
-[data-fleet-image-card] .fleet-image-zoom{display:block;width:100%;height:300px;border:0;padding:0;background:transparent;cursor:zoom-in}
-[data-fleet-image-card] img{display:block;width:100%;height:100%;object-fit:contain}
-[data-fleet-image-card] .fleet-image-actions{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;padding:10px;font-size:11px}
-[data-fleet-image-card] a{color:inherit;text-decoration:underline}
+[data-fleet-image-card] .fleet-image-zoom{appearance:none;display:block;box-sizing:border-box;width:300px;max-width:100%;height:auto;min-height:0;border:0;padding:0!important;margin:0!important;line-height:0;background:transparent;cursor:zoom-in}
+[data-fleet-image-card] .fleet-image-zoom:focus-visible{outline:2px solid currentColor;outline-offset:-2px}
+[data-fleet-image-card] .fleet-image-zoom>img{display:block;width:100%!important;height:auto!important;max-width:100%!important;max-height:300px!important;min-width:0;min-height:0;margin:0!important;padding:0!important;border:0!important;border-radius:0;object-fit:contain}
+[data-fleet-image-card] .fleet-image-error{display:block;padding:18px;font:13px/1.4 system-ui}
 .exr-image-viewer{position:fixed;inset:0;box-sizing:border-box;width:100vw;height:100dvh;max-width:none;max-height:none;margin:0;border:0;padding:0;background:#111113;color:#eee;overflow:hidden}
 .exr-image-viewer::backdrop{background:#111}
-.exr-image-viewer-toolbar{position:absolute;top:0;left:0;right:0;height:56px;display:flex;align-items:center;justify-content:center;gap:12px;z-index:2;background:#111113ed}
-.exr-image-viewer button{font:inherit;color:inherit;background:#27272b;border:1px solid #444;padding:7px 12px;border-radius:6px;cursor:pointer}
-.exr-image-viewer output{min-width:48px;text-align:center;font:12px system-ui}
-.exr-image-stage{position:absolute;inset:56px 0 0;overflow:hidden;touch-action:none;cursor:grab}
+.exr-image-stage{position:absolute;inset:0;overflow:hidden;touch-action:none;cursor:grab}
 .exr-image-stage:active{cursor:grabbing}
-.exr-image-stage img{display:block;width:100%;height:100%;object-fit:contain;transform-origin:center;user-select:none;will-change:transform}
+.exr-image-stage img{display:block;width:100%;height:100%;max-width:none;max-height:none;margin:0!important;padding:0;border:0;object-fit:contain;transform-origin:center;user-select:none;will-change:transform}
 @media(prefers-reduced-motion:reduce){[data-fleet-image-card] .fleet-image-wait::before{animation:none!important;opacity:0!important}}
 `
