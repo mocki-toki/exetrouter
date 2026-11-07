@@ -1,9 +1,13 @@
 # Hourly subscription history
 
 Account details in the native TUI and OpenCode Desktop show short and weekly
-subscription windows together, with separate colors, a shared 0–100% used-quota
+subscription windows together, with separate colors, a shared 0–100% quota-left
 axis and a seven-day hourly timeline. The web chart supports pointer/keyboard
 selection; TUI details use Left/Right and Home/End, with Up/Down for scrolling.
+Lines and cursor values show only the remaining percentage: a full window is
+100%, an exhausted window is 0%, and quota recovery moves the line upward.
+Storage keeps upstream used percentages; display converts them without changing
+the collected history, retention or routing behavior.
 Usage charts use the same quiet containers, fine lines, distinct identity-based
 colors and interval values (Shift+Left/Right and Home/End in the TUI, without
 changing Left/Right tab navigation).

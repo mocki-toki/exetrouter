@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { doctor, usage } from "./fixtures"
 import { quotaHistory, snapshot, usage as normalizeUsage } from "../src/native"
-import { quotaTimeline } from "../src/quota-history"
+import { quotaLeft, quotaTimeline, quotaY } from "../src/quota-history"
 import { activity } from "../src/chart"
 
 test("hourly quota history keeps both independent windows, actual samples and gaps", () => {
@@ -32,6 +32,15 @@ test("native history projection is bounded and strips unknown payloads", () => {
     {...raw,points:[{...raw.points[0],observed_at:raw.points[0].hour-1}]},
     {...raw,points:Array(337).fill(raw.points[0])},
   ]) assert.throws(()=>quotaHistory(bad))
+})
+test("quota charts plot left, not used, including full and exhausted boundaries", () => {
+  for (const [used,left,y] of [[0,100,20],[36,64,86.24],[77,23,161.68],[100,0,204],[125,0,204]]) {
+    assert.equal(quotaLeft(used),left)
+    assert.ok(Math.abs(quotaY(quotaLeft(used))-y)<1e-9)
+  }
+  const data=quotaTimeline(snapshot(doctor()).accounts[0])
+  assert.equal(data.series[0].segments[0].split(" ").at(-1),"644,204")
+  assert.equal(data.series[1].segments[0].split(" ").at(-1),"644,112")
 })
 test("usage series colors remain distinct and follow identity through selection and sorting", () => {
   const report=normalizeUsage(usage(),"model")

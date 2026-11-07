@@ -20,10 +20,11 @@ function series(history: QuotaHistory, hours: number[], kind: string, minutes: n
     const point = points.get(hour)
     if (!point) { flush(); continue }
     if (i > 0 && points.get(hours[i - 1])?.minutes !== point.minutes) flush()
-    line.push({ x: quotaX(i, hours.length), y: quotaY(point.used) })
+    line.push({ x: quotaX(i, hours.length), y: quotaY(quotaLeft(point.used)) })
   }
   flush()
   return { kind, label: duration(minutes ?? null), color, points, segments, isolated }
 }
 export function quotaX(index: number, length: number) { return 44 + index / Math.max(1, length - 1) * 600 }
-export function quotaY(used: number) { return 204 - Math.min(100, Math.max(0, used)) / 100 * 184 }
+export function quotaLeft(used: number) { return Math.min(100, Math.max(0, 100 - used)) }
+export function quotaY(left: number) { return 204 - Math.min(100, Math.max(0, left)) / 100 * 184 }

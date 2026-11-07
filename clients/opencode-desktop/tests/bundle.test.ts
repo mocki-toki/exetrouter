@@ -233,7 +233,11 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.ok(history)
     assert.equal(history.querySelectorAll("[data-window]").length,2,"both windows share the same chart")
     history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"End",bubbles:true}))
-    assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/8-hour.*100% used.*Weekly.*50% used/)
+    assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/8-hour.*0% left.*Weekly.*50% left/)
+    assert.doesNotMatch(accountDialog.querySelector('.exr-history')!.textContent,/Used quota|\bused\b/)
+    assert.match(accountDialog.querySelector('.exr-history')!.textContent,/Quota left/)
+    assert.equal(history.querySelector('[data-window="primary"] polyline')!.getAttribute('points')!.split(' ').at(-1),'644,204')
+    assert.equal(history.querySelector('[data-window="secondary"] polyline')!.getAttribute('points')!.split(' ').at(-1),'644,112')
     history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"Home",bubbles:true}))
     assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/Not observed/)
     const accountPane = root.querySelector('[role="tabpanel"]')!

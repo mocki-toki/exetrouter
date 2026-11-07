@@ -140,7 +140,7 @@ pub(super) fn draw(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Used quota ");
+        .title(" Quota left ");
     if let Some(h) = history(account).filter(|h| !h.points.is_empty()) {
         let mut kinds: Vec<_> = h.points.iter().map(|p| p.kind.as_str()).collect();
         kinds.sort_unstable();
@@ -191,7 +191,7 @@ pub(super) fn draw(
                 }
                 points.push((
                     (p.hour - h.from_utc) as f64 / 3600.0,
-                    p.used_percent.clamp(0.0, 100.0),
+                    quota_left(p.used_percent),
                 ));
                 previous = Some((p.hour, p.window_minutes));
             }
@@ -252,9 +252,8 @@ pub(super) fn draw(
                 .find(|p| p.kind == *kind && p.hour == selected)
                 .map(|p| {
                     format!(
-                        "{} used / {} left",
-                        render::percent(&p.used_percent.into()),
-                        render::percent(&(100.0 - p.used_percent).max(0.0).into())
+                        "{} left",
+                        render::percent(&quota_left(p.used_percent).into())
                     )
                 })
                 .unwrap_or_else(|| "Not observed".into());
@@ -304,6 +303,9 @@ pub(super) fn draw(
         );
     }
 }
+fn quota_left(used: f64) -> f64 {
+    (100.0 - used).clamp(0.0, 100.0)
+}
 fn chart_date(at: Option<i64>) -> String {
     at.and_then(|at| chrono::DateTime::from_timestamp(at, 0))
         .map(|d| {
@@ -338,8 +340,10 @@ mod tests {
             assert!(text.contains("Limit history"));
             assert!(text.contains("8-hour") && text.contains("Weekly"));
             if height >= 25 {
-                assert!(text.contains("36% used / 64% left"));
-                assert!(text.contains("77% used / 23% left"));
+                assert!(text.contains("Quota left"));
+                assert!(text.contains("8-hour 64% left"));
+                assert!(text.contains("Weekly 23% left"));
+                assert!(!text.contains("Used quota") && !text.contains(" used"));
             }
             terminal
                 .draw(|f| draw(f, f.area(), &account, base, 20, Some(base - 3600)))
@@ -352,6 +356,18 @@ mod tests {
                 .map(|c| c.symbol())
                 .collect::<String>();
             assert!(text.contains("Not observed"));
+        }
+    }
+    #[test]
+    fn chart_uses_remaining_percent_with_full_and_exhausted_boundaries() {
+        for (used, left) in [
+            (0.0, 100.0),
+            (36.0, 64.0),
+            (77.0, 23.0),
+            (100.0, 0.0),
+            (125.0, 0.0),
+        ] {
+            assert_eq!(quota_left(used), left);
         }
     }
 }
