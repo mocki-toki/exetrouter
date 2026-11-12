@@ -270,11 +270,7 @@ impl Upstream {
         let account = self.account(id).await?;
         let id = account.info.id;
         let now = Utc::now().timestamp();
-        if account
-            .info
-            .catalog_updated_at
-            .is_some_and(|at| at <= now && now.saturating_sub(at) < 60)
-        {
+        if crate::catalog::fresh(account.info.catalog_updated_at, now) {
             return self.db.call(move |conn| {
                 let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts WHERE id=?1 AND generation=?2 AND state='active')",params![id,account.info.generation],|row|row.get(0))?;
                 if !valid { return Err("OAuth account changed during catalog read".into()); }
@@ -403,8 +399,8 @@ impl Upstream {
         let cached_excluded = excluded.to_vec();
         let cached=self.db.call(move |conn| {
             let now=Utc::now().timestamp();
-            let mut stmt=conn.prepare("SELECT a.id FROM oauth_accounts a JOIN oauth_models m ON m.account_id=a.id WHERE a.state='active' AND m.model=?1 AND a.expires_at>?2+60 AND a.catalog_updated_at<=?2 AND a.catalog_updated_at>?2-60 AND (a.cooldown_until IS NULL OR a.cooldown_until<=?2) AND NOT EXISTS(SELECT 1 FROM oauth_health h WHERE h.account_id=a.id AND h.generation=a.generation AND h.retry_at>?2)")?;
-            for id in stmt.query_map(params![cached_model,now],|row|row.get::<_,i64>(0))? {
+            let mut stmt=conn.prepare("SELECT a.id FROM oauth_accounts a JOIN oauth_models m ON m.account_id=a.id WHERE a.state='active' AND m.model=?1 AND a.expires_at>?2+60 AND a.catalog_updated_at<=?2 AND a.catalog_updated_at>?2-?3 AND (a.cooldown_until IS NULL OR a.cooldown_until<=?2) AND NOT EXISTS(SELECT 1 FROM oauth_health h WHERE h.account_id=a.id AND h.generation=a.generation AND h.retry_at>?2)")?;
+            for id in stmt.query_map(params![cached_model,now,crate::catalog::CACHE_TTL_SECONDS],|row|row.get::<_,i64>(0))? {
                 let id=id?;
                 if !cached_excluded.contains(&id) && crate::account_preferences::effective(conn,id)?.enabled {
                     return Ok(true);
@@ -421,7 +417,7 @@ impl Upstream {
                 let requested = model.to_owned();
                 let incomplete = self.db.call(move |conn| {
                 let now=Utc::now().timestamp();
-                Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts a WHERE state='active' AND (catalog_updated_at IS NULL OR catalog_updated_at>?1 OR catalog_updated_at<=?1-60 OR EXISTS(SELECT 1 FROM oauth_models m WHERE m.account_id=a.id AND m.model=?2)))",params![now,requested],|row|row.get::<_,bool>(0))?)
+                Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts a WHERE state='active' AND (catalog_updated_at IS NULL OR catalog_updated_at>?1 OR catalog_updated_at<=?1-?3 OR EXISTS(SELECT 1 FROM oauth_models m WHERE m.account_id=a.id AND m.model=?2)))",params![now,requested,crate::catalog::CACHE_TTL_SECONDS],|row|row.get::<_,bool>(0))?)
             }).await.map_err(|_|SelectError::UpstreamUnavailable)?;
                 if incomplete {
                     return Err(self.failure_wait(model).await);
@@ -433,8 +429,8 @@ impl Upstream {
         let model = selected_model.clone();
         let (mut candidates, earliest, exhausted, thresholds) = self.db.call(move |conn| {
             let now = Utc::now().timestamp();
-            let mut stmt=conn.prepare("SELECT a.id,a.cooldown_until,(SELECT MAX(h.retry_at) FROM oauth_health h WHERE h.account_id=a.id AND h.generation=a.generation),a.expires_at FROM oauth_accounts a JOIN oauth_models m ON m.account_id=a.id WHERE a.state='active' AND m.model=?1 AND a.catalog_updated_at<=?2 AND a.catalog_updated_at>?2-60 ORDER BY a.id")?;
-            let rows=stmt.query_map(params![model,now],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,Option<i64>>(1)?,row.get::<_,Option<i64>>(2)?,row.get::<_,i64>(3)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
+            let mut stmt=conn.prepare("SELECT a.id,a.cooldown_until,(SELECT MAX(h.retry_at) FROM oauth_health h WHERE h.account_id=a.id AND h.generation=a.generation),a.expires_at FROM oauth_accounts a JOIN oauth_models m ON m.account_id=a.id WHERE a.state='active' AND m.model=?1 AND a.catalog_updated_at<=?2 AND a.catalog_updated_at>?2-?3 ORDER BY a.id")?;
+            let rows=stmt.query_map(params![model,now,crate::catalog::CACHE_TTL_SECONDS],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,Option<i64>>(1)?,row.get::<_,Option<i64>>(2)?,row.get::<_,i64>(3)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
             let mut candidates=Vec::new();
             let mut exhausted=Vec::new();
             let mut thresholds=Vec::new();

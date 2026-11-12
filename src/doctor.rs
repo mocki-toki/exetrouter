@@ -199,8 +199,7 @@ pub(crate) fn snapshot(
             );
         }
         let access = expires > now.saturating_add(60);
-        let catalog =
-            updated.is_some_and(|at| at <= now && now.saturating_sub(at) < 60) && models > 0;
+        let catalog = crate::catalog::fresh(updated, now) && models > 0;
         if access {
             valid_access += 1;
         }
@@ -413,7 +412,9 @@ mod tests {
         assert!(!serde_json::to_string(&current)
             .unwrap()
             .contains("private-account"));
-        assert_eq!(report(&conn, 1060).catalog.status, "stale");
+        assert_eq!(report(&conn, 1060).catalog.status, "current");
+        assert_eq!(report(&conn, 1899).catalog.status, "current");
+        assert_eq!(report(&conn, 1900).catalog.status, "stale");
         assert_eq!(report(&conn, 999).catalog.status, "stale");
         assert_eq!(report(&conn, 1940).oauth.status, "refresh_due");
         conn.execute("UPDATE oauth_accounts SET state='reauth_required'", [])

@@ -78,7 +78,7 @@ pub(crate) fn annotate(conn: &Connection, value: &mut serde_json::Value, now: i6
                 "backoff"
             } else if expires <= now + 60 {
                 "refresh_due"
-            } else if !catalog.is_some_and(|at| at <= now && now - at < 60)
+            } else if !crate::catalog::fresh(catalog, now)
                 || models.is_empty()
                 || models.len() > 256
             {

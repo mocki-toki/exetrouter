@@ -128,7 +128,7 @@ fn annotate_at(
                 let routing = crate::routing::decision(conn, id, now)?;
                 let reached = routing.reached(&quota);
                 let available = preference.enabled && !reached && quota.cooldown_until.is_none()
-                    && conn.query_row("SELECT a.state='active' AND a.expires_at>?2+60 AND a.catalog_updated_at IS NOT NULL AND a.catalog_updated_at<=?2 AND a.catalog_updated_at>?2-60 AND EXISTS(SELECT 1 FROM oauth_models m WHERE m.account_id=a.id) AND NOT EXISTS(SELECT 1 FROM oauth_health h WHERE h.account_id=a.id AND h.generation=a.generation AND h.retry_at>?2) FROM oauth_accounts a WHERE a.id=?1",params![id,now],|r|r.get::<_,bool>(0))?;
+                    && conn.query_row("SELECT a.state='active' AND a.expires_at>?2+60 AND a.catalog_updated_at IS NOT NULL AND a.catalog_updated_at<=?2 AND a.catalog_updated_at>?2-?3 AND EXISTS(SELECT 1 FROM oauth_models m WHERE m.account_id=a.id) AND NOT EXISTS(SELECT 1 FROM oauth_health h WHERE h.account_id=a.id AND h.generation=a.generation AND h.retry_at>?2) FROM oauth_accounts a WHERE a.id=?1",params![id,now,crate::catalog::CACHE_TTL_SECONDS],|r|r.get::<_,bool>(0))?;
                 if available {
                     candidates.push(crate::pool::Candidate {
                         id,
@@ -246,7 +246,10 @@ mod tests {
             "state='reauth_required'".into(),
             format!("expires_at={now}"),
             "catalog_updated_at=NULL".into(),
-            format!("catalog_updated_at={}", now - 60),
+            format!(
+                "catalog_updated_at={}",
+                now - crate::catalog::CACHE_TTL_SECONDS
+            ),
         ] {
             conn.execute(
                 &format!("UPDATE oauth_accounts SET {restriction} WHERE id=2"),

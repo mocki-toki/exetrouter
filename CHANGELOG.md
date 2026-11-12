@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Cache account model catalogs for 15 minutes instead of one minute, with matching routing, recommendation and diagnostic freshness checks. Quota freshness and credential expiry safeguards are unchanged.
+
 ## 0.9.1
 
 - Remove the OpenCode Desktop plugin's system-instruction injection, including its per-request random image-reference prefix. Leave model context unchanged and retain rendering of saved image references; new custom image cards are no longer requested through prompt instructions.

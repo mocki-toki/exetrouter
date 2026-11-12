@@ -3,6 +3,12 @@ use crate::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+pub(crate) const CACHE_TTL_SECONDS: i64 = 15 * 60;
+
+pub(crate) fn fresh(updated_at: Option<i64>, now: i64) -> bool {
+    updated_at.is_some_and(|at| at <= now && now.saturating_sub(at) < CACHE_TTL_SECONDS)
+}
+
 // Model-owned fields from the pinned Codex ModelInfo schema. Never expose
 // account/credential fields or arbitrary additions to an upstream response.
 const FIELDS: &[&str] = &[
@@ -355,6 +361,14 @@ fn opencode_projection(models: &[Model], v1: bool) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn catalog_cache_lasts_fifteen_minutes_and_rejects_unknown_or_future_times() {
+        assert!(super::fresh(Some(1000), 1060));
+        assert!(super::fresh(Some(1000), 1899));
+        assert!(!super::fresh(Some(1000), 1900));
+        assert!(!super::fresh(Some(1000), 999));
+        assert!(!super::fresh(None, 1000));
+    }
     use super::*;
     #[test]
     fn opencode_versions_export_their_native_shapes_with_reported_defaults() {
