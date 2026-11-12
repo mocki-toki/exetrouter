@@ -1,8 +1,9 @@
 # Changelog
 
-## 0.9.0
+## 0.9.1
 
 - Remove the OpenCode Desktop plugin's system-instruction injection, including its per-request random image-reference prefix. Leave model context unchanged and retain rendering of saved image references; new custom image cards are no longer requested through prompt instructions.
+- Refresh the Nix plugin dependency hash for 0.4.0 and make the small-value USD chart test tolerant of floating-point rounding across supported Node versions.
 - Add a compact OpenCode Desktop Capacity outlook with model-scoped, calibrated request/runway estimates, useful quota recoveries, expiring-credit warnings and a read-only Details view. Keep credits conditional and stale/unknown capacity unknown; do not alter routing, reset spending or persist forecast state.
 - Gate Fast (`service_tier: priority`) at the server: disabled by default, globally configurable with per-token on/off/inherit overrides across HTTP, Chat, compaction and native WebSockets. Schema 15 stores only nullable token preferences; rotation preserves them.
 - Allow token owners to temporarily disable and re-enable an API token without changing its secret. Revocation stays irreversible; token disable/enable takes effect on subsequent authenticated requests.

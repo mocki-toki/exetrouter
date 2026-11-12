@@ -57,8 +57,8 @@ For a checkout with no local changes, update to the reviewed release and rebuild
 
 ```sh
 cd /absolute/path/to/exetrouter
-git fetch origin tag v0.9.0
-git switch --detach v0.9.0
+git fetch origin tag v0.9.1
+git switch --detach v0.9.1
 cd clients/opencode-desktop
 npm ci --ignore-scripts --no-audit --no-fund
 npm run typecheck
@@ -71,7 +71,7 @@ Use the installation method's update command for Homebrew or Nix clients instead
 of `exr update`. If the checkout has local changes, preserve it and use a separate
 clone at the release tag, then change only this plugin's `package` path in global
 OpenCode configuration. Keep existing connection options and credentials. The
-native `exr` client and router server should both be 0.9.0 for all 0.4.0 features.
+native `exr` client and router server should both be 0.9.1 for all 0.4.0 features.
 Restart the OpenCode background service after rebuilding; reopening a window
 alone does not reload the server plugin. Reopen the panel afterward.
 
@@ -99,11 +99,11 @@ intervals. The router collects
 numeric history through existing metadata observations, including while this
 panel is closed. This requires router/native exr 0.8.4 or later; collection starts
 after upgrade and missing hours remain gaps. Paging requires updated router/native
-binaries (0.9.0 or later) with `usage_range` and `quota_history` management reads; 0.8.4 supplies
+binaries (0.9.1 or later) with `usage_range` and `quota_history` management reads; 0.8.4 supplies
 only the latest seven-day limit snapshot. Retention is bounded to 365 days, and
 previously discarded observations cannot be backfilled. See the reviewed
 [schema-14 migration/rollback](../../docs/quota-history.md).
-Upgrading a 0.8.4 router to 0.9.0 also requires the reviewed
+Upgrading a 0.8.4 router to 0.9.1 also requires the reviewed
 [schema 14 to 15 migration](../../docs/fast-mode-migration.md); Fast defaults off.
 There is no separate ExetRouter page in OpenCode Settings.
 

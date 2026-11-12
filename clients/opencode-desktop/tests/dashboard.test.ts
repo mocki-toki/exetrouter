@@ -52,7 +52,7 @@ test("USD chart preserves model prices, partial totals and small dollar scales",
   assert.equal(data.usd, 10.00004)
   assert.equal(data.unpriced, 1)
   assert.deepEqual(activityValue(data.buckets[0], "gpt-6-astra", "usd"), { value: 10, incomplete: true })
-  assert.equal(activity(report, "gpt-6.1-sol", "usd", 1800003600).maximum, 0.00005)
+  assert.ok(Math.abs(activity(report, "gpt-6.1-sol", "usd", 1800003600).maximum - 0.00005) < 1e-12)
   assert.equal(dollars(0.00004), "$0.00004")
   assert.equal(dollars(undefined), "—")
   const unknown = usage({ ...raw, rows: [{ ...first, estimated_usd: null }], timeline: [{ from_utc: 1800000000, to_utc: 1800003600, rows: [{ ...first, estimated_usd: null }] }] }, "model")
