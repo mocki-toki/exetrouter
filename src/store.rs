@@ -19,6 +19,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/013_native_tools.sql"),
     include_str!("migrations/014_quota_history.sql"),
     include_str!("migrations/015_fast_mode.sql"),
+    include_str!("migrations/016_ten_minute_quota_history.sql"),
 ];
 pub const SCHEMA_VERSION: usize = MIGRATIONS.len();
 const QUEUE_CAPACITY: usize = 32;

@@ -96,6 +96,8 @@ test("rolling usage and limit history forward exclusive ends only as validated p
   await assert.rejects(client.quotaHistory({account:1,period:"7d",before:raw.to_utc-1},signal))
   await assert.rejects(client.quotaHistory({account:0,period:"7d"},signal))
   assert.equal(calls.length,2,"invalid selections never launch subprocesses")
+  await client.quotaHistory({account:1,period:"24h",before:raw.to_utc-600},signal)
+  assert.equal(calls.at(-1)?.at(-2),String(raw.to_utc-600),"ten-minute page ends are valid")
 })
 
 test("refuses excessive concurrent reads instead of building a queue", async () => {

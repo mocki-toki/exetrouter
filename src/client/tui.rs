@@ -2355,10 +2355,10 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     KeyCode::Up | KeyCode::PageUp => *scroll=scroll.saturating_sub(if key.code==KeyCode::PageUp {10} else {1}),
                     KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => {
                         let id=*id;
-                        if let Some((from,to))=account_row(&state,id).and_then(super::account_details::range) {
-                            let last=to-3600;
+                        if let Some((from,to,interval))=account_row(&state,id).and_then(super::account_details::range) {
+                            let last=to-interval;
                             let current=state.account_hour.unwrap_or(last);
-                            state.account_hour=Some(match key.code {KeyCode::Home=>from,KeyCode::End=>last,KeyCode::Left=>(current-3600).clamp(from,last),_=>(current+3600).clamp(from,last)});
+                            state.account_hour=Some(match key.code {KeyCode::Home=>from,KeyCode::End=>last,KeyCode::Left=>(current-interval).clamp(from,last),_=>(current+interval).clamp(from,last)});
                         }
                     }
                     KeyCode::Char('r') if pending.is_none() => pending=Some(start(&args.connection,ControlRequest::Limits,OVERVIEW,false)),

@@ -46,6 +46,25 @@ test("native history projection is bounded and strips unknown payloads", () => {
     {...raw,points:Array(4321).fill(raw.points[0])},
   ]) assert.throws(()=>quotaHistory(bad))
 })
+test("ten-minute quota history covers the full range, gaps and legacy hourly reports", () => {
+  const account = snapshot(doctor()).accounts[0]
+  const from = 1800000000, to = from + 90 * 86400
+  const raw = { from_utc:from, to_utc:to, interval_seconds:600, points:Array.from({length:12960},(_,i)=>["primary","secondary"].map((kind)=>({kind,hour:from+i*600,observed_at:from+i*600+599,used_percent:20,window_minutes:kind==="primary"?480:10080,reset_at:null}))).flat() }
+  const history = quotaHistory(raw)!
+  assert.equal(history.points.length,25920)
+  assert.equal(history.interval,600)
+  const data = quotaTimeline({...account,history})
+  assert.equal(data.hours.length,12960)
+  assert.equal(data.hours[1]-data.hours[0],600)
+  assert.equal(data.hours.at(-1),to-600)
+  assert.equal(data.series[0].segments.length,1)
+  const gapped = quotaTimeline({...account,history:{...history,points:history.points.filter((p)=>p.hour!==from+600)}})
+  assert.equal(gapped.series[0].isolated.length,1)
+  assert.equal(gapped.series[0].segments.length,1)
+  assert.throws(()=>quotaHistory({...raw,points:[{...raw.points[0],observed_at:from+600}]}))
+  assert.throws(()=>quotaHistory({...raw,points:[{...raw.points[0],hour:from+60}]}))
+  assert.equal(quotaTimeline(account).hours.length,168,"older routers retain hourly display")
+})
 test("quota charts plot left, not used, including full and exhausted boundaries", () => {
   for (const [used,left,y] of [[0,100,20],[36,64,86.24],[77,23,161.68],[100,0,204],[125,0,204]]) {
     assert.equal(quotaLeft(used),left)

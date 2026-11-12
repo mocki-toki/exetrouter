@@ -5,7 +5,8 @@ export const quotaColors = ["var(--exr-history-short)", "var(--exr-history-long)
 export function quotaTimeline(account: Account) {
   const history = account.history
   if (!history) return { hours: [] as number[], series: [] as ReturnType<typeof series>[], latest: null }
-  const hours = Array.from({ length: (history.to - history.from) / 3600 }, (_, i) => history.from + i * 3600)
+  const interval = history.interval ?? 3600
+  const hours = Array.from({ length: (history.to - history.from) / interval }, (_, i) => history.from + i * interval)
   const kinds = [...new Set(history.points.map((p) => p.kind))]
     .filter((kind) => (minutes(kind) ?? 0) > 0)
     .sort((a, b) => (minutes(a) ?? Infinity) - (minutes(b) ?? Infinity))

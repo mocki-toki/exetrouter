@@ -24,11 +24,11 @@ Manual priorities and switching rules are removed from CLI/TUI and rejected by m
 
 A bounded runtime worker refreshes live usage and reset inventory independently of the dashboard. Metadata freshness is 60 seconds. Stale observations cannot create urgent mode, prove absence of a short window or authorize a reset. Unknown capacity is not zero. Diagnostics show availability, automatic reason/deadline/window class, threshold and the most recent reset outcome. The dashboard marks enabled urgent accounts with a red `Priority` label and omits the ordinary reserve label.
 
-Account details also show [hourly subscription history](quota-history.md): short
-and weekly windows share one seven-day chart with distinct colors and hourly
+Account details also show [ten-minute subscription history](quota-history.md): short
+and weekly windows share one seven-day chart with distinct colors and ten-minute
 values. Collection is bounded numeric metadata, independent of dashboards and
-token counts; missing observations remain gaps. Schema 14 requires the reviewed
-migration/rollback and history starts only after the server upgrade.
+token counts; missing observations remain gaps. Schema 16 requires the reviewed
+migration/rollback; finer history starts only after the server upgrade.
 
 The green `Best` marker is a server-wide recommendation, identical for every viewer at the same observation time. It uses shared account quotas, deadlines, health and operator availability, never personal preferences or the viewer's client count. It recommends the account with the greatest target share in the best eligible general-meter tier (stable ID breaks equal weights). During urgency it identifies the best unhinted candidate. It is not a global active-account switch: model support, cache hints and owned dialogs can choose differently. No marker is shown when the top tier's quota/window metadata is unknown or stale, or when every account is exhausted/unavailable. The recommendation does not submit inference. Target shares remain unknown for tied non-paced candidates, where cache affinity may choose any of them.
 

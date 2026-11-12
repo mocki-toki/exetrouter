@@ -27,21 +27,22 @@ pub(super) const COLORS: [Color; 6] = [
 fn history(account: &Value) -> Option<History> {
     let mut h: History = serde_json::from_value(account["quota_history"].clone()).ok()?;
     let mut seen = std::collections::BTreeSet::new();
-    let valid = h.interval_seconds == 3600
+    let interval = h.interval_seconds;
+    let valid = matches!(interval, 600 | 3600)
         && h.from_utc >= 0
-        && h.from_utc % 3600 == 0
-        && h.to_utc % 3600 == 0
+        && h.from_utc % interval == 0
+        && h.to_utc % interval == 0
         && h.to_utc
             .checked_sub(h.from_utc)
             .is_some_and(|span| (1..=168 * 3600).contains(&span))
-        && h.points.len() <= 336
+        && h.points.len() <= (168 * 3600 / interval * 2) as usize
         && h.points.iter().all(|p| {
             matches!(p.kind.as_str(), "primary" | "secondary")
                 && p.hour >= h.from_utc
                 && p.hour < h.to_utc
-                && p.hour % 3600 == 0
+                && p.hour % interval == 0
                 && p.observed_at >= p.hour
-                && p.observed_at < p.hour + 3600
+                && p.observed_at < p.hour + interval
                 && p.used_percent.is_finite()
                 && p.used_percent >= 0.0
                 && seen.insert((p.kind.clone(), p.hour))
@@ -49,8 +50,8 @@ fn history(account: &Value) -> Option<History> {
     h.points.sort_by_key(|p| p.hour);
     valid.then_some(h)
 }
-pub(super) fn range(account: &Value) -> Option<(i64, i64)> {
-    history(account).map(|h| (h.from_utc, h.to_utc))
+pub(super) fn range(account: &Value) -> Option<(i64, i64, i64)> {
+    history(account).map(|h| (h.from_utc, h.to_utc, h.interval_seconds))
 }
 fn details(account: &Value, now: i64) -> String {
     let details = render::account_details(account, now)
@@ -130,7 +131,11 @@ pub(super) fn draw(
         &mut buf,
         7,
         Line::styled(
-            "Limit history · last 7 days · hourly",
+            if account["quota_history"]["interval_seconds"] == 3600 {
+                "Limit history · last 7 days · hourly"
+            } else {
+                "Limit history · last 7 days · 10-minute steps"
+            },
             Style::default().bold(),
         ),
         Color::White,
@@ -167,13 +172,14 @@ pub(super) fn draw(
                 COLORS[if weekly { 1 } else { i % 2 }]
             })
             .collect();
-        let last = (h.to_utc - h.from_utc) / 3600 - 1;
+        let interval = h.interval_seconds;
+        let last = (h.to_utc - h.from_utc) / interval - 1;
         let selected = selected
-            .unwrap_or(h.to_utc - 3600)
-            .clamp(h.from_utc, h.to_utc - 3600);
+            .unwrap_or(h.to_utc - interval)
+            .clamp(h.from_utc, h.to_utc - interval);
         let cursor = [
-            ((selected - h.from_utc) as f64 / 3600.0, 0.0),
-            ((selected - h.from_utc) as f64 / 3600.0, 100.0),
+            ((selected - h.from_utc) as f64 / interval as f64, 0.0),
+            ((selected - h.from_utc) as f64 / interval as f64, 100.0),
         ];
         let mut segments: Vec<(usize, Vec<(f64, f64)>)> = Vec::new();
         for (index, kind) in kinds.iter().enumerate() {
@@ -184,13 +190,13 @@ pub(super) fn draw(
                     continue;
                 }
                 if previous.is_some_and(|(hour, minutes)| {
-                    p.hour != hour + 3600 || p.window_minutes != minutes
+                    p.hour != hour + interval || p.window_minutes != minutes
                 }) && !points.is_empty()
                 {
                     segments.push((index, std::mem::take(&mut points)));
                 }
                 points.push((
-                    (p.hour - h.from_utc) as f64 / 3600.0,
+                    (p.hour - h.from_utc) as f64 / interval as f64,
                     quota_left(p.used_percent),
                 ));
                 previous = Some((p.hour, p.window_minutes));
@@ -220,7 +226,7 @@ pub(super) fn draw(
                 .map(|d| d.with_timezone(&chrono::Local).format("%b %-d").to_string())
                 .unwrap_or_default()
         };
-        let labels = [0, last / 2, last].map(|i| Line::from(label(h.from_utc + i * 3600)));
+        let labels = [0, last / 2, last].map(|i| Line::from(label(h.from_utc + i * interval)));
         Chart::new(datasets)
             .block(block)
             .x_axis(
@@ -277,7 +283,7 @@ pub(super) fn draw(
         Paragraph::new(if account["quota_history"].is_object() {
             "No recorded observations yet."
         } else {
-            "Hourly history requires an updated router."
+            "Limit history requires an updated router."
         })
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(Color::Gray))
@@ -369,5 +375,29 @@ mod tests {
         ] {
             assert_eq!(quota_left(used), left);
         }
+    }
+
+    #[test]
+    fn ten_minute_history_accepts_a_full_week_and_validates_bucket_bounds() {
+        let base = 1_800_000_000;
+        let points: Vec<_> = (0..1008).flat_map(|i| ["primary", "secondary"].map(|kind| json!({"kind":kind,"hour":base+i*600,"observed_at":base+i*600+599,"used_percent":20,"window_minutes":480,"reset_at":null}))).collect();
+        let mut account = json!({"quota_history":{"from_utc":base,"to_utc":base+7*86400,"interval_seconds":600,"points":points}});
+        assert_eq!(history(&account).unwrap().points.len(), 2016);
+        assert_eq!(range(&account), Some((base, base + 7 * 86400, 600)));
+        let mut terminal = Terminal::new(TestBackend::new(104, 40)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), &account, base + 7 * 86400, 0, Some(base + 600)))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("10-minute steps"));
+        assert!(text.contains("80% left"));
+        account["quota_history"]["points"][0]["observed_at"] = json!(base + 600);
+        assert!(history(&account).is_none());
     }
 }

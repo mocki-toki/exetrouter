@@ -99,7 +99,7 @@ enum CommandLine {
         #[arg(long)]
         before: Option<i64>,
     },
-    /// Read recorded hourly subscription history without refreshing upstream.
+    /// Read recorded subscription history without refreshing upstream.
     QuotaHistory {
         account: i64,
         #[arg(long, default_value = "7d", value_parser = ["24h", "7d", "30d", "90d"])]

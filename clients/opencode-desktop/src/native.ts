@@ -29,16 +29,17 @@ function list(value: unknown, max: number): unknown[] {
 export function quotaHistory(value: unknown): QuotaHistory | null {
   if (value == null) return null
   const h = record(value), from = number(h.from_utc), to = number(h.to_utc)
-  if (h.interval_seconds !== 3600 || from % 3600 || to % 3600 || to <= from || to - from > 2160 * 3600) throw new Error("Invalid quota history.")
+  const interval = number(h.interval_seconds)
+  if (![600, 3600].includes(interval) || from % interval || to % interval || to <= from || to - from > 2160 * 3600) throw new Error("Invalid quota history.")
   const seen = new Set<string>()
-  const points = list(h.points, 4320).map((entry) => {
+  const points = list(h.points, 2160 * 3600 / interval * 2).map((entry) => {
     const p = record(entry), hour = number(p.hour), observedAt = number(p.observed_at), kind = text(p.kind, 16)
     const key = `${kind}:${hour}`
-    if (!["primary", "secondary"].includes(kind) || hour % 3600 || hour < from || hour >= to || observedAt < hour || observedAt >= hour + 3600 || seen.has(key)) throw new Error("Invalid quota history.")
+    if (!["primary", "secondary"].includes(kind) || hour % interval || hour < from || hour >= to || observedAt < hour || observedAt >= hour + interval || seen.has(key)) throw new Error("Invalid quota history.")
     seen.add(key)
     return { kind, hour, observedAt, used: number(p.used_percent), minutes: nullable(p.window_minutes), resetAt: nullable(p.reset_at) }
   }).sort((a, b) => a.hour - b.hour)
-  return { from, to, points }
+  return { from, to, interval, points }
 }
 
 function capacityProfile(value: unknown): typeof CapacityProfile.Type | null {
@@ -152,7 +153,7 @@ export function models(value: unknown): typeof Models.Type {
 
 /** Read-only subprocess boundary: no shell, stdin, stderr forwarding, secret output or unbounded buffering. */
 export function execJSON(binary: string, args: readonly string[], signal: AbortSignal, allowNonzero = false,
-  timeout = 50_000, maxBytes = 1_048_576): Promise<unknown> {
+  timeout = 50_000, maxBytes = 8_388_608): Promise<unknown> {
   if (signal.aborted) return Promise.reject(new Error("ExetRouter read cancelled."))
   return new Promise((resolve, reject) => {
     const env: NodeJS.ProcessEnv = { ...process.env, EXR_NO_UPDATE_CHECK: "1" }
@@ -243,7 +244,7 @@ export class NativeClient {
   }
 
   async quotaHistory(input: HistoryInput, signal: AbortSignal): Promise<QuotaHistory> {
-    if (!Number.isSafeInteger(input.account) || input.account <= 0 || !["24h", "7d", "30d", "90d"].includes(input.period) || input.before !== undefined && (!Number.isSafeInteger(input.before) || input.before <= 0 || input.before % 3600 !== 0)) throw new Error("Invalid history selection.")
+    if (!Number.isSafeInteger(input.account) || input.account <= 0 || !["24h", "7d", "30d", "90d"].includes(input.period) || input.before !== undefined && (!Number.isSafeInteger(input.before) || input.before <= 0 || input.before % 600 !== 0)) throw new Error("Invalid history selection.")
     const history = quotaHistory(await this.read(["quota-history", String(input.account), "--period", input.period, ...(input.before === undefined ? [] : ["--before", String(input.before)])], signal))
     if (!history) throw new Error("Quota history unavailable.")
     return history

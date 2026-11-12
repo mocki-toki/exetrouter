@@ -1,15 +1,18 @@
-//! Bounded hourly subscription metadata, never derived from inference token counts.
+//! Bounded ten-minute subscription metadata, never derived from inference token counts.
 use crate::Result;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 pub const HOURS: i64 = 168;
 pub const RETENTION_HOURS: i64 = 365 * 24;
-pub const INTERVAL: i64 = 3600;
+pub const INTERVAL: i64 = 600;
+pub const SNAPSHOT_BUCKETS: i64 = HOURS * 3600 / INTERVAL;
+pub const RETENTION_BUCKETS: i64 = RETENTION_HOURS * 3600 / INTERVAL;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Point {
     pub kind: String,
+    // Legacy wire/storage name: the start of an INTERVAL-second UTC bucket.
     pub hour: i64,
     pub observed_at: i64,
     pub used_percent: f64,
@@ -26,14 +29,14 @@ pub struct History {
 }
 
 pub(crate) fn prune(conn: &Connection, now: i64) -> Result<()> {
-    let from = (now.div_euclid(INTERVAL) - RETENTION_HOURS + 1).max(0) * INTERVAL;
+    let from = (now.div_euclid(INTERVAL) - RETENTION_BUCKETS + 1).max(0) * INTERVAL;
     conn.execute("DELETE FROM oauth_quota_history WHERE hour<?1", [from])?;
     Ok(())
 }
 
 pub(crate) fn snapshot(conn: &Connection, account: i64, now: i64) -> Result<History> {
     let hour = now.max(0).div_euclid(INTERVAL) * INTERVAL;
-    let from = (hour - (HOURS - 1) * INTERVAL).max(0);
+    let from = (hour - (SNAPSHOT_BUCKETS - 1) * INTERVAL).max(0);
     read_range(conn, account, from, hour + INTERVAL, now)
 }
 
@@ -53,7 +56,7 @@ pub fn range(
     };
     let latest = now.div_euclid(INTERVAL) * INTERVAL + INTERVAL;
     let to = before.unwrap_or(latest);
-    if to < hours * INTERVAL || to > latest || to % INTERVAL != 0 {
+    if to < hours * 3600 || to > latest || to % INTERVAL != 0 {
         return Err("invalid history end".into());
     }
     let exists: bool = conn.query_row(
@@ -64,11 +67,11 @@ pub fn range(
     if !exists {
         return Err("account not found".into());
     }
-    read_range(conn, account, to - hours * INTERVAL, to, now)
+    read_range(conn, account, to - hours * 3600, to, now)
 }
 
 fn read_range(conn: &Connection, account: i64, from: i64, to: i64, now: i64) -> Result<History> {
-    let mut stmt = conn.prepare("SELECT kind,hour,observed_at,used_percent,window_minutes,reset_at FROM oauth_quota_history WHERE account_id=?1 AND hour>=?2 AND hour<?3 AND observed_at<=?4 ORDER BY hour,kind LIMIT 4320")?;
+    let mut stmt = conn.prepare("SELECT kind,hour,observed_at,used_percent,window_minutes,reset_at FROM oauth_quota_history WHERE account_id=?1 AND hour>=?2 AND hour<?3 AND observed_at<=?4 ORDER BY hour,kind LIMIT 25920")?;
     let points = stmt
         .query_map(params![account, from, to, now], |row| {
             Ok(Point {
@@ -115,7 +118,7 @@ mod tests {
         .unwrap();
     }
     #[test]
-    fn hourly_last_samples_follow_order_and_generation_and_never_fill_gaps() {
+    fn ten_minute_last_samples_follow_order_and_generation_and_never_fill_gaps() {
         let mut conn = database();
         let base = 1_800_000_000 / INTERVAL * INTERVAL;
         save(&mut conn, base, 10, 0, 20.0);
@@ -125,6 +128,7 @@ mod tests {
         save(&mut conn, base + 2 * INTERVAL, 13, 0, 5.0);
         let h = snapshot(&conn, 1, base + 2 * INTERVAL).unwrap();
         assert_eq!(h.points.len(), 4);
+        assert_eq!(h.interval_seconds, 600);
         assert_eq!(h.points[0].used_percent, 30.0);
         assert_eq!(h.points[0].observed_at, base + 60);
         assert_eq!(h.points[1].window_minutes, Some(10080));
@@ -147,7 +151,7 @@ mod tests {
     fn history_is_bounded_durable_and_additive_rollback_is_reversible() {
         let mut conn = database();
         let base = chrono::Utc::now().timestamp() / INTERVAL * INTERVAL;
-        for hour in 0..200 {
+        for hour in 0..SNAPSHOT_BUCKETS + 32 {
             save(
                 &mut conn,
                 base + hour * INTERVAL,
@@ -156,20 +160,20 @@ mod tests {
                 (hour % 100) as f64,
             );
         }
-        let at = base + 199 * INTERVAL;
+        let at = base + (SNAPSHOT_BUCKETS + 31) * INTERVAL;
         let h = snapshot(&conn, 1, at).unwrap();
-        assert_eq!(h.points.len(), 336);
+        assert_eq!(h.points.len(), 2016);
         assert_eq!(h.from_utc, base + 32 * INTERVAL);
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM oauth_quota_history", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            400
+            (SNAPSHOT_BUCKETS + 32) * 2
         );
         conn.execute_batch("ALTER TABLE access_tokens DROP COLUMN fast_mode; ALTER TABLE access_tokens DROP COLUMN disabled;").unwrap();
         conn.pragma_update(None, "user_version", 13).unwrap();
         crate::init(&conn).unwrap();
-        assert_eq!(snapshot(&conn, 1, at).unwrap().points.len(), 336);
+        assert_eq!(snapshot(&conn, 1, at).unwrap().points.len(), 2016);
         assert_eq!(
             conn.query_row(
                 "SELECT hex(encrypted_credentials) FROM oauth_accounts",
@@ -189,11 +193,11 @@ mod tests {
             .unwrap()
             .exists([])
             .unwrap());
-        assert!(snapshot(&conn, 1, at + HOURS * INTERVAL)
+        assert!(snapshot(&conn, 1, at + HOURS * 3600)
             .unwrap()
             .points
             .is_empty());
-        prune(&conn, at + RETENTION_HOURS * INTERVAL).unwrap();
+        prune(&conn, at + RETENTION_HOURS * 3600).unwrap();
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM oauth_quota_history", [], |r| r
                 .get::<_, i64>(0))
@@ -277,7 +281,7 @@ mod tests {
     fn per_window_year_bound_survives_backward_clock() {
         let mut conn = database();
         let base = chrono::Utc::now().timestamp() / INTERVAL * INTERVAL;
-        conn.execute("WITH RECURSIVE hours(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM hours WHERE n<?2) INSERT INTO oauth_quota_history(account_id,kind,hour,observed_at,used_percent,request_order) SELECT 1,'primary',?1-n*3600,?1-n*3600,20,1 FROM hours",params![base,RETENTION_HOURS+5]).unwrap();
+        conn.execute("WITH RECURSIVE buckets(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM buckets WHERE n<?2) INSERT INTO oauth_quota_history(account_id,kind,hour,observed_at,used_percent,request_order) SELECT 1,'primary',?1-n*?3,?1-n*?3,20,1 FROM buckets",params![base,RETENTION_BUCKETS+5,INTERVAL]).unwrap();
         save(&mut conn, base - INTERVAL, 2, 0, 30.0);
         assert_eq!(
             conn.query_row(
@@ -286,14 +290,115 @@ mod tests {
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
-            RETENTION_HOURS
+            RETENTION_BUCKETS
         );
-        prune(&conn, base + RETENTION_HOURS * INTERVAL).unwrap();
+        prune(&conn, base + RETENTION_HOURS * 3600).unwrap();
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM oauth_quota_history", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn migration_rebuckets_legacy_samples_without_backfilling_and_preserves_state() {
+        let mut conn = database();
+        conn.execute_batch("DROP TABLE oauth_quota_history;")
+            .unwrap();
+        conn.execute_batch(include_str!("migrations/014_quota_history.sql"))
+            .unwrap();
+        conn.pragma_update(None, "user_version", 15).unwrap();
+        let base = chrono::Utc::now().timestamp() / 3600 * 3600;
+        conn.execute(
+            "INSERT INTO oauth_quota_history VALUES(1,'primary',?1,?1+3599,42,480,?1+28800,1)",
+            [base],
+        )
+        .unwrap();
+        crate::init(&conn).unwrap();
+        let h = snapshot(&conn, 1, base + 3599).unwrap();
+        assert_eq!(h.points.len(), 1);
+        assert_eq!(h.points[0].hour, base + 3000);
+        assert_eq!(h.points[0].observed_at, base + 3599);
+        assert_eq!(h.points[0].used_percent, 42.0);
+        save(&mut conn, base + 3600, 2, 0, 50.0);
+        save(&mut conn, base + 4200, 3, 0, 60.0);
+        let h = snapshot(&conn, 1, base + 4200).unwrap();
+        assert_eq!(h.points.len(), 5);
+        assert_eq!(h.points[3].hour - h.points[1].hour, 600);
+        assert_eq!(
+            conn.query_row(
+                "SELECT hex(encrypted_credentials) FROM oauth_accounts",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "1234"
+        );
+        crate::init(&conn).unwrap();
+        assert_eq!(snapshot(&conn, 1, base + 4200).unwrap().points.len(), 5);
+        assert_eq!(
+            conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert!(!conn
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .exists([])
+            .unwrap());
+    }
+
+    #[test]
+    fn ninety_day_range_returns_all_ten_minute_points_without_truncation() {
+        let conn = database();
+        let base = chrono::Utc::now().timestamp() / INTERVAL * INTERVAL;
+        let buckets = 90 * 86400 / INTERVAL;
+        conn.execute("WITH RECURSIVE buckets(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM buckets WHERE n<?2-1) INSERT INTO oauth_quota_history(account_id,kind,hour,observed_at,used_percent,request_order) SELECT 1,kind,?1-n*600,?1-n*600,20,1 FROM buckets CROSS JOIN (SELECT 'primary' AS kind UNION ALL SELECT 'secondary')", params![base,buckets]).unwrap();
+        let h = range(&conn, 1, "90d", None, base).unwrap();
+        assert_eq!(h.points.len(), 25920);
+        assert_eq!(h.points.first().unwrap().hour, h.from_utc);
+        assert_eq!(h.points.last().unwrap().hour, base);
+        assert_eq!(h.to_utc - h.from_utc, 90 * 86400);
+    }
+
+    #[test]
+    fn reviewed_hourly_rollback_preserves_latest_samples_and_can_reupgrade() {
+        let mut conn = database();
+        let base = chrono::Utc::now().timestamp() / 3600 * 3600;
+        save(&mut conn, base + 599, 1, 0, 20.0);
+        save(&mut conn, base + 1199, 2, 0, 30.0);
+        save(&mut conn, base + 3599, 3, 0, 40.0);
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch("ALTER TABLE oauth_quota_history RENAME TO history_archive; DROP INDEX oauth_quota_history_hour;").unwrap();
+        tx.execute_batch(include_str!("migrations/014_quota_history.sql"))
+            .unwrap();
+        tx.execute_batch("INSERT INTO oauth_quota_history SELECT account_id,kind,hour/3600*3600,observed_at,used_percent,window_minutes,reset_at,request_order FROM (SELECT *,ROW_NUMBER() OVER (PARTITION BY account_id,kind,hour/3600 ORDER BY observed_at DESC,request_order DESC) AS sample FROM history_archive) WHERE sample=1; PRAGMA user_version=15;").unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM oauth_quota_history", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT used_percent FROM oauth_quota_history WHERE kind='primary'",
+                [],
+                |r| r.get::<_, f64>(0)
+            )
+            .unwrap(),
+            40.0
+        );
+        crate::init(&conn).unwrap();
+        let h = snapshot(&conn, 1, base + 3599).unwrap();
+        assert_eq!(h.points.len(), 2);
+        assert_eq!(h.points[0].hour, base + 3000);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM history_archive", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            6
         );
     }
 }

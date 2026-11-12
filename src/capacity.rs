@@ -126,7 +126,7 @@ fn cost(conn: &Connection, id: i64, window: &quota::Window, now: i64) -> Result<
     }
     // Last accepted hourly observations, plus the current sample. Only contiguous,
     // monotonic observations in this exact cycle can calibrate this account.
-    let mut stmt=conn.prepare("SELECT observed_at,used_percent,window_minutes,reset_at FROM oauth_quota_history WHERE account_id=?1 AND kind=?2 AND hour>=?3 AND observed_at<?4 ORDER BY hour DESC LIMIT 7")?;
+    let mut stmt=conn.prepare("SELECT observed_at,used_percent,window_minutes,reset_at FROM (SELECT observed_at,used_percent,window_minutes,reset_at,ROW_NUMBER() OVER (PARTITION BY hour/3600 ORDER BY observed_at DESC) AS sample FROM oauth_quota_history WHERE account_id=?1 AND kind=?2 AND hour>=?3 AND observed_at<?4) WHERE sample=1 ORDER BY observed_at DESC LIMIT 7")?;
     let samples = stmt
         .query_map(
             params![

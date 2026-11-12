@@ -92,7 +92,8 @@ last confirmed account. Completion, idle periods and metadata without an account
 alias do not clear it; a confirmed transfer updates it and switching to another
 provider clears it.
 Observations are bounded in memory only; loading the panel never submits inference.
-Account details show short and weekly windows together in an hourly quota chart,
+Account details show short and weekly windows together in a ten-minute quota chart
+(hourly with older routers),
 with distinct colors and pointer/keyboard values. Usage and Limit history offer
 rolling **24 hours, 7 days, 30 days and 90 days**, with arrows to previous/next
 intervals. The router collects
@@ -213,7 +214,7 @@ running. This is not an OS service installer or supervisor.
   concurrent subprocesses. Cancellation kills
   the read's process group. Child stderr and arbitrary errors are never shown.
 - Native actions have a separate closed, typed stdio protocol with 64 KiB input
-  frames, 1 MiB replies, one request in flight and a 55-second deadline (ten
+  frames, 8 MiB replies, one request in flight and a 55-second deadline (ten
   minutes for an explicit update install). There is no shell and no automatic
   mutation retry. Secrets stay in Rust; failed clipboard delivery can be retried
   against the same in-memory secret. Closing a dialog does not cancel issuance.
