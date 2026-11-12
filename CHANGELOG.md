@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0
+
+- Remove the OpenCode Desktop plugin's system-instruction injection, including its per-request random image-reference prefix. Leave model context unchanged and retain rendering of saved image references; new custom image cards are no longer requested through prompt instructions.
+- Add a compact OpenCode Desktop Capacity outlook with model-scoped, calibrated request/runway estimates, useful quota recoveries, expiring-credit warnings and a read-only Details view. Keep credits conditional and stale/unknown capacity unknown; do not alter routing, reset spending or persist forecast state.
+- Gate Fast (`service_tier: priority`) at the server: disabled by default, globally configurable with per-token on/off/inherit overrides across HTTP, Chat, compaction and native WebSockets. Schema 15 stores only nullable token preferences; rotation preserves them.
+- Allow token owners to temporarily disable and re-enable an API token without changing its secret. Revocation stays irreversible; token disable/enable takes effect on subsequent authenticated requests.
+- Add a model-weighted standard OpenAI API USD estimate to usage reports and the OpenCode Desktop Usage chart. Keep unknown and unpriced requests visible; this is not actual ChatGPT subscription spending.
+- Isolate OpenCode Desktop Usage render failures to its view instead of blanking the dashboard; offer a retry without exposing report contents or errors.
+- Keep Usage compatible with older IPC reports that omit USD fields: show unavailable prices as unknown instead of throwing during dollar formatting or inventing zero-cost usage.
+- Simplify Desktop token actions with a Fast mode submenu, adjacent status/preference badges and inline details. Replace calendar chart tabs with rolling 24-hour/7-day/30-day/90-day windows and previous/next paging for Usage and Limit history. Retain bounded numeric limit observations for 365 days; previously discarded hours cannot be backfilled.
+- Hide quota-history series with unknown window durations and completed `Auto reset: reset` notices in the OpenCode Desktop dashboard. Keep meaningful reset states visible and preserve the underlying account metadata.
+- Publish OpenCode Desktop plugin 0.4.0. New dashboard metadata and interval reads require matching router/native clients; older data remains explicitly unavailable.
+- Keep inference rejection diagnostics restricted to exact allowlisted status/code/type/parameter labels and safe correlation IDs; never log upstream messages or payloads. Match Linux HTTP TCP unacknowledged-data timeouts to the existing inference/metadata read budgets, without replaying uncertain requests.
+- Deploy schema 15 only through the reviewed migration and rollback in `docs/fast-mode-migration.md`; ordinary Docker updates still refuse a schema mismatch. Existing tokens start enabled with inherited Fast policy, and keys/OAuth state are preserved.
+
 ## 0.8.4
 
 - Add durable, bounded hourly subscription history to account details in the native TUI and OpenCode Desktop plugin (0.3.0). Plot short and weekly windows together over seven days with separate colors, shared percentage axes and an hourly cursor; show used/remaining quota without inventing missing hours or smoothing quota resets.

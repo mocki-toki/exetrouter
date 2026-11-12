@@ -34,6 +34,16 @@ enum Action {
         id: String,
         confirmed: bool,
     },
+    TokenSetEnabled {
+        id: String,
+        enabled: bool,
+        confirmed: bool,
+    },
+    TokenFastMode {
+        id: String,
+        enabled: Option<bool>,
+        confirmed: bool,
+    },
     CopyRetry {},
     CopyDiscard {},
     Configure {
@@ -205,6 +215,26 @@ impl Desktop {
                 confirmed(yes)?;
                 self.request(ControlRequest::TokenRevoke { id }).await?;
                 Ok(reply("revoked"))
+            }
+            Action::TokenSetEnabled {
+                id,
+                enabled,
+                confirmed: yes,
+            } => {
+                confirmed(yes)?;
+                self.request(ControlRequest::TokenSetEnabled { id, enabled })
+                    .await?;
+                Ok(reply("saved"))
+            }
+            Action::TokenFastMode {
+                id,
+                enabled,
+                confirmed: yes,
+            } => {
+                confirmed(yes)?;
+                self.request(ControlRequest::TokenFastMode { id, enabled })
+                    .await?;
+                Ok(reply("saved"))
             }
             Action::CopyRetry {} => Ok(self.copy().await),
             Action::CopyDiscard {} => {

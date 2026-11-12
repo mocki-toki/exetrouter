@@ -50,6 +50,7 @@ pub struct ServeConfig {
     pub upstream: Option<Arc<crate::upstream::Upstream>>,
     pub generations_per_user: usize,
     pub websockets_per_user: usize,
+    pub fast_mode: bool,
 }
 
 const CONTROL_LIMIT: u64 = 32_768;
@@ -68,6 +69,7 @@ struct AppState {
     mcp: mcp::McpState,
     generation_slots: limits::Slots,
     websocket_slots: limits::Slots,
+    fast_mode: bool,
     upstream: Option<Arc<crate::upstream::Upstream>>,
     jobs: TaskTracker,
     stopped: watch::Receiver<bool>,
@@ -180,6 +182,7 @@ pub async fn serve(
         mcp: mcp::McpState::new(config.generations_per_user),
         generation_slots: limits::Slots::new(config.generations_per_user),
         websocket_slots: limits::Slots::new(config.websockets_per_user),
+        fast_mode: config.fast_mode,
         upstream: config.upstream,
         jobs: jobs.clone(),
         stopped: stopped.clone(),
@@ -288,6 +291,7 @@ pub(crate) async fn local_api(
         mcp: mcp::McpState::new(8),
         generation_slots: limits::Slots::new(8),
         websocket_slots: limits::Slots::new(8),
+        fast_mode: false,
         upstream: Some(upstream.clone()),
         jobs: jobs.clone(),
         stopped: stopped.clone(),
@@ -877,6 +881,7 @@ mod tests {
             continuation_bytes: Arc::new(Semaphore::new(continuation::TOTAL_BYTES)),
             generation_slots: limits::Slots::new(1),
             websocket_slots: limits::Slots::new(1),
+            fast_mode: false,
             upstream: None,
             jobs: TaskTracker::new(),
             stopped: watch::channel(false).1,

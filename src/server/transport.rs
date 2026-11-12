@@ -297,6 +297,100 @@ struct RequestLog {
     events_seen: u64,
     output_seen: bool,
     last_event: LastUpstreamEvent,
+    rejection_logged: bool,
+}
+
+// Only exact, fixed labels may leave the transient error body. In particular,
+// never infer a cause from message/detail text or retain arbitrary param paths.
+#[derive(Debug, PartialEq)]
+struct RejectionDiagnostic {
+    status: Option<u16>,
+    code: &'static str,
+    error_type: &'static str,
+    param: &'static str,
+}
+
+impl RejectionDiagnostic {
+    fn read(body: Option<&Value>, status: Option<u16>) -> Self {
+        fn label(value: Option<&Value>, allowed: &'static [&'static str]) -> &'static str {
+            allowed
+                .iter()
+                .copied()
+                .find(|label| value.and_then(Value::as_str) == Some(*label))
+                .unwrap_or("unknown")
+        }
+        let error = body.and_then(|body| {
+            body.get("error")
+                .filter(|error| error.is_object())
+                .or_else(|| {
+                    body.pointer("/response/error")
+                        .filter(|error| error.is_object())
+                })
+        });
+        let field = |key| error.and_then(|error| error.get(key));
+        Self {
+            status: status.or_else(|| {
+                body.and_then(|body| body.get("status"))
+                    .and_then(Value::as_u64)
+                    .and_then(|status| u16::try_from(status).ok())
+                    .filter(|status| (400..600).contains(status))
+            }),
+            code: label(
+                field("code"),
+                &[
+                    "invalid_request_error",
+                    "invalid_value",
+                    "invalid_type",
+                    "missing_required_parameter",
+                    "unsupported_parameter",
+                    "unsupported_value",
+                    "context_length_exceeded",
+                    "model_not_found",
+                    "invalid_json_schema",
+                    "rate_limit_exceeded",
+                    "usage_limit_reached",
+                    "server_error",
+                ],
+            ),
+            error_type: label(
+                field("type"),
+                &[
+                    "invalid_request_error",
+                    "authentication_error",
+                    "permission_error",
+                    "not_found_error",
+                    "rate_limit_error",
+                    "server_error",
+                ],
+            ),
+            param: label(
+                field("param"),
+                &[
+                    "model",
+                    "input",
+                    "instructions",
+                    "tools",
+                    "tool_choice",
+                    "parallel_tool_calls",
+                    "reasoning",
+                    "reasoning.effort",
+                    "text",
+                    "text.format",
+                    "text.format.schema",
+                    "temperature",
+                    "top_p",
+                    "max_output_tokens",
+                    "store",
+                    "stream",
+                    "n",
+                    "previous_response_id",
+                    "conversation",
+                    "include",
+                    "service_tier",
+                ],
+            ),
+        }
+    }
 }
 
 enum JsonReply {
@@ -373,7 +467,28 @@ impl RequestLog {
             events_seen: 0,
             output_seen: false,
             last_event: LastUpstreamEvent::default(),
+            rejection_logged: false,
         })
+    }
+    fn rejected(&mut self, body: Option<&Value>, status: Option<u16>) {
+        // HTTP errors can subsequently appear as synthetic WS error events.
+        // Diagnose the original once, not the router's redacted projection.
+        if self.rejection_logged {
+            return;
+        }
+        self.rejection_logged = true;
+        let diagnostic = RejectionDiagnostic::read(body, status);
+        let upstream_request_id = self.request_id.as_deref().filter(|id| {
+            !id.is_empty()
+                && id.len() <= 256
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        });
+        tracing::warn!(event="upstream_response_rejected",request_id=%self.id,
+            upstream_transport=self.transport,upstream_request_id,
+            upstream_status=diagnostic.status,error_code=diagnostic.code,
+            error_type=diagnostic.error_type,error_param=diagnostic.param);
     }
     async fn quota(&self, observation: crate::quota::Observation, now: i64) -> Result<()> {
         if observation.is_empty() {
@@ -584,8 +699,7 @@ impl RequestLog {
                 | "response.reasoning_summary_text.delta"
         );
         if matches!(kind, "error" | "response.failed") {
-            // Only fixed events and server-generated IDs enter operational logs.
-            tracing::warn!(event="upstream_response_rejected",request_id=%self.id);
+            self.rejected(Some(event), None);
         }
         if kind == "response.created" {
             if self.created {
@@ -705,6 +819,33 @@ fn normalize_messages(payload: &mut Value) {
             }
         }
     }
+}
+
+// Fast is a client-side preference, not an authority to spend priority quota.
+// Only the server's policy (with a token override) may forward it upstream.
+async fn enforce_fast_mode(
+    state: &AppState,
+    identity: &Identity,
+    payload: &mut Value,
+) -> Result<()> {
+    if !matches!(
+        payload.get("service_tier").and_then(Value::as_str),
+        Some("priority" | "fast")
+    ) {
+        return Ok(());
+    }
+    let (user, token) = (identity.user_id, identity.token_id.clone());
+    let override_ = state
+        .db
+        .call(move |conn| crate::auth::token_fast_mode(conn, user, &token))
+        .await?;
+    if !override_.unwrap_or(state.fast_mode) {
+        payload
+            .as_object_mut()
+            .expect("validated payload")
+            .remove("service_tier");
+    }
+    Ok(())
 }
 fn prepare(payload: &mut Value, compact: bool) -> Result<bool> {
     // This backend accepts developer instructions but rejects the public API's
@@ -1096,6 +1237,16 @@ pub(super) async fn http(
             )
         }
     };
+    if enforce_fast_mode(&state, &identity, &mut payload)
+        .await
+        .is_err()
+    {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "Fast mode policy unavailable",
+        );
+    }
     let cache = match crate::cache::prepare(
         &state.key,
         identity.user_id,
@@ -1368,6 +1519,7 @@ pub(super) async fn http(
                 .await
                 .ok()
                 .and_then(std::result::Result::ok);
+                log.rejected(body.as_ref(), Some(status.as_u16()));
                 let quota_saved = log
                     .quota(
                         crate::quota::http(&headers, status.as_u16(), body.as_ref(), now),
@@ -1798,6 +1950,7 @@ impl<'a> WsSource<'a> {
             .await
             .ok()
             .and_then(std::result::Result::ok);
+            log.rejected(body.as_ref(), Some(status));
             let observation = crate::quota::http(&headers, status, body.as_ref(), now);
             let until = observation.cooldown_until();
             log.rejection_until = until;
@@ -2421,7 +2574,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 &mut client,
                 ws_error(
                     "authentication_error",
-                    "token expired, revoked or authentication storage unavailable",
+                    "token inactive or authentication storage unavailable",
                 ),
             )
             .await;
@@ -2490,6 +2643,17 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             continue;
         };
         normalize_messages(&mut payload);
+        if enforce_fast_mode(&state, &identity, &mut payload)
+            .await
+            .is_err()
+        {
+            let _ = send_client(
+                &mut client,
+                ws_error("storage_unavailable", "Fast mode policy unavailable"),
+            )
+            .await;
+            continue;
+        }
         let body = payload.as_object_mut().expect("validated object");
         body.entry("store").or_insert(json!(false));
         body.entry("instructions").or_insert(json!(""));
@@ -3556,6 +3720,50 @@ async fn next_sse_chunk(receive: &mut mpsc::Receiver<Bytes>, interval: Duration)
 #[cfg(test)]
 mod heartbeat_tests {
     use super::*;
+
+    #[test]
+    fn rejection_diagnostics_only_retain_exact_fixed_labels() {
+        let private = "synthetic-private-error-content";
+        let error = json!({"error":{"code":"unsupported_parameter","type":"invalid_request_error","param":"max_output_tokens","message":private},"status":400});
+        let expected = RejectionDiagnostic {
+            status: Some(400),
+            code: "unsupported_parameter",
+            error_type: "invalid_request_error",
+            param: "max_output_tokens",
+        };
+        assert_eq!(RejectionDiagnostic::read(Some(&error), None), expected);
+        let nested = json!({"response":{"error":error["error"]}});
+        assert_eq!(
+            RejectionDiagnostic::read(Some(&nested), Some(400)),
+            expected
+        );
+        // Actual HTTP status takes precedence over an untrusted body field.
+        assert_eq!(
+            RejectionDiagnostic::read(Some(&error), Some(422)).status,
+            Some(422)
+        );
+        for value in [
+            json!(private),
+            json!({"message":"unsupported_parameter max_output_tokens"}),
+            json!({"error":{"code":private,"type":private,"param":private,"message":private}}),
+            json!({"error":{"code":["unsupported_parameter"],"type":{},"param":42}}),
+            json!({"error":{"code":"unsupported_parameter PRIVATE","param":"tools[0].private_schema"}}),
+            json!({"detail":private,"status":200}),
+        ] {
+            let diagnostic = RejectionDiagnostic::read(Some(&value), None);
+            assert_eq!(
+                diagnostic,
+                RejectionDiagnostic {
+                    status: None,
+                    code: "unknown",
+                    error_type: "unknown",
+                    param: "unknown",
+                }
+            );
+            assert!(!format!("{diagnostic:?}").contains(private));
+        }
+        assert_eq!(RejectionDiagnostic::read(None, Some(400)).code, "unknown");
+    }
 
     #[allow(
         clippy::result_large_err,

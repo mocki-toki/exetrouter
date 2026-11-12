@@ -29,6 +29,7 @@ export const main: Plugin.MainSetup = (ctx) => {
     state: () => state,
     refresh,
     usage: (input, caller) => client.usage(input, AbortSignal.any([ctx.signal, caller.signal])),
+    quotaHistory: (input, caller) => client.quotaHistory(input, AbortSignal.any([ctx.signal, caller.signal])),
     tokens: (_, caller) => client.tokens(AbortSignal.any([ctx.signal, caller.signal])),
     models: (_, caller) => client.models(AbortSignal.any([ctx.signal, caller.signal])),
     profile: async () => {

@@ -190,6 +190,8 @@ pub fn create_token(
             expires_at,
             last_used_at: None,
             revoked_at: None,
+            fast_mode: None,
+            disabled: false,
         },
         secret,
     })
@@ -197,9 +199,9 @@ pub fn create_token(
 
 pub fn token_info(conn: &Connection, user_id: i64, id: &str) -> Result<Option<TokenInfo>> {
     Ok(conn.query_row(
-        "SELECT id,user_id,name,created_at,expires_at,last_used_at,revoked_at FROM access_tokens WHERE id=?1 AND user_id=?2",
+        "SELECT id,user_id,name,created_at,expires_at,last_used_at,revoked_at,fast_mode,disabled FROM access_tokens WHERE id=?1 AND user_id=?2",
         params![id, user_id],
-        |r| Ok(TokenInfo { id: r.get(0)?, user_id: r.get(1)?, name: r.get(2)?, created_at: r.get(3)?, expires_at: r.get(4)?, last_used_at: r.get(5)?, revoked_at: r.get(6)? }),
+        |r| Ok(TokenInfo { id: r.get(0)?, user_id: r.get(1)?, name: r.get(2)?, created_at: r.get(3)?, expires_at: r.get(4)?, last_used_at: r.get(5)?, revoked_at: r.get(6)?, fast_mode: r.get(7)?, disabled: r.get(8)? }),
     ).optional()?)
 }
 
@@ -245,11 +247,22 @@ fn rotate_at(
     }
     let issued = create_token(&tx, key, user_id, &old.name, 90)?;
     tx.execute(
+        "UPDATE access_tokens SET fast_mode=?1,disabled=?2 WHERE id=?3",
+        params![old.fast_mode, old.disabled, issued.token.id],
+    )?;
+    tx.execute(
         "UPDATE access_tokens SET revoked_at=?1 WHERE id=?2 AND user_id=?3",
         params![now, id, user_id],
     )?;
     tx.commit()?;
-    Ok(issued)
+    Ok(IssuedToken {
+        token: token_info(conn, user_id, &issued.token.id)?.expect("rotated token exists"),
+        secret: issued.secret,
+    })
+}
+
+pub fn token_fast_mode(conn: &Connection, user_id: i64, id: &str) -> Result<Option<bool>> {
+    Ok(conn.query_row("SELECT fast_mode FROM access_tokens WHERE id=?1 AND user_id=?2 AND revoked_at IS NULL AND disabled=0 AND expires_at>?3", params![id,user_id,Utc::now().timestamp()], |r| r.get(0))?)
 }
 
 pub fn authenticate(conn: &Connection, key: &[u8], bearer: &str) -> Result<Option<(i64, String)>> {
@@ -274,7 +287,7 @@ fn authenticate_at(
         return Ok(None);
     }
     let found = conn.query_row(
-        "SELECT user_id,digest FROM access_tokens WHERE id=?1 AND revoked_at IS NULL AND expires_at>?2",
+        "SELECT user_id,digest FROM access_tokens WHERE id=?1 AND revoked_at IS NULL AND disabled=0 AND expires_at>?2",
         params![id, now], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
     ).optional()?;
     let Some((user_id, stored_digest)) = found else {
@@ -346,6 +359,119 @@ mod tests {
                 .expires_at,
             short.token.expires_at
         );
+    }
+
+    #[test]
+    fn fast_override_is_scoped_inherited_and_preserved_on_rotation() {
+        let mut db = Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let alice = create_user(&db, "alice").unwrap();
+        let bob = create_user(&db, "bob").unwrap();
+        let issued = create_token(&db, &[1; 32], alice, "fixture", 90).unwrap();
+        assert_eq!(
+            token_info(&db, alice, &issued.token.id)
+                .unwrap()
+                .unwrap()
+                .fast_mode,
+            None
+        );
+        let denied = crate::control(
+            &mut db,
+            &[1; 32],
+            bob,
+            crate::ControlRequest::TokenFastMode {
+                id: issued.token.id.clone(),
+                enabled: Some(true),
+            },
+        );
+        assert!(denied.is_err());
+        assert_eq!(token_fast_mode(&db, alice, &issued.token.id).unwrap(), None);
+        crate::control(
+            &mut db,
+            &[1; 32],
+            alice,
+            crate::ControlRequest::TokenFastMode {
+                id: issued.token.id.clone(),
+                enabled: Some(false),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            token_fast_mode(&db, alice, &issued.token.id).unwrap(),
+            Some(false)
+        );
+        let rotated = rotate_token(&mut db, &[1; 32], alice, &issued.token.id).unwrap();
+        assert_eq!(rotated.token.fast_mode, Some(false));
+        assert_eq!(
+            token_fast_mode(&db, alice, &rotated.token.id).unwrap(),
+            Some(false)
+        );
+        assert!(token_fast_mode(&db, alice, &issued.token.id).is_err());
+        crate::control(
+            &mut db,
+            &[1; 32],
+            alice,
+            crate::ControlRequest::TokenFastMode {
+                id: rotated.token.id.clone(),
+                enabled: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            token_fast_mode(&db, alice, &rotated.token.id).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn token_pause_is_user_scoped_reversible_and_not_revocation() {
+        let mut db = Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let alice = create_user(&db, "alice").unwrap();
+        let bob = create_user(&db, "bob").unwrap();
+        let token = create_token(&db, &[1; 32], alice, "fixture", 90).unwrap();
+        let toggle = |db: &mut Connection, user_id, enabled| {
+            crate::control(
+                db,
+                &[1; 32],
+                user_id,
+                crate::ControlRequest::TokenSetEnabled {
+                    id: token.token.id.clone(),
+                    enabled,
+                },
+            )
+        };
+        assert!(toggle(&mut db, bob, false).is_err());
+        assert_eq!(
+            authenticate(&db, &[1; 32], &token.secret)
+                .unwrap()
+                .unwrap()
+                .0,
+            alice
+        );
+        toggle(&mut db, alice, false).unwrap();
+        assert!(
+            token_info(&db, alice, &token.token.id)
+                .unwrap()
+                .unwrap()
+                .disabled
+        );
+        assert!(authenticate(&db, &[1; 32], &token.secret)
+            .unwrap()
+            .is_none());
+        toggle(&mut db, alice, true).unwrap();
+        assert_eq!(
+            authenticate(&db, &[1; 32], &token.secret)
+                .unwrap()
+                .unwrap()
+                .0,
+            alice
+        );
+        revoke_token(&db, alice, &token.token.id).unwrap();
+        assert!(toggle(&mut db, alice, true).is_err());
+        assert!(authenticate(&db, &[1; 32], &token.secret)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

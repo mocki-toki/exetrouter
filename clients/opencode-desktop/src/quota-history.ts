@@ -7,6 +7,7 @@ export function quotaTimeline(account: Account) {
   if (!history) return { hours: [] as number[], series: [] as ReturnType<typeof series>[], latest: null }
   const hours = Array.from({ length: (history.to - history.from) / 3600 }, (_, i) => history.from + i * 3600)
   const kinds = [...new Set(history.points.map((p) => p.kind))]
+    .filter((kind) => (minutes(kind) ?? 0) > 0)
     .sort((a, b) => (minutes(a) ?? Infinity) - (minutes(b) ?? Infinity))
   function minutes(kind: string) { return [...history!.points].reverse().find((p) => p.kind === kind)?.minutes ?? account.windows.find((w) => w.kind === kind)?.minutes }
   return { hours, series: kinds.map((kind, i) => series(history, hours, kind, minutes(kind), quotaColors[(minutes(kind) ?? 0) >= 10080 ? 1 : i % 2])), latest: history.points.reduce<number | null>((at, p) => Math.max(at ?? 0, p.observedAt), null) }

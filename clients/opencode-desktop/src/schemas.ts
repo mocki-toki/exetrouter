@@ -33,7 +33,15 @@ export const ClientActivity = Schema.Struct({
   rows: Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, running: Schema.Number, lastRequestAt: Schema.NullOr(Schema.Number) })),
 })
 
+export const CapacityDemand = Schema.Struct({ lastHour: Schema.Number, previousHour: Schema.Number, inFlight: Schema.Number, complete: Schema.Boolean })
+export const CapacityProfile = Schema.Struct({
+  state: Schema.String, shortWindow: Schema.NullOr(Schema.Boolean), models: Schema.Array(Schema.String),
+  costs: Schema.Array(Schema.Struct({kind:Schema.String,perRequest:Schema.NullOr(Schema.Number),from:Schema.NullOr(Schema.Number),to:Schema.Number,requests:Schema.Number})),
+  resetEligibleUntil: Schema.NullOr(Schema.Number),
+})
+
 export const Account = Schema.Struct({
+  capacity: Schema.optionalKey(Schema.NullOr(CapacityProfile)),
   observationKey: Schema.NullOr(Schema.String),
   id: Schema.Number, label: Schema.String, enabled: Schema.NullOr(Schema.Boolean), locked: Schema.Boolean,
   windows: Schema.Array(Window), quotaStatus: Schema.String, cooldownSource: Schema.String, cooldownUntil: Schema.NullOr(Schema.Number),
@@ -46,6 +54,7 @@ export const Account = Schema.Struct({
 export type Account = typeof Account.Type
 
 export const Snapshot = Schema.Struct({
+  capacity: Schema.optionalKey(Schema.NullOr(CapacityDemand)),
   version: Schema.String,
   checkedAt: Schema.Number,
   configured: Schema.Boolean,
@@ -70,14 +79,18 @@ export const DashboardState = Schema.Struct({
 export type DashboardState = typeof DashboardState.Type
 
 export const UsageInput = Schema.Struct({
-  period: Schema.Literals(["day", "24h", "week", "month"]),
+  period: Schema.Literals(["24h", "7d", "30d", "90d"]),
   by: Schema.Literals(["total", "model", "user", "token"]),
+  before: Schema.optionalKey(Schema.Number),
 })
 export type UsageInput = typeof UsageInput.Type
+export const HistoryInput = Schema.Struct({ account: Schema.Number, period: Schema.Literals(["24h", "7d", "30d", "90d"]), before: Schema.optionalKey(Schema.Number) })
+export type HistoryInput = typeof HistoryInput.Type
 
 export const UsageRow = Schema.Struct({
   key: Schema.String, name: Schema.String, requests: Schema.Number, unknown: Schema.Number, partial: Schema.Number,
   input: Schema.NullOr(Schema.Number), output: Schema.NullOr(Schema.Number), total: Schema.NullOr(Schema.Number), cached: Schema.NullOr(Schema.Number),
+  usd: Schema.optionalKey(Schema.NullOr(Schema.Number)), unpriced: Schema.optionalKey(Schema.Number),
 })
 export const Usage = Schema.Struct({
   period: Schema.String,
@@ -91,6 +104,7 @@ export type Usage = typeof Usage.Type
 
 export const Tokens = Schema.Array(Schema.Struct({
   id: Schema.String, name: Schema.String, status: Schema.String,
+  fastMode: Schema.NullOr(Schema.Boolean),
   createdAt: Schema.NullOr(Schema.Number), expiresAt: Schema.NullOr(Schema.Number), lastUsedAt: Schema.NullOr(Schema.Number),
 }))
 export const Models = Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, context: Schema.NullOr(Schema.Number) }))
@@ -110,6 +124,8 @@ export const DesktopAction = Schema.Union([
   Schema.Struct({ action: Schema.Literal("token_create"), name: Schema.String, days: Schema.Number }),
   Schema.Struct({ action: Schema.Literal("token_rename"), id: Schema.String, name: Schema.String }),
   Schema.Struct({ action: Schema.Literals(["token_rotate", "token_revoke"]), id: Schema.String, confirmed: Schema.Boolean }),
+  Schema.Struct({ action: Schema.Literal("token_set_enabled"), id: Schema.String, enabled: Schema.Boolean, confirmed: Schema.Boolean }),
+  Schema.Struct({ action: Schema.Literal("token_fast_mode"), id: Schema.String, enabled: Schema.NullOr(Schema.Boolean), confirmed: Schema.Boolean }),
   Schema.Struct({ action: Schema.Literal("configure"), connection: Connection, confirmed: Schema.Boolean }),
   Schema.Struct({ action: Schema.Literal("login_start"), account: Schema.NullOr(Schema.Number) }),
   Schema.Struct({ action: Schema.Literal("account_disable"), account: Schema.Number, confirmed: Schema.Boolean }),

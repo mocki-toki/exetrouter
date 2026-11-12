@@ -19,6 +19,10 @@ pub struct UsageRow {
     pub cached_input_tokens: Option<i64>,
     pub reasoning_output_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
+    /// Standard OpenAI API equivalent in USD, not ChatGPT subscription spend.
+    pub estimated_usd: Option<f64>,
+    /// Requests omitted from the estimate due to missing counters or pricing.
+    pub unpriced_requests: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -361,6 +365,62 @@ fn report_in_zone(
     })
 }
 
+/// Fixed rolling windows, pageable with an exclusive Unix end timestamp.
+pub fn usage_range_for_user(
+    conn: &Connection,
+    user: i64,
+    period: &str,
+    by: Option<&str>,
+    timezone: Option<&str>,
+    before: Option<i64>,
+) -> Result<UsageReport> {
+    let seconds = match period {
+        "24h" => 86400,
+        "7d" => 7 * 86400,
+        "30d" => 30 * 86400,
+        "90d" => 90 * 86400,
+        _ => return Err("period must be 24h, 7d, 30d or 90d".into()),
+    };
+    let zone: Tz = timezone
+        .unwrap_or("Europe/Moscow")
+        .parse()
+        .map_err(|_| "invalid usage timezone")?;
+    let now = Utc::now().timestamp();
+    let to = before.unwrap_or(now);
+    if to < seconds || to > now {
+        return Err("invalid range end".into());
+    }
+    let from = to - seconds;
+    let group = match by {
+        None => "'all'",
+        Some("user") => "u.name",
+        Some("model") => "e.model",
+        Some("token") => "e.token_id",
+        _ => return Err("by must be user, model or token".into()),
+    };
+    let scope = (by == Some("token")).then_some(user);
+    let step = if period == "24h" { 3600 } else { 86400 };
+    let mut timeline = Vec::new();
+    let mut cursor = from;
+    while cursor < to {
+        let next = (cursor + step).min(to);
+        timeline.push(UsageBucket {
+            from_utc: cursor,
+            to_utc: next,
+            rows: aggregate(conn, group, cursor, next, scope)?,
+        });
+        cursor = next;
+    }
+    Ok(UsageReport {
+        period: period.into(),
+        timezone: zone.name().into(),
+        from_utc: from,
+        to_utc: to,
+        rows: aggregate(conn, group, from, to, scope)?,
+        timeline,
+    })
+}
+
 fn aggregate(
     conn: &Connection,
     group: &str,
@@ -379,13 +439,33 @@ fn aggregate(
     } else {
         "NULL"
     };
-    let sql = format!("SELECT {group},COUNT(*),
+    // Rates are standard API USD per million tokens (not subscription charges).
+    // Keep pricing at the request level: aggregating Astra and Sol tokens first
+    // would erase both the model rate and the >272K long-context tier.
+    let prices = "VALUES
+        ('gpt-6-astra',10.0,50.0,1.0,20.0,75.0,2.0),
+        ('gpt-6.1-sol',2.0,10.0,0.1,4.0,15.0,0.2),
+        ('gpt-6.1-terra',1.0,5.0,0.05,2.0,7.5,0.1),
+        ('gpt-6-luna',0.1,0.5,0.01,0.2,0.75,0.02),
+        ('gpt-6-sol',2.0,10.0,0.2,4.0,15.0,0.4),
+        ('gpt-5.6-sol',4.0,20.0,0.4,8.0,30.0,0.8),
+        ('gpt-5.6-terra',2.0,12.0,0.2,4.0,18.0,0.4),
+        ('gpt-5.6-luna',0.2,1.2,0.02,0.4,1.8,0.04),
+        ('gpt-5.5',5.0,30.0,0.5,10.0,45.0,1.0)";
+    let price = "CASE WHEN p.model IS NOT NULL AND e.input_tokens IS NOT NULL AND e.output_tokens IS NOT NULL
+        AND e.cached_input_tokens IS NOT NULL AND e.cached_input_tokens BETWEEN 0 AND e.input_tokens
+        THEN ((e.input_tokens-e.cached_input_tokens)*
+          CASE WHEN e.input_tokens>272000 THEN p.long_input ELSE p.short_input END
+          + e.cached_input_tokens*CASE WHEN e.input_tokens>272000 THEN p.long_cached ELSE p.short_cached END
+          + e.output_tokens*CASE WHEN e.input_tokens>272000 THEN p.long_output ELSE p.short_output END)/1000000.0 END";
+    let sql = format!("WITH p(model,short_input,short_output,short_cached,long_input,long_output,long_cached) AS ({prices}) SELECT {group},COUNT(*),
         SUM(CASE WHEN e.input_tokens IS NULL OR e.output_tokens IS NULL THEN 1 ELSE 0 END),
         SUM(e.input_tokens),SUM(e.output_tokens),SUM(e.cached_input_tokens),SUM(e.reasoning_output_tokens),
         SUM(CASE WHEN e.input_tokens IS NOT NULL AND e.output_tokens IS NOT NULL THEN 1 ELSE 0 END),
         SUM(CASE WHEN (e.input_tokens IS NULL) != (e.output_tokens IS NULL) THEN 1 ELSE 0 END),
-        {label}
+        {label},SUM({price}),SUM({price} IS NULL)
         FROM {source} e JOIN users u ON u.id=e.user_id
+        LEFT JOIN p ON p.model=e.model
         WHERE e.at_utc>=?1 AND e.at_utc<?2 AND (?3 IS NULL OR e.user_id=?3) GROUP BY {group} ORDER BY {group}");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
@@ -408,6 +488,8 @@ fn aggregate(
                 cached_input_tokens: r.get(5)?,
                 reasoning_output_tokens: r.get(6)?,
                 total_tokens: total,
+                estimated_usd: r.get(10)?,
+                unpriced_requests: r.get(11)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -418,6 +500,148 @@ fn aggregate(
 mod tests {
     use super::*;
     use crate::{create_token, create_user, init};
+
+    #[test]
+    fn rolling_pages_have_exact_exclusive_boundaries_and_private_token_rows() {
+        let db = Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let alice = create_user(&db, "alice").unwrap();
+        let bob = create_user(&db, "bob").unwrap();
+        let first = create_token(&db, &[1; 32], alice, "first", 1).unwrap();
+        let foreign = create_token(&db, &[1; 32], bob, "foreign", 1).unwrap();
+        let end = 1_700_000_000;
+        for (period, days, buckets) in [
+            ("24h", 1, 24),
+            ("7d", 7, 7),
+            ("30d", 30, 30),
+            ("90d", 90, 90),
+        ] {
+            db.execute("DELETE FROM usage_events", []).unwrap();
+            let duration = days * 86400;
+            for at in [
+                end - 2 * duration,
+                end - duration - 1,
+                end - duration,
+                end - 1,
+                end,
+            ] {
+                for (user, token) in [(alice, &first.token.id), (bob, &foreign.token.id)] {
+                    db.execute("INSERT INTO usage_events(at_utc,user_id,token_id,api_surface,model,status,input_tokens) VALUES(?1,?2,?3,'responses','test','done',10)",params![at,user,token]).unwrap();
+                }
+            }
+            let current = usage_range_for_user(
+                &db,
+                alice,
+                period,
+                Some("token"),
+                Some("America/New_York"),
+                Some(end),
+            )
+            .unwrap();
+            let previous = usage_range_for_user(
+                &db,
+                alice,
+                period,
+                Some("token"),
+                None,
+                Some(current.from_utc),
+            )
+            .unwrap();
+            assert_eq!(current.timeline.len(), buckets);
+            assert_eq!(previous.to_utc, current.from_utc);
+            assert_eq!(current.to_utc - current.from_utc, duration);
+            assert_eq!(current.rows.len(), 1);
+            assert_eq!(current.rows[0].name, first.token.id);
+            assert_eq!(current.rows[0].requests, 2);
+            assert_eq!(previous.rows[0].requests, 2);
+            assert_eq!(current.rows[0].output_tokens, None);
+            assert_eq!(current.rows[0].estimated_usd, None);
+            assert_eq!(current.rows[0].unpriced_requests, 2);
+            assert_eq!(
+                current
+                    .timeline
+                    .iter()
+                    .flat_map(|b| &b.rows)
+                    .map(|r| r.requests)
+                    .sum::<i64>(),
+                2
+            );
+            assert!(current
+                .timeline
+                .windows(2)
+                .all(|b| b[0].to_utc == b[1].from_utc));
+            let shared = usage_range_for_user(&db, alice, period, None, None, Some(end)).unwrap();
+            assert_eq!(shared.rows[0].requests, 4);
+        }
+        assert!(usage_range_for_user(&db, alice, "month", None, None, Some(end)).is_err());
+        assert!(usage_range_for_user(&db, alice, "24h", None, None, Some(1)).is_err());
+        assert!(usage_range_for_user(&db, alice, "24h", None, None, Some(i64::MAX)).is_err());
+    }
+
+    #[test]
+    fn usd_estimates_price_each_model_and_long_context_before_aggregation() {
+        let db = Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let user = create_user(&db, "alice").unwrap();
+        let token = create_token(&db, &[1; 32], user, "fixture", 1).unwrap();
+        for (model, input, cached, output) in [
+            (
+                "gpt-6-astra",
+                Some(1_000_000),
+                Some(500_000),
+                Some(1_000_000),
+            ),
+            (
+                "gpt-6.1-sol",
+                Some(1_000_000),
+                Some(500_000),
+                Some(1_000_000),
+            ),
+            ("gpt-6-luna", Some(100), Some(0), Some(100)),
+            ("gpt-image-2", Some(100), Some(0), Some(100)),
+            ("gpt-6-astra", None, None, None),
+        ] {
+            record_usage(
+                &db,
+                UsageEvent {
+                    user_id: user,
+                    token_id: &token.token.id,
+                    surface: "responses",
+                    model,
+                    status: "completed",
+                    input,
+                    output,
+                    cached_input: cached,
+                    reasoning_output: None,
+                },
+            )
+            .unwrap();
+        }
+        let report = usage_report_for_user(&db, user, "day", None, Some("UTC")).unwrap();
+        let row = &report.rows[0];
+        // Both million-input requests exceed the 272K long-context threshold.
+        // Astra: 500K*20 + 500K*2 + 1M*75 = $86;
+        // Sol: 500K*4 + 500K*0.2 + 1M*15 = $17.10.
+        let expected = 103.10 + 100.0 * (0.1 + 0.5) / 1_000_000.0;
+        assert!((row.estimated_usd.unwrap() - expected).abs() < 1e-9);
+        assert_eq!(row.unpriced_requests, 2);
+        let models = usage_report_for_user(&db, user, "day", Some("model"), Some("UTC")).unwrap();
+        let image = models
+            .rows
+            .iter()
+            .find(|r| r.name == "gpt-image-2")
+            .unwrap();
+        assert!(image.estimated_usd.is_none());
+        assert_eq!(image.unpriced_requests, 1);
+        let hourly = report
+            .timeline
+            .iter()
+            .flat_map(|b| &b.rows)
+            .find(|r| r.requests == 5)
+            .unwrap();
+        assert_eq!(hourly.unpriced_requests, 2);
+        assert!((hourly.estimated_usd.unwrap() - expected).abs() < 1e-9);
+    }
 
     #[test]
     fn token_grouping_is_private_and_retains_revoked_history() {

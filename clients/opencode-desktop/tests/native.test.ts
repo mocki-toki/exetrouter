@@ -20,6 +20,20 @@ test("normalizes both standalone and remote diagnostics without forwarding arbit
   assert.throws(() => snapshot({ ...value, schema_version: 99 }))
 })
 
+test("capacity metadata is optional, bounded, numeric and strips private fields",()=>{
+  const d=doctor(), c={state:"available",short_window:false,models:["synthetic"],costs:[{kind:"secondary",per_request:0.1,from_utc:1799996400,to_utc:1800000000,requests:10}],reset_eligible_until:null,credential:"private-body-marker"}
+  const raw={...d,capacity:{last_hour:10,previous_hour:8,in_flight:0,complete:true,secret:"private-body-marker"},quota_accounts:[{...d.quota_accounts[0],capacity:c}]}
+  const result=snapshot(raw)
+  assert.equal(result.capacity?.lastHour,10)
+  assert.equal(result.accounts[0].capacity?.costs[0].perRequest,0.1)
+  assert.doesNotMatch(JSON.stringify(result),/private-body-marker|credential/)
+  Schema.decodeUnknownSync(Snapshot)(result)
+  assert.equal(snapshot(d).capacity,null)
+  assert.equal(snapshot(d).accounts[0].capacity,null)
+  assert.throws(()=>snapshot({...raw,quota_accounts:[{...raw.quota_accounts[0],capacity:{...c,models:Array(257).fill("synthetic")}}]}))
+  assert.throws(()=>snapshot({...raw,quota_accounts:[{...raw.quota_accounts[0],capacity:{...c,costs:[{...c.costs[0],per_request:-1}]}}]}))
+})
+
 test("preserves nullable usage and hides token identifiers when a private label is unavailable", () => {
   const report = usageFixture()
   const result = usage(report, "model")
@@ -60,11 +74,28 @@ test("read-only bridge uses the selected profile and never invokes live limits o
   })
   const signal = new AbortController().signal
   await client.snapshot(signal)
-  await client.usage({ period: "week", by: "token" }, signal)
+  await client.usage({ period: "7d", by: "token" }, signal)
   assert.equal(calls.length, 2)
-  assert.deepEqual(calls.map((args) => args.slice(2)), [["doctor", "--json"], ["usage", "--period", "week", "--by", "token", "--json"]])
-  await assert.rejects(client.usage({ period: "week; command" as "week", by: "model" }, signal))
+  assert.deepEqual(calls.map((args) => args.slice(2)), [["doctor", "--json"], ["usage", "--period", "7d", "--by", "token", "--json"]])
+  await assert.rejects(client.usage({ period: "week; command" as "7d", by: "model" }, signal))
   assert.equal(calls.length, 2)
+})
+
+test("rolling usage and limit history forward exclusive ends only as validated passive arguments", async () => {
+  const calls: string[][] = []
+  const raw = doctor().quota_accounts[0].quota_history
+  const client = new NativeClient(options({}), async (_, args) => { calls.push([...args]); return args[0] === "quota-history" ? raw : usageFixture() })
+  const signal = new AbortController().signal
+  await client.usage({period:"90d",by:"total",before:raw.to_utc},signal)
+  await client.quotaHistory({account:1,period:"30d",before:raw.to_utc},signal)
+  assert.deepEqual(calls,[["usage","--period","90d","--before",String(raw.to_utc),"--json"],["quota-history","1","--period","30d","--before",String(raw.to_utc),"--json"]])
+  for (const before of [-1,NaN,Infinity,1.5,Number.MAX_SAFE_INTEGER+1]) {
+    await assert.rejects(client.usage({period:"24h",by:"model",before},signal))
+    await assert.rejects(client.quotaHistory({account:1,period:"7d",before},signal))
+  }
+  await assert.rejects(client.quotaHistory({account:1,period:"7d",before:raw.to_utc-1},signal))
+  await assert.rejects(client.quotaHistory({account:0,period:"7d"},signal))
+  assert.equal(calls.length,2,"invalid selections never launch subprocesses")
 })
 
 test("refuses excessive concurrent reads instead of building a queue", async () => {

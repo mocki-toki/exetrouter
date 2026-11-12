@@ -190,6 +190,7 @@ impl Fixture {
             upstream: Some(upstream.clone()),
             generations_per_user: 8,
             websockets_per_user: 8,
+            fast_mode: false,
         };
         let server = tokio::spawn(server::serve(db.clone(), vec![1; 32], config, async {
             let _ = stopped.await;
@@ -280,6 +281,7 @@ impl Fixture {
             upstream: Some(self.upstream.clone()),
             generations_per_user: 8,
             websockets_per_user: 8,
+            fast_mode: false,
         };
         self.server = tokio::spawn(server::serve(self.db.clone(), vec![1; 32], config, async {
             let _ = stopped.await;

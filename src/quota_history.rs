@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 pub const HOURS: i64 = 168;
+pub const RETENTION_HOURS: i64 = 365 * 24;
 pub const INTERVAL: i64 = 3600;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,7 +26,7 @@ pub struct History {
 }
 
 pub(crate) fn prune(conn: &Connection, now: i64) -> Result<()> {
-    let from = (now.div_euclid(INTERVAL) - HOURS + 1).max(0) * INTERVAL;
+    let from = (now.div_euclid(INTERVAL) - RETENTION_HOURS + 1).max(0) * INTERVAL;
     conn.execute("DELETE FROM oauth_quota_history WHERE hour<?1", [from])?;
     Ok(())
 }
@@ -33,9 +34,43 @@ pub(crate) fn prune(conn: &Connection, now: i64) -> Result<()> {
 pub(crate) fn snapshot(conn: &Connection, account: i64, now: i64) -> Result<History> {
     let hour = now.max(0).div_euclid(INTERVAL) * INTERVAL;
     let from = (hour - (HOURS - 1) * INTERVAL).max(0);
-    let mut stmt = conn.prepare("SELECT kind,hour,observed_at,used_percent,window_minutes,reset_at FROM oauth_quota_history WHERE account_id=?1 AND hour>=?2 AND hour<=?3 AND observed_at<=?4 ORDER BY hour,kind LIMIT 336")?;
+    read_range(conn, account, from, hour + INTERVAL, now)
+}
+
+pub fn range(
+    conn: &Connection,
+    account: i64,
+    period: &str,
+    before: Option<i64>,
+    now: i64,
+) -> Result<History> {
+    let hours = match period {
+        "24h" => 24,
+        "7d" => 168,
+        "30d" => 720,
+        "90d" => 2160,
+        _ => return Err("invalid history period".into()),
+    };
+    let latest = now.div_euclid(INTERVAL) * INTERVAL + INTERVAL;
+    let to = before.unwrap_or(latest);
+    if to < hours * INTERVAL || to > latest || to % INTERVAL != 0 {
+        return Err("invalid history end".into());
+    }
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM oauth_accounts WHERE id=?1)",
+        [account],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Err("account not found".into());
+    }
+    read_range(conn, account, to - hours * INTERVAL, to, now)
+}
+
+fn read_range(conn: &Connection, account: i64, from: i64, to: i64, now: i64) -> Result<History> {
+    let mut stmt = conn.prepare("SELECT kind,hour,observed_at,used_percent,window_minutes,reset_at FROM oauth_quota_history WHERE account_id=?1 AND hour>=?2 AND hour<?3 AND observed_at<=?4 ORDER BY hour,kind LIMIT 4320")?;
     let points = stmt
-        .query_map(params![account, from, hour, now], |row| {
+        .query_map(params![account, from, to, now], |row| {
             Ok(Point {
                 kind: row.get(0)?,
                 hour: row.get(1)?,
@@ -48,7 +83,7 @@ pub(crate) fn snapshot(conn: &Connection, account: i64, now: i64) -> Result<Hist
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(History {
         from_utc: from,
-        to_utc: hour + INTERVAL,
+        to_utc: to,
         interval_seconds: INTERVAL,
         points,
     })
@@ -129,8 +164,9 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM oauth_quota_history", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            336
+            400
         );
+        conn.execute_batch("ALTER TABLE access_tokens DROP COLUMN fast_mode; ALTER TABLE access_tokens DROP COLUMN disabled;").unwrap();
         conn.pragma_update(None, "user_version", 13).unwrap();
         crate::init(&conn).unwrap();
         assert_eq!(snapshot(&conn, 1, at).unwrap().points.len(), 336);
@@ -157,7 +193,7 @@ mod tests {
             .unwrap()
             .points
             .is_empty());
-        prune(&conn, at + HOURS * INTERVAL).unwrap();
+        prune(&conn, at + RETENTION_HOURS * INTERVAL).unwrap();
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM oauth_quota_history", [], |r| r
                 .get::<_, i64>(0))
@@ -191,7 +227,7 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM oauth_quota_history", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            336
+            400
         );
         let absent = crate::quota::Observation::default()
             .with_live_absent_windows(vec!["primary", "secondary"]);
@@ -205,5 +241,59 @@ mod tests {
             .unwrap()
             .windows
             .is_empty());
+    }
+
+    #[test]
+    fn pageable_history_preserves_old_observations_and_gaps_without_inference() {
+        let mut conn = database();
+        let base = chrono::Utc::now().timestamp() / INTERVAL * INTERVAL;
+        save(&mut conn, base - 100 * 86400, 1, 0, 40.0);
+        save(&mut conn, base - 10 * 86400, 2, 0, 60.0);
+        save(&mut conn, base, 3, 0, 80.0);
+        let latest = range(&conn, 1, "90d", None, base).unwrap();
+        assert_eq!(latest.points.len(), 4);
+        assert_eq!(latest.to_utc - latest.from_utc, 90 * 86400);
+        let previous = range(&conn, 1, "90d", Some(latest.from_utc), base).unwrap();
+        assert_eq!(previous.points.len(), 2);
+        assert_eq!(previous.to_utc, latest.from_utc);
+        assert_eq!(previous.points[0].hour, base - 100 * 86400);
+        assert_eq!(snapshot(&conn, 1, base).unwrap().points.len(), 2);
+        for period in ["24h", "7d", "30d", "90d"] {
+            assert!(range(&conn, 1, period, None, base).is_ok());
+        }
+        assert!(range(&conn, 1, "day", None, base).is_err());
+        assert!(range(&conn, 1, "24h", Some(base + 1), base).is_err());
+        assert!(range(&conn, 1, "24h", Some(base + 2 * INTERVAL), base).is_err());
+        assert!(range(&conn, 2, "24h", None, base).is_err());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn per_window_year_bound_survives_backward_clock() {
+        let mut conn = database();
+        let base = chrono::Utc::now().timestamp() / INTERVAL * INTERVAL;
+        conn.execute("WITH RECURSIVE hours(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM hours WHERE n<?2) INSERT INTO oauth_quota_history(account_id,kind,hour,observed_at,used_percent,request_order) SELECT 1,'primary',?1-n*3600,?1-n*3600,20,1 FROM hours",params![base,RETENTION_HOURS+5]).unwrap();
+        save(&mut conn, base - INTERVAL, 2, 0, 30.0);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM oauth_quota_history WHERE kind='primary'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            RETENTION_HOURS
+        );
+        prune(&conn, base + RETENTION_HOURS * INTERVAL).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM oauth_quota_history", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 }

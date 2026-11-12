@@ -178,6 +178,7 @@ fn annotate_at(
             }
         }
     }
+    crate::capacity::annotate(conn, value, now)?;
     Ok(())
 }
 

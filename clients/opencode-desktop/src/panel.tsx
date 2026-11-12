@@ -1,4 +1,4 @@
-import { For, Show, batch, createEffect, createMemo, createSignal, createUniqueId, onCleanup } from "solid-js"
+import { ErrorBoundary, For, Show, batch, createEffect, createMemo, createSignal, createUniqueId, onCleanup } from "solid-js"
 import { createLatest } from "@opencode/plugin/gui"
 import { Dashboard } from "./contract"
 import { Forecasts } from "./dashboard"
@@ -44,7 +44,7 @@ export function DashboardView(props: { remote: boolean }) {
     <For each={tabs}>{(name) => <section class="exr-pane" data-scrollable role="tabpanel" tabIndex={0} hidden={tab() !== name} id={`${id}-view-${name}`} aria-labelledby={`${id}-tab-${name}`}>
       <Show when={visited().has(name)}>
         <Show when={name === "Overview"}><Overview now={now()} forecasts={forecasts} /></Show>
-        <Show when={name === "Usage"}><UsageView now={now()} revision={tab() === "Usage" ? revision() : undefined} /></Show>
+        <Show when={name === "Usage"}><ErrorBoundary fallback={(_, reset) => <div class="exr-view"><Notice tone="warning">Could not display usage. Other dashboard views remain available.</Notice><ctx.ui.Button onClick={reset}>Retry usage</ctx.ui.Button></div>}><UsageView now={now()} revision={tab() === "Usage" ? revision() : undefined} /></ErrorBoundary></Show>
         <Show when={name === "Tokens"}><TokensView now={now()} revision={tab() === "Tokens" ? revision() : undefined} /></Show>
         <Show when={name === "Models"}><ModelsView revision={tab() === "Models" ? revision() : undefined} /></Show>
         <Show when={name === "Settings"}><SettingsView profile={profile} refreshProfile={() => setProfileRevision((n) => n + 1)} /></Show>

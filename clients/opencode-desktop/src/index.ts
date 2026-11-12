@@ -1,6 +1,4 @@
 import { Integration, Plugin, Provider } from "@opencode/plugin"
-import { randomUUID } from "node:crypto"
-import { enabled, instructions } from "./image-inline.mjs"
 import { Catalog, providerID, providerPackage } from "./catalog"
 import { options } from "./options"
 import { Accounts, ExetRouter } from "./rpc"
@@ -10,10 +8,6 @@ export default Plugin.define({
   id: "exetrouter",
   async setup(ctx) {
     const config = options(ctx.options)
-    await ctx.session.hook("context", (event) => {
-      if (enabled(event.tools)) event.system.push({ type: "text", text: instructions +
-        `\nFor image calls in this response use reference prefix ${randomUUID()}, followed by -1, -2, etc. Do not pass the reference to the tool.` })
-    })
     await ctx.integration.transform((editor) => {
       editor.method.update({ integrationID: providerID, method: { type: "key", label: "ExetRouter token" } })
       editor.method.update({ integrationID: providerID, method: { type: "env", names: ["EXETROUTER_TOKEN"] } })

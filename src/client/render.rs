@@ -92,10 +92,16 @@ pub(super) fn response(kind: &str, v: &Value) -> String {
             let rows = v.as_array().into_iter().flatten().map(|t| vec![field(t,"id"),field(t,"name"), token_status(t),date(&t["expires_at"]),date(&t["last_used_at"])]).collect::<Vec<_>>();
             format!("Your API tokens\n\n{}",table(&["ID","NAME","STATUS","EXPIRES","LAST USED"], &rows))
         }
-        "token" => format!("Token       {}\nName        {}\nStatus      {}\nCreated     {}\nExpires     {}\nLast used   {}\n",field(v,"id"),field(v,"name"),token_status(v),date(&v["created_at"]),date(&v["expires_at"]),date(&v["last_used_at"])),
+        "token" => format!("Token       {}\nName        {}\nStatus      {}\nFast mode   {}\nCreated     {}\nExpires     {}\nLast used   {}\n",field(v,"id"),field(v,"name"),token_status(v),match v["fast_mode"].as_bool() {Some(true)=>"on",Some(false)=>"off",None=>"inherit"},date(&v["created_at"]),date(&v["expires_at"]),date(&v["last_used_at"])),
         "revoke" => if v["revoked"].as_bool()==Some(true) { "Token revoked.\n".into() } else { "Token was already revoked or does not exist.\n".into() },
+        "fast_mode" => format!("Token Fast mode: {}.\n", match v["fast_mode"].as_bool() {Some(true)=>"on",Some(false)=>"off",None=>"inherit"}),
+        "token_enabled" => format!("Token {}.\n",if v["enabled"]==true {"enabled"} else {"disabled"}),
         "rename" => "Token label saved.\n".into(),
         "usage" => usage(v),
+        "quota_history" => {
+            let rows=v["points"].as_array().into_iter().flatten().map(|p|vec![date(&p["hour"]),field(p,"kind"),percent(&p["used_percent"]),date(&p["observed_at"])]).collect::<Vec<_>>();
+            format!("Subscription history\n{} → {}\n\n{}",date(&v["from_utc"]),date(&v["to_utc"]),table(&["HOUR","WINDOW","USED","OBSERVED"],&rows))
+        },
         "doctor" => format!("Server       Connected\nRouting      {}\nOAuth        {} active accounts · {} require login\nModels       {} · {}\nGenerations  {} active / {} per user\nWebSockets   {} active / {} per user",routing(v),field(&v["oauth"],"active_accounts"),field(&v["oauth"],"reauth_required_accounts"),field(&v["catalog"],"models"),catalog_status(v),field(&v["limits"]["generations"],"active_for_user"),field(&v["limits"]["generations"],"per_user_limit"),field(&v["limits"]["websockets"],"active_for_user"),field(&v["limits"]["websockets"],"per_user_limit")),
         _ => "Request completed.\n".into(),
     }
@@ -131,7 +137,10 @@ fn usage(v: &Value) -> String {
         "Usage · {}\n{} → {}\nLocal time · {}\n\n",
         match v["period"].as_str() {
             Some("day") => "Today".into(),
-            Some("24h") => "Last 24 hours".into(),
+            Some("24h") => "24 hours".into(),
+            Some("7d") => "7 days".into(),
+            Some("30d") => "30 days".into(),
+            Some("90d") => "90 days".into(),
             Some("week") => "This week".into(),
             Some("month") => "This month".into(),
             _ => field(v, "period"),
@@ -240,6 +249,8 @@ fn token_status(v: &Value) -> String {
         .is_some_and(|at| at <= chrono::Utc::now().timestamp())
     {
         "expired"
+    } else if v["disabled"] == true {
+        "disabled"
     } else {
         "active"
     }

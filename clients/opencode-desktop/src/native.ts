@@ -4,7 +4,7 @@ import { constants } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import type { Options } from "./options"
-import type { Snapshot, Usage, UsageInput, Profile, Tokens, Models, Update, QuotaHistory } from "./schemas"
+import type { Snapshot, Usage, UsageInput, HistoryInput, Profile, Tokens, Models, Update, QuotaHistory, CapacityProfile } from "./schemas"
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid exr report.")
@@ -29,9 +29,9 @@ function list(value: unknown, max: number): unknown[] {
 export function quotaHistory(value: unknown): QuotaHistory | null {
   if (value == null) return null
   const h = record(value), from = number(h.from_utc), to = number(h.to_utc)
-  if (h.interval_seconds !== 3600 || from % 3600 || to % 3600 || to <= from || to - from > 168 * 3600) throw new Error("Invalid quota history.")
+  if (h.interval_seconds !== 3600 || from % 3600 || to % 3600 || to <= from || to - from > 2160 * 3600) throw new Error("Invalid quota history.")
   const seen = new Set<string>()
-  const points = list(h.points, 336).map((entry) => {
+  const points = list(h.points, 4320).map((entry) => {
     const p = record(entry), hour = number(p.hour), observedAt = number(p.observed_at), kind = text(p.kind, 16)
     const key = `${kind}:${hour}`
     if (!["primary", "secondary"].includes(kind) || hour % 3600 || hour < from || hour >= to || observedAt < hour || observedAt >= hour + 3600 || seen.has(key)) throw new Error("Invalid quota history.")
@@ -39,6 +39,17 @@ export function quotaHistory(value: unknown): QuotaHistory | null {
     return { kind, hour, observedAt, used: number(p.used_percent), minutes: nullable(p.window_minutes), resetAt: nullable(p.reset_at) }
   }).sort((a, b) => a.hour - b.hour)
   return { from, to, points }
+}
+
+function capacityProfile(value: unknown): typeof CapacityProfile.Type | null {
+  if (value == null) return null
+  const p=record(value)
+  const state=text(p.state,32)
+  if (!["available","disabled","reauth_required","unconfigured","backoff","refresh_due","catalog_unavailable","cooldown"].includes(state)) throw new Error("Invalid capacity metadata.")
+  return {state,shortWindow: typeof p.short_window === "boolean" ? p.short_window : null,
+    models:list(p.models,256).map((m)=>text(m,256)), resetEligibleUntil:nullable(p.reset_eligible_until),
+    costs:list(p.costs,2).map((entry)=>{ const c=record(entry), perRequest=nullable(c.per_request); if(perRequest!==null&&perRequest<=0) throw new Error("Invalid capacity metadata."); return {kind:text(c.kind,16),perRequest,from:nullable(c.from_utc),to:number(c.to_utc),requests:number(c.requests)} }),
+  }
 }
 
 export function snapshot(value: unknown): Snapshot {
@@ -53,6 +64,7 @@ export function snapshot(value: unknown): Snapshot {
     return { active: nullable(row.active_for_user), limit: nullable(row.per_user_limit) }
   }
   return {
+    capacity: report.capacity == null ? null : {lastHour:number(record(report.capacity).last_hour),previousHour:number(record(report.capacity).previous_hour),inFlight:number(record(report.capacity).in_flight),complete:record(report.capacity).complete===true},
     version: text(report.version, 128),
     checkedAt: number(report.checked_at),
     configured: report.configuration_status === "configured",
@@ -68,6 +80,7 @@ export function snapshot(value: unknown): Snapshot {
       const preference = account.preference ? record(account.preference) : undefined
       const routing = object(account.routing), credits = object(account.reset_credits), clients = object(account.clients)
       return {
+        capacity: capacityProfile(account.capacity),
         id: number(account.id ?? 0),
         observationKey: typeof account.observation_key === "string" && /^[a-f0-9]{64}$/.test(account.observation_key) ? account.observation_key : null,
         label: text(account.label),
@@ -112,6 +125,7 @@ export function usage(value: unknown, by: UsageInput["by"]): Usage {
       key: text(r.name), name: by === "token" ? string(r.display_name, "Label unavailable") : string(r.display_name ?? r.name),
       requests: number(r.requests), unknown: number(r.unknown_usage), partial: number(r.partial_usage),
       input: nullable(r.input_tokens), output: nullable(r.output_tokens), total: nullable(r.total_tokens), cached: nullable(r.cached_input_tokens),
+      usd: nullable(r.estimated_usd), unpriced: number(r.unpriced_requests ?? r.requests),
     }
   }
   return {
@@ -126,7 +140,8 @@ export function tokens(value: unknown): typeof Tokens.Type {
   return list(value, 16384).map((entry) => {
     const row = record(entry)
     const expires = nullable(row.expires_at)
-    return { id: text(row.id), name: string(row.name, "Label unavailable"), status: row.revoked_at != null ? "Revoked" : expires !== null && expires <= Date.now() / 1000 ? "Expired" : "Active",
+    return { id: text(row.id), name: string(row.name, "Label unavailable"), status: row.revoked_at != null ? "Revoked" : expires !== null && expires <= Date.now() / 1000 ? "Expired" : row.disabled === true ? "Disabled" : "Active",
+      fastMode: row.fast_mode === true ? true : row.fast_mode === false ? false : null,
       createdAt: nullable(row.created_at), expiresAt: expires, lastUsedAt: nullable(row.last_used_at) }
   })
 }
@@ -221,10 +236,17 @@ export class NativeClient {
   }
 
   async usage(input: UsageInput, signal: AbortSignal): Promise<Usage> {
-    if (!["day", "24h", "week", "month"].includes(input.period) || !["total", "model", "user", "token"].includes(input.by)) {
+    if (!["24h", "7d", "30d", "90d"].includes(input.period) || !["total", "model", "user", "token"].includes(input.by) || input.before !== undefined && (!Number.isSafeInteger(input.before) || input.before <= 0)) {
       throw new Error("Invalid usage selection.")
     }
-    return usage(await this.read(["usage", "--period", input.period, ...(input.by === "total" ? [] : ["--by", input.by])], signal), input.by)
+    return usage(await this.read(["usage", "--period", input.period, ...(input.by === "total" ? [] : ["--by", input.by]), ...(input.before === undefined ? [] : ["--before", String(input.before)])], signal), input.by)
+  }
+
+  async quotaHistory(input: HistoryInput, signal: AbortSignal): Promise<QuotaHistory> {
+    if (!Number.isSafeInteger(input.account) || input.account <= 0 || !["24h", "7d", "30d", "90d"].includes(input.period) || input.before !== undefined && (!Number.isSafeInteger(input.before) || input.before <= 0 || input.before % 3600 !== 0)) throw new Error("Invalid history selection.")
+    const history = quotaHistory(await this.read(["quota-history", String(input.account), "--period", input.period, ...(input.before === undefined ? [] : ["--before", String(input.before)])], signal))
+    if (!history) throw new Error("Quota history unavailable.")
+    return history
   }
 
   async tokens(signal: AbortSignal): Promise<typeof Tokens.Type> { return tokens(await this.read(["token", "list"], signal)) }

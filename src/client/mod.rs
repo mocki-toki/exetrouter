@@ -89,12 +89,23 @@ enum CommandLine {
     /// Show upstream subscription windows for each account.
     #[command(alias = "quota")]
     Limits,
-    /// Show usage totals for today, the last 24 hours, this week or this month.
+    /// Show usage totals for calendar periods or rolling 24h/7d/30d/90d windows.
     Usage {
-        #[arg(long, default_value = "day", value_parser = ["day", "24h", "week", "month"])]
+        #[arg(long, default_value = "day", value_parser = ["day", "24h", "week", "month", "7d", "30d", "90d"])]
         period: String,
         #[arg(long, value_parser = ["user", "model", "token"])]
         by: Option<String>,
+        /// Exclusive Unix end timestamp for an earlier rolling window.
+        #[arg(long)]
+        before: Option<i64>,
+    },
+    /// Read recorded hourly subscription history without refreshing upstream.
+    QuotaHistory {
+        account: i64,
+        #[arg(long, default_value = "7d", value_parser = ["24h", "7d", "30d", "90d"])]
+        period: String,
+        #[arg(long)]
+        before: Option<i64>,
     },
     /// List models, or export client metadata with --json.
     Models {
@@ -160,6 +171,12 @@ enum TokenCommand {
     Show { id: String },
     /// Rename a token's encrypted label without changing its secret.
     Rename { id: String, name: String },
+    /// Set Fast mode for this token (on, off, or inherit the server setting).
+    FastMode { id: String, mode: String },
+    /// Temporarily disable a token without changing its secret.
+    Disable { id: String },
+    /// Re-enable a temporarily disabled token with the same secret.
+    Enable { id: String },
     /// Replace a token; the old secret stops working immediately.
     Rotate { id: String },
     /// Disable a token, with confirmation unless --yes is supplied.
@@ -370,10 +387,33 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
         None
     };
     let request = match &args.command {
-        CommandLine::Usage { period, by } => ControlRequest::Usage {
+        CommandLine::Usage { period, by, before } => {
+            if before.is_some() || matches!(period.as_str(), "7d" | "30d" | "90d") {
+                if !matches!(period.as_str(), "24h" | "7d" | "30d" | "90d") {
+                    return Err("--before requires a rolling period".into());
+                }
+                ControlRequest::UsageRange {
+                    period: period.clone(),
+                    by: by.clone(),
+                    timezone: Some(render::system_timezone()),
+                    before: *before,
+                }
+            } else {
+                ControlRequest::Usage {
+                    period: period.clone(),
+                    by: by.clone(),
+                    timezone: Some(render::system_timezone()),
+                }
+            }
+        }
+        CommandLine::QuotaHistory {
+            account,
+            period,
+            before,
+        } => ControlRequest::QuotaHistory {
+            account: *account,
             period: period.clone(),
-            by: by.clone(),
-            timezone: Some(render::system_timezone()),
+            before: *before,
         },
         CommandLine::Models { .. } => ControlRequest::Models,
         CommandLine::Update { .. }
@@ -397,6 +437,23 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
             TokenCommand::Rename { id, name } => ControlRequest::TokenRename {
                 id: id.clone(),
                 name: name.clone(),
+            },
+            TokenCommand::FastMode { id, mode } => ControlRequest::TokenFastMode {
+                id: id.clone(),
+                enabled: match mode.as_str() {
+                    "on" => Some(true),
+                    "off" => Some(false),
+                    "inherit" => None,
+                    _ => return Err("Fast mode must be on, off, or inherit".into()),
+                },
+            },
+            TokenCommand::Disable { id } => ControlRequest::TokenSetEnabled {
+                id: id.clone(),
+                enabled: false,
+            },
+            TokenCommand::Enable { id } => ControlRequest::TokenSetEnabled {
+                id: id.clone(),
+                enabled: true,
             },
             TokenCommand::Rotate { id } => ControlRequest::TokenRotate { id: id.clone() },
             TokenCommand::Revoke { id, yes } => {
@@ -726,12 +783,15 @@ fn request_kind(command: &CommandLine) -> String {
     match command {
         CommandLine::Models { .. } => "models",
         CommandLine::Usage { .. } => "usage",
+        CommandLine::QuotaHistory { .. } => "quota_history",
         CommandLine::Token { command } => match command.as_ref().expect("normalized token command")
         {
             TokenCommand::List => "tokens",
             TokenCommand::Show { .. } => "token",
             TokenCommand::Revoke { .. } => "revoke",
             TokenCommand::Rename { .. } => "rename",
+            TokenCommand::FastMode { .. } => "fast_mode",
+            TokenCommand::Disable { .. } | TokenCommand::Enable { .. } => "token_enabled",
             _ => "secret",
         },
         _ => "doctor",

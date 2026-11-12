@@ -12,6 +12,8 @@ pub struct Config {
     pub control_socket: Option<PathBuf>,
     pub gateway_uid: Option<u32>,
     pub listen: Option<std::net::SocketAddr>,
+    #[serde(default)]
+    pub fast_mode: bool,
 }
 
 pub fn path(explicit: Option<PathBuf>) -> Result<PathBuf> {

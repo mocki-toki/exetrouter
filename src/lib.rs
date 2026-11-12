@@ -5,6 +5,7 @@ mod affinity;
 mod auth;
 pub mod backup;
 mod cache;
+pub mod capacity;
 pub mod catalog;
 mod chat;
 pub mod client;
@@ -44,6 +45,9 @@ pub struct TokenInfo {
     pub expires_at: i64,
     pub last_used_at: Option<i64>,
     pub revoked_at: Option<i64>,
+    /// None inherits the global server policy.
+    pub fast_mode: Option<bool>,
+    pub disabled: bool,
 }
 
 #[derive(Debug, Serialize)]

@@ -46,12 +46,18 @@ exr usage --period 24h
 exr usage --period week --by user
 exr usage --period week --by token
 exr usage --period month --by model --json
+exr usage --period 90d --by model --json
+exr usage --period 7d --before 1731283200 --json # Earlier rolling interval
+exr quota-history 1 --period 30d --json         # Recorded metadata only
 exr account disable 1 --yes  # Standalone only; reauthorize to enable again
 exr limits                  # Per-account upstream subscription windows
 exr limits --json            # Array of live account limits and reset credits, labeled by email
 exr tokens                  # List your tokens
 exr token list --json        # Same list, for scripts
 exr token show tok_...
+exr token fast-mode tok_... off    # on/off/inherit server default
+exr token disable tok_...        # Reversible; secret remains unchanged
+exr token enable tok_...
 exr tokens rename tok_... "Work laptop"
 exr token create --name macbook --expires-days 90
 exr token rotate tok_...
@@ -60,6 +66,17 @@ exr token revoke tok_... --yes
 ```
 
 `tokens` aliases `token`; both list tokens when no subcommand is given. `quota` aliases `limits`. Token expiration is 1–365 days, default 90. Creation and rotation require terminal stdin/stdout and reject `--json`; rotation revokes the old token immediately.
+
+The OpenCode Desktop Usage tab also plots a [standard API USD equivalent](usage-pricing.md) beside tokens and requests. Each model is priced before aggregation, so Astra and Sol are not treated as equally expensive per token. Unknown and unpriced requests remain visible as incomplete estimates; this is not a ChatGPT subscription bill.
+
+Desktop Usage and Limit history offer **24 hours, 7 days, 30 days and 90 days**
+with previous/next interval arrows. The CLI retains calendar periods for existing
+scripts and also accepts rolling `7d`, `30d`, `90d`; `--before` selects an exclusive
+Unix end for rolling windows only. Their buckets are fixed hours/days, not local
+calendar days. Token rows show metadata inline, with status and Fast badges next
+to each other. The action menu uses **Fast mode → Default / Allow / Block**;
+Default inherits the server setting. Disable/Enable is reversible and preserves
+the token secret; Revoke is permanent.
 
 Model exports require `--json`. OpenCode exports use the standalone address or saved remote `api_url`; `--base-url` overrides one export. URLs must use HTTP(S), end in `/v1`, and have no credentials, query or fragment. `--model exetrouter/gpt-5.6-sol` selects an available model without changing the exported list. See [client setup](compatibility.md#opencode-setup) and [export examples](model-export-examples.md).
 

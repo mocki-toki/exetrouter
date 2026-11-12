@@ -28,6 +28,8 @@ case "$request" in
   *'"action":"doctor"'*|*'"action":"limits"'*) printf '%s' '{"ok":true,"result":{"capabilities":{"account_routing_rules":1},"quota_accounts":[{"id":1,"label":"test@example.com","preference":{"enabled":true,"priority":1,"locked":false,"rules":{"switch_at":null,"switch_at_short":null,"switch_at_weekly":null},"settings":{}},"reset_credits":{"available_count":2,"credits":[]},"quota":{"status":"current","windows":[{"kind":"primary","window_minutes":480,"used_percent":20,"remaining_percent":80,"status":"current"},{"kind":"secondary","window_minutes":10080,"used_percent":30,"remaining_percent":70,"status":"stale"}]}}]}}' ;;
   *'"action":"usage"'*'"by":"token"'*) printf '%s' '{"ok":true,"result":{"period":"day","timezone":"Europe/Moscow","rows":[{"name":"tok_test","display_name":"Laptop","requests":3,"input_tokens":10,"output_tokens":2}]}}' ;;
   *'"action":"usage"'*) printf '%s' '{"ok":true,"result":{"period":"day","timezone":"Europe/Moscow","rows":[]}}' ;;
+  *'"action":"usage_range"'*) printf '%s' '{"ok":true,"result":{"period":"7d","timezone":"UTC","rows":[],"timeline":[]}}' ;;
+  *'"action":"quota_history"'*) printf '%s' '{"ok":true,"result":{"from_utc":1699394400,"to_utc":1699999200,"interval_seconds":3600,"points":[]}}' ;;
   *'"action":"token_create"'*) printf '%s' '{"ok":true,"result":{"token":{"id":"tok_created"},"secret":"SYNTHETIC_TEST_SECRET"}}' ;;
   *'"action":"token_rotate"'*) printf '%s' '{"ok":true,"result":{"token":{"id":"tok_rotated"},"secret":"SYNTHETIC_ROTATED_SECRET"}}' ;;
   *'"action":"token_revoke"'*) printf '%s' '{"ok":true,"result":{"revoked":true}}' ;;
@@ -102,6 +104,68 @@ cat > "$EXETROUTER_TEST_CLIPBOARD"
         client
     }
 }
+#[test]
+fn rolling_cli_preserves_exclusive_ends_and_keeps_latest_24h_compatible() {
+    let client = Client::configured();
+    for args in [
+        vec![
+            "usage",
+            "--period",
+            "7d",
+            "--before",
+            "1699999200",
+            "--json",
+        ],
+        vec![
+            "quota-history",
+            "1",
+            "--period",
+            "90d",
+            "--before",
+            "1699999200",
+            "--json",
+        ],
+        vec!["usage", "--period", "24h", "--json"],
+    ] {
+        let result = client.run(&args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    let requests: Vec<serde_json::Value> = requests
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert_eq!(requests[0]["action"], "usage_range");
+    assert_eq!(requests[0]["before"], 1699999200_i64);
+    assert_eq!(requests[1]["action"], "quota_history");
+    assert_eq!(requests[1]["account"], 1);
+    assert_eq!(requests[1]["period"], "90d");
+    assert_eq!(requests[1]["before"], 1699999200_i64);
+    assert_eq!(requests[2]["action"], "usage");
+    assert!(!client
+        .run(&[
+            "usage",
+            "--period",
+            "month",
+            "--before",
+            "1699999200",
+            "--json"
+        ])
+        .status
+        .success());
+    assert_eq!(
+        fs::read_to_string(client.dir.path().join("requests.log"))
+            .unwrap()
+            .lines()
+            .count(),
+        3
+    );
+}
+
 #[test]
 fn desktop_stdio_uses_native_mutations_and_never_returns_secrets_or_reissues_for_copy() {
     use std::io::{BufRead, BufReader, Write};

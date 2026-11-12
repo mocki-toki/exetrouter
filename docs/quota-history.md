@@ -2,12 +2,13 @@
 
 Account details in the native TUI and OpenCode Desktop show short and weekly
 subscription windows together, with separate colors, a shared 0–100% quota-left
-axis and a seven-day hourly timeline. The web chart supports pointer/keyboard
-selection; TUI details use Left/Right and Home/End, with Up/Down for scrolling.
+axis. The native TUI shows seven days; OpenCode Desktop offers rolling **24 hours,
+7 days, 30 days and 90 days**, with arrows to earlier/later intervals. The web chart
+supports pointer/keyboard selection; TUI details use Left/Right and Home/End, with Up/Down for scrolling.
 Lines and cursor values show only the remaining percentage: a full window is
 100%, an exhausted window is 0%, and quota recovery moves the line upward.
 Storage keeps upstream used percentages; display converts them without changing
-the collected history, retention or routing behavior.
+the collected percentages or routing behavior.
 Usage charts use the same quiet containers, fine lines, distinct identity-based
 colors and interval values (Shift+Left/Right and Home/End in the TUI, without
 changing Left/Right tab navigation).
@@ -36,6 +37,16 @@ contents or credentials are retained in history. Capability
 `hourly_quota_history: 1` identifies collection support. Ordinary CLI reports
 remain text-only; JSON is the automation interface.
 
+`exr quota-history ACCOUNT --period 90d --json` reads a wider interval through the
+authenticated management channel, without refreshing upstream. `--before UNIX`
+sets its exclusive, hour-aligned end; subtract the selected duration to page back.
+Each response contains at most 90 days / 4,320 points. Desktop paging needs updated
+native and server binaries; an older router's seven-day snapshot remains visible.
+Numeric observations are retained for at most **365 days**, up to 8,760 rows per
+account/window. Previously pruned hours cannot be recovered; retention expands
+only as new observations arrive. No additional schema migration is needed for
+the longer retention. Rolling windows have fixed durations even across DST.
+
 ## Schema 13 to 14: reviewed migration and rollback
 
 Migration 014 adds only `oauth_quota_history` and an hourly pruning index.
@@ -43,7 +54,7 @@ Existing credentials/generations, policies, limits, cooldown/order fences,
 usage, reset/activation ledgers, search affinity and keys are untouched. Each
 accepted quota write stores its history in the same transaction and under the
 same generation/ordering/absence fences. Rejected or late observations cannot
-overwrite history. At most 168 rows per account/kind survive a write, even after
+overwrite history. At most 8,760 rows per account/kind survive a write, even after
 a backward clock adjustment. Old hours are pruned at startup and the next quota
 write; stale accounts' retained rows stay bounded and are excluded from reports.
 

@@ -5,6 +5,7 @@ import { count, date, duration, freshness, percent } from "./format"
 import type { Account, DashboardState, Window } from "./schemas"
 import { Badge, EmptyState, Fields, List, Notice, Row, Section, Stat, useDashboardState, useDialog, useHost } from "./ui"
 import { QuotaHistoryView } from "./quota-history-view"
+import { CapacityCard } from "./capacity-view"
 
 function AccountDetails(props: { account: Account; now: number }) {
   const a = () => props.account
@@ -89,7 +90,7 @@ function AccountCard(props: { account: Account; now: number; historical: boolean
       <Show when={a().clients.count !== null}><ui.Tooltip value={fresh(a().clients.observedAt, props.now) ? "Recently active API tokens" : "Historical client activity"}><span class="exr-meta"><span class="exr-status-dot" data-tone={fresh(a().clients.observedAt, props.now) ? "success" : "neutral"} />{count(a().clients.count)} {a().clients.count === 1 ? "client" : "clients"}</span></ui.Tooltip></Show>
     </footer>
     <Show when={a().refreshError}><Notice tone="warning">Live subscription limits unavailable; showing stored observations.</Notice></Show>
-    <Show when={a().automaticReset !== "idle"}><p class="exr-caption">Auto reset: {a().automaticReset}</p></Show>
+    <Show when={!["idle", "reset"].includes(a().automaticReset)}><p class="exr-caption">Auto reset: {a().automaticReset}</p></Show>
     <Show when={a().activation && a().activation !== "completed"}><p class="exr-caption">Weekly activation: {a().activation} · gpt-5.6-sol</p></Show>
   </article>
 }
@@ -105,7 +106,8 @@ export function Overview(props: { now: number; forecasts: Forecasts }) {
           <strong class="exr-truncate" title={report().routingStatus}>ExetRouter v{report().version.replace(/^v/, "")} {state()?.error ? "· cached snapshot" : report().routingStatus === "Ready" ? "ready" : `· ${report().routingStatus}`}</strong><span class="exr-spacer" />
           <ui.Tooltip value={`Snapshot ${date(report().checkedAt)}. Public API readiness and inference are not checked.`}><span class="exr-caption">{fresh(report().checkedAt, props.now) && !state()?.error ? "Updated just now" : "Cached snapshot"}</span></ui.Tooltip>
         </div>
-        <div class="exr-compact-stats"><Stat label="Models" value={count(report().models)} detail={report().catalogStatus === "stale" ? "Cached · refreshes on next request" : report().catalogStatus} />
+         <CapacityCard report={report()} now={props.now} disconnected={!!state()?.error}/>
+         <div class="exr-compact-stats"><Stat label="Models" value={count(report().models)} detail={report().catalogStatus === "stale" ? "Cached · refreshes on next request" : report().catalogStatus} />
           <Stat label="Generations" value={<>{count(report().generations.active)}<span class="exr-stat-limit"> / {count(report().generations.limit)}</span></>} detail="Active · per-user limit" />
           <Stat label="WebSockets" value={<>{count(report().websockets.active)}<span class="exr-stat-limit"> / {count(report().websockets.limit)}</span></>} detail="Active · per-user limit" />
         </div>

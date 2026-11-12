@@ -151,6 +151,7 @@ impl Session {
             upstream: Some(upstream.clone()),
             generations_per_user: 8,
             websockets_per_user: 8,
+            fast_mode: false,
         };
         let serve_db = db.clone();
         let server = tokio::spawn(server::serve(serve_db, key.to_vec(), config, async {
@@ -230,6 +231,7 @@ impl Session {
             upstream: Some(self.upstream.clone()),
             generations_per_user: 8,
             websockets_per_user: 8,
+            fast_mode: false,
         };
         self.server = tokio::spawn(server::serve(
             self.db.clone(),

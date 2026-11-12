@@ -133,12 +133,17 @@ pub fn http_client() -> Result<Client> {
 }
 
 fn client_with_read_timeout(read_timeout: Duration) -> Result<Client> {
-    Ok(Client::builder()
+    let builder = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(read_timeout)
-        .user_agent(concat!("exetrouter/", env!("CARGO_PKG_VERSION")))
-        .build()?)
+        .user_agent(concat!("exetrouter/", env!("CARGO_PKG_VERSION")));
+    // Reqwest otherwise sets a 30-second TCP_USER_TIMEOUT on these platforms.
+    // Unacknowledged data/keepalive probes must not cut a recoverable network
+    // stall short of the operation's read budget (900s inference, 300s metadata).
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    let builder = builder.tcp_user_timeout(read_timeout);
+    Ok(builder.build()?)
 }
 
 pub use crate::catalog::Model;
@@ -1306,6 +1311,74 @@ fn store_model_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn http_tcp_timeout_matches_read_budget() {
+        use tokio::io::AsyncWriteExt;
+
+        for budget in [Duration::from_secs(300), INFERENCE_IDLE_TIMEOUT] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+                    .await
+                    .unwrap();
+                socket
+            });
+            let client = client_with_read_timeout(budget).unwrap();
+            let response = client
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .unwrap();
+            // Keep both ends open, with the response body still pending, while
+            // inspecting the actual client's socket rather than builder Debug.
+            let socket = server.await.unwrap();
+            let client_port = socket.peer_addr().unwrap().port();
+            let timeout = std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .find_map(|entry| {
+                    let fd: libc::c_int = entry.ok()?.file_name().to_str()?.parse().ok()?;
+                    // SAFETY: zero is valid for sockaddr_in; both calls receive
+                    // writable buffers with their correct sizes. Invalid or
+                    // non-socket descriptors are harmlessly rejected by libc.
+                    let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+                    let mut length = std::mem::size_of_val(&address) as libc::socklen_t;
+                    let result = unsafe {
+                        libc::getsockname(
+                            fd,
+                            (&mut address as *mut libc::sockaddr_in).cast(),
+                            &mut length,
+                        )
+                    };
+                    if result != 0
+                        || address.sin_family != libc::AF_INET as libc::sa_family_t
+                        || u16::from_be(address.sin_port) != client_port
+                    {
+                        return None;
+                    }
+                    let mut timeout: libc::c_uint = 0;
+                    let mut length = std::mem::size_of_val(&timeout) as libc::socklen_t;
+                    let result = unsafe {
+                        libc::getsockopt(
+                            fd,
+                            libc::IPPROTO_TCP,
+                            libc::TCP_USER_TIMEOUT,
+                            (&mut timeout as *mut libc::c_uint).cast(),
+                            &mut length,
+                        )
+                    };
+                    (result == 0).then_some(Duration::from_millis(u64::from(timeout)))
+                })
+                .expect("pending HTTP client socket");
+            assert_eq!(timeout, budget);
+            drop(response);
+            drop(socket);
+        }
+    }
 
     fn catalog_database() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

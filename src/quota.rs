@@ -331,7 +331,7 @@ pub(crate) fn save(
                 WHERE excluded.request_order>=oauth_quota_history.request_order AND excluded.observed_at>=oauth_quota_history.observed_at",
                 params![account,window.kind,now/3600*3600,now,window.used,window.minutes,window.reset,order])?;
             // Retain a hard per-window bound even if the host clock moves backward.
-            tx.execute("DELETE FROM oauth_quota_history WHERE account_id=?1 AND kind=?2 AND hour NOT IN (SELECT hour FROM oauth_quota_history WHERE account_id=?1 AND kind=?2 ORDER BY hour DESC LIMIT 168)",params![account,window.kind])?;
+            tx.execute("DELETE FROM oauth_quota_history WHERE account_id=?1 AND kind=?2 AND hour<(SELECT MAX(hour) FROM oauth_quota_history WHERE account_id=?1 AND kind=?2)-(?3-1)*3600",params![account,window.kind,crate::quota_history::RETENTION_HOURS])?;
         }
     }
     crate::quota_history::prune(&tx, now)?;

@@ -13,10 +13,13 @@ use sha2::{Digest, Sha256};
 /// which credit is still visible on a particular host. Never include a local ID,
 /// a clock bucket, remaining percentages or the selected credit in this key.
 pub(super) fn cycle(current: &Live, now: i64) -> Option<[u8; 32]> {
-    let week = weekly(&current.quota).filter(|w| valid(w, now))?;
+    cycle_for(&current.account.info.account_id, &current.quota, now)
+}
+fn cycle_for(account: &str, quota: &crate::quota::Summary, now: i64) -> Option<[u8; 32]> {
+    let week = weekly(quota).filter(|w| valid(w, now))?;
     let mut hash = Sha256::new();
     hash.update(b"exetrouter-reset-cycle-v1\0");
-    hash.update(current.account.info.account_id.as_bytes());
+    hash.update(account.as_bytes());
     hash.update(week.reset_at?.to_be_bytes());
     Some(hash.finalize().into())
 }
@@ -101,6 +104,54 @@ impl Observation {
 pub(super) struct Gate {
     pub waiting: bool,
     pub salvage_until: i64,
+}
+
+/// Read-only preview, never observe/claim/recover. Require a worker-observed
+/// inventory at the same generation/order as the current sanitized metadata.
+pub(super) fn preview(conn: &Connection, id: i64, now: i64) -> Result<Option<i64>> {
+    if !conn.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts a LEFT JOIN account_policy p ON p.account_id=a.id WHERE a.id=?1 AND a.state='active' AND COALESCE(p.enabled,1)=1)",[id],|r|r.get::<_,bool>(0))? || crate::health::paused(conn,id,now)?.is_some() {return Ok(None);}
+    let row=conn.query_row("SELECT a.account_id,m.credits,o.observation FROM oauth_accounts a JOIN account_routing_metadata m ON m.account_id=a.id AND m.generation=a.generation JOIN automatic_reset_observations o ON o.account_id=a.id AND o.request_order=m.request_order WHERE a.id=?1 AND m.observed_at<=?2 AND m.observed_at>?2-60",params![id,now],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?))).optional()?;
+    let Some((account, Some(credits), observation)) = row else {
+        return Ok(None);
+    };
+    let credits: super::Credits = serde_json::from_str(&credits)?;
+    let observation: Observation = serde_json::from_str(&observation)?;
+    let quota = crate::quota::summary(conn, id, now)?;
+    if quota.cooldown_until.is_some() && quota.cooldown_source.as_deref() != Some("upstream_reset")
+        || observation.waiting.is_some()
+    {
+        return Ok(None);
+    }
+    let waiting:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM automatic_reset_attempts WHERE account_id=?1 AND recovered_at IS NULL AND status IN ('submitted','unknown','reset','already_redeemed'))",[id],|r|r.get(0))?;
+    let salvage:i64=conn.query_row("SELECT COALESCE(MAX(salvage_until),0) FROM automatic_reset_attempts WHERE account_id=?1 AND status NOT IN ('nothing_to_reset','no_credit','rejected')",[id],|r|r.get(0))?;
+    if waiting
+        || salvage.max(observation.salvage_until) > now
+            && !weekly(&quota).is_some_and(|w| w.remaining_percent <= 1.0)
+    {
+        return Ok(None);
+    }
+    let Some(credit) = super::automatic::eligible_metadata(&quota, &credits, now) else {
+        return Ok(None);
+    };
+    let Some(inventory) = observation
+        .inventory
+        .first()
+        .filter(|c| c.expires_at == credit.expires_at)
+    else {
+        return Ok(None);
+    };
+    let Some(cycle) = cycle_for(&account, &quota, now) else {
+        return Ok(None);
+    };
+    let attempt = Attempt {
+        cycle,
+        credit: inventory.digest,
+        snapshot: quota.windows,
+        salvage_until: salvage,
+    };
+    Ok(available(conn, &attempt, now)?
+        .then_some(credit.expires_at)
+        .flatten())
 }
 
 /// Observe inventory changes even on a host that did not submit the reset.

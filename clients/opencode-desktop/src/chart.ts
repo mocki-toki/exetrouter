@@ -8,6 +8,14 @@ export function activityDate(bucket: Usage["timeline"][number], period: string):
 
 export const chartColors = ["#84becb", "#aaa3e6", "#8fc9a4", "#e4bd79", "#e39393", "#85a8e1", "#cf9dc6", "#c5c48d"]
 export function compact(value: number): string { return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) }
+export function dollars(value: number | null | undefined): string {
+  return value == null ? "—" : `$${value.toLocaleString("en", { minimumFractionDigits: 2, maximumFractionDigits: value < 0.0001 ? 8 : value < 0.01 ? 5 : 2 })}`
+}
+/** Older bridges omit pricing fields; unknown pricing must never become $0. */
+export function unpricedRequests(row: Usage["rows"][number]): number {
+  return row.unpriced ?? (row.usd == null ? row.requests : 0)
+}
+type Metric = "tokens" | "requests" | "usd"
 
 /** SVG plot coordinates, independent of CSS width and device pixel ratio. */
 export function activityIndex(length: number, clientX: number, left: number, width: number): number | undefined {
@@ -16,22 +24,23 @@ export function activityIndex(length: number, clientX: number, left: number, wid
   return Math.round(Math.max(0, Math.min(1, (position - 44) / 600)) * (length - 1))
 }
 
-export function activityValue(bucket: Usage["timeline"][number], key: string, metric: "tokens" | "requests") {
+export function activityValue(bucket: Usage["timeline"][number], key: string, metric: Metric) {
   const rows = bucket.rows.filter((r) => r.key === key)
   if (metric === "requests") return { value: rows.reduce((n, r) => n + r.requests, 0), incomplete: false }
+  if (metric === "usd") return { value: rows.length && rows.every((r) => r.usd == null) ? null : rows.reduce((n, r) => n + (r.usd ?? 0), 0), incomplete: rows.some((r) => unpricedRequests(r) > 0) }
   const incomplete = rows.some((r) => r.input === null || r.output === null || r.unknown > 0 || r.partial > 0)
   const unknown = rows.length > 0 && rows.every((r) => r.input === null && r.output === null)
   return { value: unknown ? null : rows.reduce((n, r) => n + (r.input ?? 0) + (r.output ?? 0), 0), incomplete }
 }
 
 /** Pre-index each bucket once, rather than rescanning every row for every SVG point. */
-export function activity(report: Usage, selected: string, metric: "tokens" | "requests", now: number) {
+export function activity(report: Usage, selected: string, metric: Metric, now: number) {
   const rows = report.rows.filter((r) => !selected || r.key === selected)
   const buckets = report.timeline.filter((b) => b.from <= now)
   const indexed = buckets.map((bucket) => {
     const values = new Map<string, number | null>()
     for (const row of bucket.rows) {
-      const value = metric === "requests" ? row.requests : row.input === null && row.output === null ? null : (row.input ?? 0) + (row.output ?? 0)
+      const value = metric === "requests" ? row.requests : metric === "usd" ? row.usd ?? null : row.input === null && row.output === null ? null : (row.input ?? 0) + (row.output ?? 0)
       values.set(row.key, value === null ? values.get(row.key) ?? null : (values.get(row.key) ?? 0) + value)
     }
     return values
@@ -39,14 +48,17 @@ export function activity(report: Usage, selected: string, metric: "tokens" | "re
   // Color follows report identity, not the selected subset or ranking order.
   const keys = [...new Set(report.rows.map((r) => r.key))].sort()
   const series = rows.map((row) => ({ key: row.key, name: row.name, color: chartColors[(keys.indexOf(row.key) + (metric === "tokens" ? 1 : 0)) % chartColors.length], values: indexed.map((b) => b.has(row.key) ? b.get(row.key)! : 0) }))
-  let maximum = 1
+  let maximum = metric === "usd" ? 0 : 1
   for (const line of series) for (const value of line.values) if (value !== null) maximum = Math.max(maximum, value)
+  if (maximum === 0) maximum = 1
   const magnitude = 10 ** Math.floor(Math.log10(maximum))
   maximum = ([1, 2, 5, 10].find((n) => n * magnitude >= maximum) ?? 10) * magnitude
   return {
     rows, buckets, maximum,
     requests: rows.reduce((n, r) => n + r.requests, 0),
     reported: rows.reduce((n, r) => n + (r.input ?? 0) + (r.output ?? 0), 0),
+    usd: rows.every((r) => r.usd == null) ? null : rows.reduce((n, r) => n + (r.usd ?? 0), 0),
+    unpriced: rows.reduce((n, r) => n + unpricedRequests(r), 0),
     incomplete: rows.reduce((n, r) => n + r.unknown, 0),
     series: series.map((line) => {
       const segments: string[] = [], isolated: {x:number;y:number}[] = []

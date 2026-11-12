@@ -681,6 +681,12 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
     const UNKNOWN_MODEL: &str = "PRIVATE_UNVALIDATED_MODEL_09924";
     const EVENT_TYPE: &str = "PRIVATE_EVENT_TYPE_401a3";
     fn events(body: &Value) -> Vec<Value> {
+        if matches!(
+            body["metadata"]["mode"].as_str(),
+            Some("ws_parameter_error" | "ws_unknown_error")
+        ) {
+            return vec![rejection(body)];
+        }
         let created = json!({"type":"response.created","response":{"id":"resp_privacy_fixture","status":"in_progress","model":"gpt-test","created_at":1800000000}});
         if body["metadata"]["mode"] == "event_error" {
             return vec![
@@ -725,7 +731,25 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
         }
         events
     }
+    fn rejection(body: &Value) -> Value {
+        let unknown = body["metadata"]["mode"]
+            .as_str()
+            .unwrap()
+            .contains("unknown");
+        json!({"type":"error","status":400,"error":{
+            "code":if unknown { ERROR } else { "unsupported_parameter" },
+            "type":if unknown { ERROR } else { "invalid_request_error" },
+            "param":if unknown { ERROR } else { "max_output_tokens" },
+            "message":ERROR,"detail":INPUT
+        }})
+    }
     async fn responses(Json(body): Json<Value>) -> axum::response::Response {
+        if matches!(
+            body["metadata"]["mode"].as_str(),
+            Some("http_parameter_error" | "http_unknown_error")
+        ) {
+            return (axum::http::StatusCode::BAD_REQUEST, Json(rejection(&body))).into_response();
+        }
         if body["metadata"]["mode"] == "bad_header" {
             return ([("content-type", HEADER)], ERROR).into_response();
         }
@@ -1014,6 +1038,50 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
             .execute("DELETE FROM oauth_health", [])
             .unwrap();
     }
+    // Both adapters diagnose the original error, without exposing it in Chat
+    // or inventing retries/accounting. Unknown labels are not arbitrary strings.
+    for mode in [
+        "http_parameter_error",
+        "http_unknown_error",
+        "ws_parameter_error",
+        "ws_unknown_error",
+    ] {
+        let db = rusqlite::Connection::open(server.dir.path().join("state.sqlite")).unwrap();
+        let before: i64 = db
+            .query_row("SELECT count(*) FROM usage_events", [], |r| r.get(0))
+            .unwrap();
+        let chat = mode.starts_with("ws_");
+        let mut payload = if chat {
+            json!({"model":"gpt-test","messages":[{"role":"user","content":INPUT}]})
+        } else {
+            body.clone()
+        };
+        payload["metadata"] = json!({"mode":mode});
+        let response = client
+            .post(format!(
+                "{api}/v1/{}",
+                if chat {
+                    "chat/completions"
+                } else {
+                    "responses"
+                }
+            ))
+            .bearer_auth(&secret)
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400, "{mode}");
+        let text = response.text().await.unwrap();
+        assert!(text.contains("upstream_rejected"));
+        assert!(!text.contains(ERROR) && !text.contains(INPUT));
+        let (count, input, output): (i64, Option<i64>, Option<i64>) = db.query_row(
+            "SELECT (SELECT count(*) FROM usage_events),input_tokens,output_tokens FROM usage_events ORDER BY id DESC LIMIT 1",
+            [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).unwrap();
+        assert_eq!(count, before + 1);
+        assert!(input.is_none() && output.is_none());
+    }
     let ws_cases = [
         ("ws_close", "upstream_close"),
         ("ws_partial_close", "upstream_close"),
@@ -1166,6 +1234,29 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .map(|line| line["fields"].clone())
         .collect();
+    let rejections: Vec<&Value> = diagnostics
+        .iter()
+        .filter(|entry| {
+            entry["event"] == "upstream_response_rejected" && entry["upstream_status"] == 400
+        })
+        .collect();
+    assert_eq!(rejections.len(), 4);
+    for transport in ["http_sse", "websocket"] {
+        let entries: Vec<_> = rejections
+            .iter()
+            .filter(|entry| entry["upstream_transport"] == transport)
+            .collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["error_code"], "unsupported_parameter");
+        assert_eq!(entries[0]["error_type"], "invalid_request_error");
+        assert_eq!(entries[0]["error_param"], "max_output_tokens");
+        assert_eq!(entries[1]["error_code"], "unknown");
+        assert_eq!(entries[1]["error_type"], "unknown");
+        assert_eq!(entries[1]["error_param"], "unknown");
+        for entry in entries {
+            assert!(entry["request_id"].is_string());
+        }
+    }
     assert_eq!(interruptions.len(), 2 + ws_cases.len());
     for (line, kind, count) in [
         (&interruptions[0], "response.output_text.delta", 2),

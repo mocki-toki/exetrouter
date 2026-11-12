@@ -81,6 +81,9 @@ enum Command {
         listen: SocketAddr,
         #[arg(long)]
         gateway_uid: Option<u32>,
+        /// Allow client-requested Fast mode by default (tokens may override).
+        #[arg(long, action = clap::ArgAction::Set)]
+        fast_mode: Option<bool>,
         /// Permit a wildcard listener inside an isolated Docker network only.
         #[arg(long)]
         allow_container_listen: bool,
@@ -231,11 +234,15 @@ async fn run() -> Result<()> {
     if let Command::Serve {
         gateway_uid,
         listen,
+        fast_mode,
         ..
     } = &mut args.command
     {
         if gateway_uid.is_none() {
             *gateway_uid = saved.gateway_uid;
+        }
+        if fast_mode.is_none() {
+            *fast_mode = Some(saved.fast_mode);
         }
         if matches
             .subcommand_matches("serve")
@@ -335,6 +342,7 @@ async fn run() -> Result<()> {
     if let Command::Serve {
         listen,
         gateway_uid,
+        fast_mode,
         allow_container_listen,
         allow_same_uid_for_dev,
         generations_per_user,
@@ -403,6 +411,7 @@ async fn run() -> Result<()> {
                 upstream: configured,
                 generations_per_user: usize::from(generations_per_user),
                 websockets_per_user: usize::from(websockets_per_user),
+                fast_mode: fast_mode.unwrap_or(false),
             },
             shutdown,
         )

@@ -21,7 +21,7 @@ const inert: unknown = new Proxy(function () {}, {
   get: () => inert, apply: () => inert, construct: () => inert as object,
 })
 
-async function bundle(main: boolean, runtime?: { solid: unknown; web: unknown; createLatest: unknown; usePlugin(): unknown }) {
+async function bundle(main: boolean, runtime?: { solid: unknown; web: unknown; window?: Window; createLatest: unknown; usePlugin(): unknown }) {
   const code = await readFile(new URL("../dist/gui-experimental.cjs", import.meta.url), "utf8")
   const tokens = Object.fromEntries(["CodeBlock", "Command", "MenuItem", "Panel", "SettingsPage", "ComposerPill", "Style"].map((id) => [id, { id }]))
   const sdk = {
@@ -48,7 +48,8 @@ async function bundle(main: boolean, runtime?: { solid: unknown; web: unknown; c
     },
     process: main ? process : undefined,
     Buffer: main ? Buffer : undefined,
-    URL, TextEncoder, AbortSignal, AbortController, setTimeout, clearTimeout,
+    window: runtime?.window, document: runtime?.window?.document,
+    URL, TextEncoder, AbortSignal, AbortController, setTimeout, clearTimeout, queueMicrotask,
     setInterval(fn: () => void) { timers.add(fn); return fn },
     clearInterval(fn: () => void) { timers.delete(fn) },
   })
@@ -83,32 +84,44 @@ test("the built GUI evaluates in a window with inert Node modules and registers 
 test("rendered panel has five native web views, account details, usage graph, tokens and models", async () => {
   const window = new Window()
   const solid = require("solid-js/dist/solid.cjs") as typeof import("solid-js")
+  const storeExports: Record<string, unknown> = {}
+  runInNewContext(await readFile(require.resolve("solid-js/store/dist/store.cjs"), "utf8"), {
+    exports: storeExports, require: (id: string) => { assert.equal(id, "solid-js"); return solid },
+  })
+  const { createStore } = storeExports as typeof import("solid-js/store")
   const webExports: Record<string, unknown> = {}
   runInNewContext(await readFile(require.resolve("solid-js/web/dist/web.cjs"), "utf8"), {
     exports: webExports, require: (id: string) => { assert.equal(id, "solid-js"); return solid },
-    window, document: window.document, Node: window.Node, Element: window.Element,
+    window, document: window.document, Node: window.Node, Element: window.Element, HTMLHeadElement: window.HTMLHeadElement,
   })
   const web = webExports as typeof import("solid-js/web")
   let host: unknown
-  const runtime = { solid, web, usePlugin: () => host, createLatest(source: () => unknown, fetch: (input: unknown, signal: AbortSignal) => Promise<unknown>) {
-    const [latest, setLatest] = solid.createSignal<unknown>()
-    const [error, setError] = solid.createSignal<unknown>()
-    const [loading, setLoading] = solid.createSignal(true)
+  const runtime = { solid, web, window, usePlugin: () => host, createLatest(source: () => unknown, fetch: (input: unknown, signal: AbortSignal) => Promise<unknown>) {
+    // Match the host SDK's createStore-backed createLatest, including its proxy
+    // semantics when a resolved report is rendered by Solid.
+    const [state, setState] = createStore<{latest: unknown; error: unknown; loading: boolean}>({latest: undefined, error: undefined, loading: false})
     solid.createEffect(() => {
       const abort = new AbortController()
       solid.onCleanup(() => abort.abort())
-      setLoading(true)
-      void fetch(source(), abort.signal).then((value) => { if (!abort.signal.aborted) { setLatest(() => value); setLoading(false) } }, (err) => { setError(err); setLoading(false) })
+      const value = source()
+      setState({ loading: true, error: undefined })
+      void fetch(value, abort.signal).then((latest) => { if (!abort.signal.aborted) setState({latest,loading:false,error:undefined}) }, (error) => { if (!abort.signal.aborted) setState({error,loading:false}) })
     })
-    return { get latest() { return latest() }, get loading() { return loading() }, get error() { return error() } }
+    return state
   } }
   const { plugin, timers } = await bundle(false, runtime)
   const contributions = new Map<string, unknown>()
   const report = snapshot(doctor())
   const rawUsage = usage()
   rawUsage.timeline[0].from_utc = Math.floor(Date.now() / 1000) - 3600
-  const usageReport = normalizeUsage(rawUsage, "total")
+  let usageReport = normalizeUsage(rawUsage, "total")
+  // An already-running native/IPC bridge can still return the previous Usage
+  // row shape after the window bundle has adopted optional USD estimates.
+  const legacyRow = ({ usd: _usd, unpriced: _unpriced, ...row }: typeof usageReport.rows[number]) => row as typeof usageReport.rows[number]
+  usageReport = { ...usageReport, rows: usageReport.rows.map(legacyRow), timeline: usageReport.timeline.map((bucket) => ({ ...bucket, rows: bucket.rows.map(legacyRow) })) }
   const copied: string[] = []
+  const usageInputs: {period:string;by:string;before?:number}[] = []
+  const historyInputs: {account:number;period:string;before?:number}[] = []
   const calls = { usage: 0, tokens: 0, models: 0, updates: 0 }
   const [state, setState] = solid.createSignal({ revision:0, snapshot: report, error: null as string | null, refreshing: false, update: null as null | {current:string;latest:string;available:boolean}, clipboardPending: false })
   const [available, setAvailable] = solid.createSignal(true)
@@ -117,7 +130,8 @@ test("rendered panel has five native web views, account details, usage graph, to
   let tokenGate: ReturnType<typeof import("./fixtures").deferred<typeof tokenRows>> | undefined
   const bridge = {
     state:()=>available()?state():undefined, refresh: async () => {setState((old)=>({...old,revision:old.revision+1}))},
-    usage: async () => { calls.usage++; return usageReport }, tokens: async () => { calls.tokens++; return tokenGate ? tokenGate.promise : tokenRows }, models: async () => { calls.models++; return models(modelList()) },
+    usage: async (input: typeof usageInputs[number]) => { calls.usage++; usageInputs.push(input); return {...usageReport,...(input.before === undefined ? {} : {to:input.before})} }, tokens: async () => { calls.tokens++; return tokenGate ? tokenGate.promise : tokenRows }, models: async () => { calls.models++; return models(modelList()) },
+    quotaHistory: async (input: typeof historyInputs[number]) => { historyInputs.push(input); const h=report.accounts[0].history!; const to=input.before??h.to; const days=input.period==="24h"?1:Number(input.period.slice(0,-1)); return {...h,from:to-days*86400,to,points:h.points.filter((p)=>p.hour>=to-days*86400&&p.hour<to)} },
     profile: async () => ({ mode: "Standalone", destination: "127.0.0.1:8787", fields: [{ label: "SSH host", value: "router.example.com" }], accounts: [{id:1,email:"account@example.com",state:"active"}], clientVersion: "0.0.0-test", connection: {mode:"standalone",host:"router.example.com",port:2222,ssh_user:"routercli",identity:"/synthetic/key",api_url:null,state_dir:"/synthetic/state",listen:"127.0.0.1:8787"} }),
     desktop: async (input: Record<string, unknown>) => { nativeActions.push(input); return {status:"saved",copied:input.action === "token_create" || input.action === "token_rotate",retryCopy:false,profile:null,update:null,login:input.action === "login_start" ? {url:"https://auth.openai.com/activate",code:"TEST-CODE"} : null} },
     update: async () => { calls.updates++; return { current: "0.0.0-test", latest: "0.0.0-test", available: false } },
@@ -132,7 +146,7 @@ test("rendered panel has five native web views, account details, usage graph, to
   }
   const ui = {
     Button: button,
-    IconButton: (props: Parameters<UI["IconButton"]>[0]) => button({ get children() { return props.label }, get label() { return props.label }, get busy() { return props.busy }, onClick: props.onClick }),
+    IconButton: (props: Parameters<UI["IconButton"]>[0]) => button({ get children() { return props.label }, get label() { return props.label }, get busy() { return props.busy }, get disabled() { return props.disabled }, onClick: props.onClick }),
     Icon: () => window.document.createElement("span"),
     Tooltip: (props: Parameters<UI["Tooltip"]>[0]) => props.children,
     Loader: () => { const el = window.document.createElement("span"); el.setAttribute("role", "progressbar"); return el },
@@ -219,6 +233,12 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.doesNotMatch(root.textContent, /Passive refresh every|GMT/)
     assert.match(root.textContent, /Synthetic account/)
     assert.match(root.textContent, /2 resets/)
+    assert.match(root.textContent, /Auto reset: waiting/)
+    for (const status of ["reset", "idle", "waiting"]) {
+      setState((old) => ({ ...old, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((account) => ({ ...account, automaticReset: status })) } }))
+      if (status === "waiting") assert.match(root.textContent, /Auto reset: waiting/)
+      else assert.doesNotMatch(root.textContent, /Auto reset:/)
+    }
     assert.deepEqual(calls, { usage: 0, tokens: 0, models: 0, updates: 0 })
     const click = (label: string) => [...window.document.querySelectorAll("button")].find((e) => e.getAttribute("aria-label") === label || e.textContent === label)!.click()
     const selectTab = async (name: string) => {
@@ -226,6 +246,31 @@ test("rendered panel has five native web views, account details, usage graph, to
       tab.dispatchEvent(new window.MouseEvent("click", { bubbles: true })); await delay(10)
       assert.equal(root.querySelector('[role="tabpanel"]:not([hidden])')?.getAttribute("aria-labelledby"), tab.id)
     }
+    assert.match(root.querySelector(".exr-capacity")!.textContent,/Capacity outlook.*Insufficient data/)
+    click("Details")
+    assert.equal(window.document.querySelector('[role="dialog"]')!.getAttribute("aria-label"),"Capacity details")
+    click("Done")
+    const capacityNow=Math.floor(Date.now()/1000)
+    const capacityWindows=[{kind:"primary",minutes:300,remaining:100,used:0,observedAt:capacityNow,resetAt:capacityNow+1800,status:"current"},{kind:"secondary",minutes:10080,remaining:1,used:99,observedAt:capacityNow,resetAt:capacityNow+10800,status:"current"}]
+    const capacitySnapshot={...report,checkedAt:capacityNow,capacity:{lastHour:10,previousHour:10,inFlight:0,complete:true},accounts:report.accounts.map((a)=>({...a,cooldownUntil:null,windows:capacityWindows,capacity:{state:"available",shortWindow:true,models:["gpt-6.1-sol","synthetic-other"],resetEligibleUntil:null,costs:capacityWindows.map((w)=>({kind:w.kind,perRequest:0.1,from:capacityNow-3600,to:capacityNow,requests:10}))}}))}
+    setState((old)=>({...old,snapshot:capacitySnapshot}))
+    for (const tick of timers) tick()
+    assert.match(root.querySelector(".exr-capacity")!.textContent,/At risk.*gpt-6.1-sol.*Estimated runway.*1h 0m.*Possible interruption/)
+    click("Details")
+    const capacityDialog=window.document.querySelector('[role="dialog"]')!
+    assert.match(capacityDialog.textContent,/Account reserves.*Synthetic account.*Short window|Account reserves.*Short window/)
+    assert.match(capacityDialog.textContent,/Confirmed quota only.*Higher load.*With eligible reset credit/)
+    assert.equal(capacityDialog.querySelectorAll("tbody tr").length,1)
+    click("Model: gpt-6.1-sol");click("synthetic-other")
+    assert.match(root.querySelector(".exr-capacity")!.textContent,/synthetic-other/)
+    setState((old)=>({...old,snapshot:{...capacitySnapshot,accounts:capacitySnapshot.accounts.map((a)=>({...a,label:"Updated capacity account"}))}}))
+    assert.equal(window.document.querySelector('[role="dialog"]'),capacityDialog,"capacity details survive background snapshot refresh")
+    assert.match(capacityDialog.textContent,/Updated capacity account/)
+    setState((old)=>({...old,error:"Disconnected"}))
+    assert.match(root.querySelector(".exr-capacity")!.textContent,/Insufficient data/)
+    assert.doesNotMatch(root.querySelector(".exr-capacity")!.textContent,/Estimated runway/)
+    click("Done")
+    setState((old)=>({...old,snapshot:report,error:null}))
     click("View Synthetic account details")
     assert.match(window.document.querySelector('[role="dialog"]')!.textContent, /Synthetic client/)
     const accountDialog = window.document.querySelector('[role="dialog"]')!
@@ -260,6 +305,19 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.equal(root.querySelector('.exr-quota-area')!.hasAttribute("data-paused"),true)
     assert.doesNotMatch(root.querySelector('.exr-account-header')!.textContent,/Paused until/)
     assert.equal([...root.querySelectorAll('.exr-notice')].some((n)=>n.textContent.includes("Paused until")),false)
+    await delay(10)
+    assert.deepEqual([...accountDialog.querySelectorAll('[aria-label="Limit history period"] button')].map((b)=>b.textContent),["24 hours","7 days","30 days","90 days"])
+    const latestHistoryEnd = report.accounts[0].history!.to
+    click("Previous limit history interval"); await delay(10)
+    assert.equal(historyInputs.at(-1)?.before,latestHistoryEnd-7*86400)
+    click("Next limit history interval"); await delay(10)
+    assert.equal(historyInputs.at(-1)?.before,undefined)
+    click("90 days"); await delay(10)
+    assert.equal(historyInputs.at(-1)?.period,"90d")
+    click("Previous limit history interval"); await delay(10)
+    assert.equal(historyInputs.at(-1)?.before,latestHistoryEnd-90*86400)
+    click("7 days"); await delay(10)
+    assert.equal(historyInputs.at(-1)?.before,undefined,"changing the interval returns to the latest window")
     click("Done")
     await selectTab("Tokens")
     click("Create token")
@@ -272,7 +330,9 @@ test("rendered panel has five native web views, account details, usage graph, to
     click("Create and copy"); await delay(10)
     assert.equal(nativeActions.at(-1)?.action,"token_create")
     assert.equal(nativeActions.at(-1)?.days,90)
-    click("Actions for Synthetic token"); click("Rename token")
+    click("Actions for Synthetic token"); await delay(0)
+    assert.ok(window.document.querySelector('[role="menu"]'), [...window.document.querySelectorAll('button')].map((b)=>b.textContent).join(','))
+    click("Rename")
     const renameDialog = window.document.querySelector('[role="dialog"]')!
     setInput("Token name", "Unsubmitted draft")
     const { deferred } = await import("./fixtures")
@@ -287,15 +347,35 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.equal((window.document.querySelector('input[aria-label="Token name"]') as unknown as {value:string}).value,"Unsubmitted draft")
     click("Save name"); await delay(10)
     assert.equal(nativeActions.at(-1)?.name,"Unsubmitted draft")
-    click("Actions for Refreshed token"); click("Rotate token")
+    click("Actions for Refreshed token")
+    const fastMenu = [...window.document.querySelectorAll('[role="menuitem"]')].find((b)=>b.textContent==="Fast mode")!
+    fastMenu.parentElement!.dispatchEvent(new window.Event("pointerenter"))
+    assert.deepEqual([...window.document.querySelectorAll('[role="menuitemradio"]')].map((b)=>b.textContent),["Default","Allow","Block"])
+    assert.equal(window.document.querySelector('[role="menuitemradio"][aria-checked="true"]')!.textContent,"Default")
+    fastMenu.dispatchEvent(new window.KeyboardEvent("keydown",{key:"ArrowRight",bubbles:true})); await delay(0)
+    assert.equal(window.document.activeElement?.textContent,"Default")
+    click("Allow"); click("Save"); await delay(10)
+    assert.deepEqual({action:nativeActions.at(-1)?.action,enabled:nativeActions.at(-1)?.enabled},{action:"token_fast_mode",enabled:true})
+    click("Actions for Refreshed token"); click("Disable"); click("Disable"); await delay(10)
+    assert.deepEqual({action:nativeActions.at(-1)?.action,enabled:nativeActions.at(-1)?.enabled},{action:"token_set_enabled",enabled:false})
+    click("Actions for Refreshed token"); click("Rotate")
     assert.equal(window.document.querySelector('[role="dialog"]')!.textContent.match(/Replace Refreshed token/g)?.length,1)
     assert.notEqual(nativeActions.at(-1)?.action,"token_rotate")
     click("Rotate and copy"); await delay(10)
     assert.equal(nativeActions.at(-1)?.action,"token_rotate")
     assert.equal(nativeActions.at(-1)?.confirmed,true)
-    click("Actions for Refreshed token"); click("Revoke token"); click("Revoke token"); await delay(10)
+    click("Actions for Refreshed token"); click("Revoke"); click("Revoke"); await delay(10)
     assert.equal(nativeActions.at(-1)?.action,"token_revoke")
     await selectTab("Usage")
+    assert.doesNotMatch(root.textContent, /Could not display usage/)
+    const groupControl = [...root.querySelectorAll("button")].find((b) => b.textContent === "Group: Total")!
+    assert.ok(groupControl.closest(".exr-range-actions"), "group stays in the right-aligned interval controls")
+    assert.ok(groupControl.closest(".exr-toolbar")!.querySelector('[aria-label="Usage period"]'), "period and group share one toolbar")
+    assert.equal(root.querySelectorAll('[role="tabpanel"]:not([hidden]) .exr-compact-stats .exr-stat strong')[2]?.textContent, "—")
+    click("USD estimate")
+    assert.match(root.textContent, /Standard API equivalent/)
+    assert.match(root.textContent, /Not actual ChatGPT subscription spending/)
+    root.querySelector('[role="group"][aria-label="Activity metric"] button')!.dispatchEvent(new window.MouseEvent("click",{bubbles:true}))
     assert.doesNotMatch(root.textContent,/About these numbers|Shared pool totals|incomplete|Unknown:|partial:/i)
     assert.ok(root.querySelector('.exr-compact-stats'))
     assert.ok(root.querySelector("svg"))
@@ -312,18 +392,37 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.ok(root.querySelector('[data-slot="activity-cursor"]'))
     assert.match(root.textContent, /Input/)
     assert.match(root.textContent, /Unknown/)
-    click("24 hours"); await delay(10)
+    click("7 days"); await delay(10)
     assert.equal(calls.usage, 2)
+    const latestUsageEnd = usageReport.to
+    click("Previous usage interval"); await delay(10)
+    assert.equal(usageInputs.at(-1)?.before,latestUsageEnd-7*86400)
+    click("Previous usage interval"); await delay(10)
+    assert.equal(usageInputs.at(-1)?.before,latestUsageEnd-14*86400)
+    click("Next usage interval"); await delay(10)
+    assert.equal(usageInputs.at(-1)?.before,latestUsageEnd-7*86400)
+    click("Next usage interval"); await delay(10)
+    assert.equal(usageInputs.at(-1)?.before,undefined)
+    assert.equal((window.document.querySelector('button[aria-label="Next usage interval"]') as unknown as {disabled:boolean}).disabled,true)
     click("Group: Total")
     click("Token"); await delay(10)
     assert.match(root.textContent, /Only your API tokens are included/)
-    assert.equal(calls.usage, 3)
+    assert.equal(calls.usage, 7)
+    const goodUsage = usageReport
+    usageReport = { ...goodUsage, rows: null as unknown as typeof goodUsage.rows }
+    setState((old) => ({ ...old, revision: old.revision + 1 }))
+    await delay(10)
+    assert.match(root.textContent, /Could not display usage/)
+    assert.ok(root.querySelector('[role="tablist"]'), "a usage render error must not blank the dashboard")
+    usageReport = goodUsage
+    click("Retry usage"); await delay(10)
+    assert.ok(root.querySelector('.exr-compact-stats'))
     await selectTab("Tokens")
     assert.match(root.textContent, /Refreshed token/)
     assert.ok(root.querySelector('[data-component="exr-settings-list"] [data-slot="row-control"]'))
-    click("View Refreshed token details")
-    assert.match(window.document.querySelector('[role="dialog"]')!.textContent, /Created/)
-    click("Done")
+    assert.equal(root.querySelector('button[aria-label="View Refreshed token details"]'), null)
+    assert.match(root.textContent, /Fast: Default/)
+    assert.match(root.textContent, /Created/)
     await selectTab("Models")
     assert.match(root.textContent, /synthetic-model/)
     assert.match(root.textContent, /100,000/)
@@ -356,9 +455,9 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.equal(nativeActions.at(-1)?.action,"login_cancel")
     await selectTab("Usage")
     const usagePane = root.querySelector('[role="tabpanel"]:not([hidden])')!
-    assert.equal([...usagePane.querySelectorAll('[aria-pressed="true"]')].some((e) => e.textContent === "24 hours"), true)
-    assert.equal(calls.usage, 4, "a newer snapshot refreshes visible usage without resetting filters")
-    assert.equal(preferences().period,"24h")
+    assert.equal([...usagePane.querySelectorAll('[aria-pressed="true"]')].some((e) => e.textContent === "7 days"), true)
+    assert.equal(calls.usage, 10, "a newer snapshot refreshes visible usage without resetting filters")
+    assert.equal(preferences().period,"7d")
     assert.equal(preferences().by,"token")
     await selectTab("Models")
     assert.equal((root.querySelector('input[aria-label="Search models"]') as unknown as { value: string }).value, "no matching model")

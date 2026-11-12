@@ -21,16 +21,29 @@ test("hourly quota history keeps both independent windows, actual samples and ga
   assert.equal(line.segments.length,1,"missing hours must break the line instead of bridging gaps")
   assert.equal(quotaTimeline({...account,history:null}).hours.length,0)
 })
+test("quota charts omit series without a known duration and retain known-window fallback", () => {
+  const account = snapshot(doctor()).accounts[0]
+  const history = account.history!
+  const points = [
+    ...history.points.map((point) => point.kind === "primary" ? { ...point, minutes: null } : point),
+    { ...history.points[0], kind: "unknown", minutes: null },
+  ]
+  const data = quotaTimeline({ ...account, history: { ...history, points } })
+  assert.deepEqual(data.series.map((line) => line.label), ["8-hour", "Weekly"])
+  assert.equal(data.series.some((line) => line.kind === "unknown"), false)
+  const unknownOnly = quotaTimeline({ ...account, windows: [], history: { ...history, points: [points.at(-1)!] } })
+  assert.deepEqual(unknownOnly.series, [])
+})
 test("native history projection is bounded and strips unknown payloads", () => {
   const raw=doctor().quota_accounts[0].quota_history
   assert.equal(quotaHistory(null),null)
   assert.doesNotMatch(JSON.stringify(quotaHistory({...raw,payload:"private-marker",points:raw.points.map((p)=>({...p,payload:"private-marker"}))})),/private-marker|payload/)
   for (const bad of [
-    {...raw,interval_seconds:86400}, {...raw,to_utc:raw.to_utc+3600},
+    {...raw,interval_seconds:86400}, {...raw,to_utc:raw.from_utc+2161*3600},
     {...raw,points:[...raw.points,raw.points[0]]},
     {...raw,points:[{...raw.points[0],used_percent:-1}]},
     {...raw,points:[{...raw.points[0],observed_at:raw.points[0].hour-1}]},
-    {...raw,points:Array(337).fill(raw.points[0])},
+    {...raw,points:Array(4321).fill(raw.points[0])},
   ]) assert.throws(()=>quotaHistory(bad))
 })
 test("quota charts plot left, not used, including full and exhausted boundaries", () => {

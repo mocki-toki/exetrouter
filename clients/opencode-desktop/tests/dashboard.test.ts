@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { test } from "node:test"
 import { Schema } from "effect"
 import { best, Forecasts, priority, routingFresh, visibleWindows } from "../src/dashboard"
-import { activity, activityDate, activityIndex, activityValue } from "../src/chart"
+import { activity, activityDate, activityIndex, activityValue, dollars } from "../src/chart"
 import { NativeClient, snapshot, models, tokens, usage } from "../src/native"
 import { options } from "../src/options"
 import { Models, Profile, Tokens, Usage } from "../src/schemas"
@@ -42,6 +42,36 @@ test("chart cursor maps scaled pointer positions to real buckets and preserves u
   assert.deepEqual(activityValue(bucket, "test-reasoner", "tokens"), { value: 0, incomplete: true })
   assert.deepEqual(activityValue({ ...bucket, rows: bucket.rows.map((r) => ({...r, input:null, output:null})) }, "test-reasoner", "tokens"), { value:null, incomplete:true })
   assert.deepEqual(activityValue(bucket, "test-reasoner", "requests"), { value:2, incomplete:false })
+})
+
+test("USD chart preserves model prices, partial totals and small dollar scales", () => {
+  const raw = usageFixture(), first = { ...raw.rows[0], name: "gpt-6-astra", requests: 2, estimated_usd: 10, unpriced_requests: 1 }
+  const second = { ...first, name: "gpt-6.1-sol", requests: 1, estimated_usd: 0.00004, unpriced_requests: 0 }
+  const report = usage({ ...raw, rows: [first, second], timeline: [{ from_utc: 1800000000, to_utc: 1800003600, rows: [first, second] }] }, "model")
+  const data = activity(report, "", "usd", 1800003600)
+  assert.equal(data.usd, 10.00004)
+  assert.equal(data.unpriced, 1)
+  assert.deepEqual(activityValue(data.buckets[0], "gpt-6-astra", "usd"), { value: 10, incomplete: true })
+  assert.equal(activity(report, "gpt-6.1-sol", "usd", 1800003600).maximum, 0.00005)
+  assert.equal(dollars(0.00004), "$0.00004")
+  assert.equal(dollars(undefined), "—")
+  const unknown = usage({ ...raw, rows: [{ ...first, estimated_usd: null }], timeline: [{ from_utc: 1800000000, to_utc: 1800003600, rows: [{ ...first, estimated_usd: null }] }] }, "model")
+  assert.equal(activity(unknown, "", "usd", 1800003600).usd, null)
+  assert.equal(activityValue(unknown.timeline[0], "gpt-6-astra", "usd").value, null)
+})
+
+test("previous IPC usage rows without USD fields render as unknown, not free", () => {
+  const report = usage(usageFixture(), "model")
+  const legacyRow = ({ usd: _usd, unpriced: _unpriced, ...row }: Usage["rows"][number]) => row
+  const legacy: Usage = { ...report, rows: report.rows.map(legacyRow), timeline: report.timeline.map((bucket) => ({ ...bucket, rows: bucket.rows.map(legacyRow) })) }
+  Schema.decodeUnknownSync(Usage)(legacy)
+  const data = activity(legacy, "", "usd", Number.MAX_SAFE_INTEGER)
+  assert.equal(data.usd, null)
+  assert.equal(data.unpriced, report.rows.reduce((sum, row) => sum + row.requests, 0))
+  assert.equal(data.series[0].values[0], null)
+  assert.doesNotMatch(data.series[0].points, /NaN|Infinity/)
+  assert.deepEqual(activityValue(legacy.timeline[0], report.rows[0].key, "usd"), { value: null, incomplete: true })
+  assert.equal(dollars(legacy.rows[0].usd), "—")
 })
 
 test("chart hover labels use one hourly endpoint or the daily bucket's date", () => {
@@ -121,8 +151,8 @@ test("all additional bridge commands are fixed passive reads; total omits --by",
     return usageFixture()
   })
   const signal = new AbortController().signal
-  await client.tokens(signal); await client.models(signal); await client.usage({ by: "total", period: "day" }, signal)
-  assert.deepEqual(calls, [["token", "list", "--json"], ["models", "--json"], ["usage", "--period", "day", "--json"]])
+  await client.tokens(signal); await client.models(signal); await client.usage({ by: "total", period: "24h" }, signal)
+  assert.deepEqual(calls, [["token", "list", "--json"], ["models", "--json"], ["usage", "--period", "24h", "--json"]])
 })
 
 test("settings reads allowlisted profile metadata only and does not expose credentials", async () => {

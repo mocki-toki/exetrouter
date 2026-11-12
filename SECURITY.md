@@ -13,9 +13,9 @@ Use [GitHub private vulnerability reporting](https://github.com/mocki-toki/exetr
 | Bearer/authorization headers | Never logged; router bearer verification uses keyed hashes |
 | OAuth tokens | Encrypted with account-bound AEAD under a separate private key |
 | Personal metadata | Client-encrypted token names and dashboard preferences; user key never sent to service. Retired encrypted account labels may remain in older state |
-| Usage | User/token IDs, validated model ID, numeric usage, fixed statuses, timings and request/response identifiers |
+| Usage | User/token IDs, validated model ID, numeric usage, fixed statuses, timings and request/response identifiers; model-priced aggregate USD estimates on demand, without storing per-request cost or payloads |
 | Conversation affinity | Client-carried authenticated ownership envelopes and encrypted digest-only transfer receipts; legacy digest overrides remain readable without new rows. Unwrapped client context is rejected. Bounded current WS history exists only in transient memory |
-| Subscription limits | Percentages, durations, reset/observation times, bounded seven-day hourly numeric history, cooldowns, sanitized credit expiry/count metadata and digest-only automatic-redemption audit outcomes; upstream credit IDs remain transient |
+| Subscription limits | Percentages, durations, reset/observation times, bounded 365-day hourly numeric history, cooldowns, sanitized credit expiry/count metadata and digest-only automatic-redemption audit outcomes; upstream credit IDs remain transient |
 | Native tools | Fixed account/feature pause metadata and bounded user-scoped search-session HMAC/account bindings; no image bytes, prompts, raw session IDs, queries, reference strings or search results |
 | MCP | No persistent protocol sessions or payloads; authenticated user-scoped session correlations and bounded in-flight cancellation digests/signals in memory only. Same router bearer, account controls and accounting as native operations |
 | Account identity | Operator-owned account metadata and display email extracted from encrypted issuer credentials |
@@ -23,6 +23,8 @@ Use [GitHub private vulnerability reporting](https://github.com/mocki-toki/exetr
 ### Logs
 
 Operational logs contain fixed event names, server-generated correlation IDs, numeric statuses/counts and timing. Unavailable models use the fixed label `unavailable`; unvalidated model input, upstream error messages, header values and arbitrary JSON keys are never saved.
+
+Inference rejection diagnostics add only exact allowlisted error code/type/parameter labels and the observed numeric error status, correlated with the router request ID and transport. Missing, malformed or unrecognized labels become `unknown`; messages, detail text and arbitrary parameter paths are never inspected for logging. A bounded upstream `x-request-id` may be logged as a correlation identifier only when nonempty and composed of ASCII letters, digits, hyphens and underscores. Missing IDs/statuses remain absent. Each attempt logs its original rejection once, not a second diagnostic for a synthetic redacted event. This adds no payload retention, database schema, replay or routing decision.
 
 Client WebSocket diagnostics correlate upgrade receipt, session opening/closure, text-frame receipt and generation admission with a generated connection ID and numeric frame sequence. They record frame byte counts and preparation/write/first-event timings, not frame contents. Native upstream request start, successful socket write, first event and interruption share generated request/connection IDs. A successful write does not prove upstream acceptance. Session closure reasons are fixed categories; `session_ended` covers exits without a more specific observed client-side cause.
 
@@ -45,6 +47,12 @@ The summary separates last non-close peer-frame/pong ages from last allowlisted 
 Use separate unprivileged service/gateway UIDs, protected state/keys and reviewed TLS ingress. [Deployment templates](deploy/README.md) disable API access/error logging, buffering and caching. Keep payload/debug/packet capture, WAF body inspection and APM body capture disabled in your ingress. Client applications and OpenAI have their own retention policies.
 
 Management exposes account identities, usage totals, model IDs and operational metadata, never conversations or request bodies. Content passes through memory after TLS termination. A host operator can inspect memory or replace software, so this is not end-to-end confidentiality against that operator. Connect directly to a trusted provider if that property is required.
+
+Capacity outlook derives bounded, numeric account/window calibrations and shared
+request counts from existing usage/quota metadata on authenticated management
+reads. It stores no new data and exposes no per-user/token traffic breakdown,
+credit ID, credential or request content. The reset-eligibility preview is
+read-only: it cannot reserve, redeem, retry or mark recovery of a credit.
 
 Account client-presence reports share server-wide token counts and pseudonymous last-request/running activity with authenticated management users. Viewers receive their own token IDs and encrypted names; other users' clients expose only domain-separated keyed aliases and timing/count metadata, never names, ciphertext, raw token IDs or user identities. Token management and detailed per-token usage remain user-scoped.
 

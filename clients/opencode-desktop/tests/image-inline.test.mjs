@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import * as files from "../src/image-files.mjs"
 import * as inline from "../src/image-inline.mjs"
+import plugin from "../src/index.ts"
 
 const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="
 const file = { type: "file", mime: "image/png", uri: png }
@@ -310,12 +311,39 @@ test("public renderer reads its owning session/server, not the selected chat, an
   assert.equal(root.children.length, 0)
 })
 
-test("presentation instructions apply only when actual image tools are available; old gallery is absent", async () => {
-  assert.equal(inline.enabled({ exetrouter_generate_image: {} }), true)
-  assert.equal(inline.enabled({ exetrouter_edit_image: {} }), true)
-  assert.equal(inline.enabled({ shell: {} }), false)
+test("legacy image renderer does not supply model instructions or restore the old gallery", async () => {
+  assert.equal("instructions" in inline, false)
+  assert.equal("enabled" in inline, false)
   const source = await readFile(new URL("../src/window.tsx", import.meta.url), "utf8")
   assert.doesNotMatch(source, /installGallery|slash: \{ name: "images"|FLEET_IMAGE_GALLERY/)
-  assert.match(inline.instructions, /never retry an interrupted or uncertain image call automatically/)
-  assert.match(inline.instructions, /before EACH/)
+})
+
+test("plugin registers only account observation hooks and never modifies model context", async () => {
+  for (let load = 0; load < 2; load++) {
+    const hooks = new Map()
+    const close = await plugin.setup({
+      options: {},
+      session: { async hook(name, callback) { hooks.set(name, callback) } },
+      integration: { async transform() {}, connection: { async active() {} } },
+      provider: { async transform() {}, async reload() {} },
+      rpc: { async register() { return { events: { async emit() {} } } } },
+      event: { async *subscribe({ signal }) {
+        if (!signal.aborted) await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }))
+      } },
+    })
+    try {
+      assert.deepEqual([...hooks.keys()], ["model.request", "http.response", "experimental.ws.receive"])
+      for (const tools of [{ shell: {} }, { shell: {}, exetrouter_generate_image: {}, exetrouter_edit_image: {} }]) {
+        const event = {
+          sessionID: "synthetic-session", kind: "primary", model: { providerID: "exetrouter", id: "synthetic" },
+          headers: {}, system: [{ type: "text", text: "Original instructions" }],
+          messages: [{ role: "user", content: "Synthetic request" }], tools,
+        }
+        const original = structuredClone(event)
+        await hooks.get("model.request")(event)
+        assert.deepEqual({ ...event, headers: original.headers }, original)
+        assert.deepEqual(event.headers, { "x-exetrouter-observe-account": "true" })
+      }
+    } finally { await close() }
+  }
 })

@@ -3,10 +3,6 @@
 import { animateParticles, openImageViewer, imageCss } from "./image-visuals.mjs"
 const imageTools = new Set(["exetrouter_generate_image", "exetrouter_edit_image"])
 const tokenPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{7,63}$/
-const instructions = `Image presentation in OpenCode Desktop:
-Immediately before EACH ExetRouter image generation or editing tool call, emit a complete fenced code block with language fleet-image. Its only content must be a new unique 12–64 character ASCII identifier (letters, digits, hyphen or underscore). Never reuse an identifier from earlier in this session. Emit markers in the same order as their image calls, one marker per call. This is a UI reference, not a URL, path, prompt or image data.
-The Desktop plugin replaces that marker with the real call's waiting state and saved result. Do not open a preview or gallery tab, repeat the image as base64/Markdown, or emit a second marker after completion. You may describe the result normally. Only generate/edit when the user requests it; never retry an interrupted or uncertain image call automatically.`
-
 function markers(text) {
   const found = []
   let fence, lines = []
@@ -252,5 +248,4 @@ function installInlineImages(ctx, { CodeBlock, Style, createKeyed, onCleanup, co
   return true
 }
 
-const enabled = tools => [...imageTools].some(name => Object.hasOwn(tools ?? {}, name))
-export { instructions, markers, findCard, createCard, renderCard, installInlineImages, css, enabled }
+export { markers, findCard, createCard, renderCard, installInlineImages, css }

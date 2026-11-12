@@ -5,6 +5,7 @@ import { count, date } from "./format"
 import type { Profile, Tokens } from "./schemas"
 import { Badge, CopyButton, EmptyState, Fields, List, Notice, ReadState, Row, SearchField, Section, useDashboardState, useDialog, useHost } from "./ui"
 import { ClipboardNotice, confirmAction, configureConnection, loginAccount, tokenForm } from "./actions"
+import { ActionMenu } from "./action-menu"
 
 export function TokensView(props: { now: number; revision?: string }) {
   const ctx = useHost(), ui = ctx.ui, open = useDialog()
@@ -15,24 +16,22 @@ export function TokensView(props: { now: number; revision?: string }) {
   const refresh = () => setRevision((n) => n + 1)
   const report = createLatest(() => ({ revision: revision(), live: live() }), (_, signal) => ctx.main(Dashboard).tokens({ signal }))
   const rows = createMemo(() => report.latest?.filter((token) => `${token.name} ${token.id}`.toLowerCase().includes(query().trim().toLowerCase())) ?? [])
-  const status = (token: typeof Tokens.Type[number]) => token.status === "Active" && token.expiresAt !== null && token.expiresAt <= props.now ? "Expired" : token.status
-  const details = (id: string) => open((dialog) => {
-    const token = () => report.latest?.find((t) => t.id === id)
-    return <ui.Dialog title={token()?.name ?? "Token details"} description="Metadata only. The secret cannot be retrieved." footer={<ui.Button onClick={dialog.close}>Done</ui.Button>}>
-      <div class="exr exr-dialog-content"><Show when={token()}>{(t) => <Fields rows={[["Token ID", <span class="exr-inline-start"><code>{t().id}</code><CopyButton value={t().id} label="Copy token ID" /></span>], ["Name", t().name], ["Status", status(t())], ["Created", date(t().createdAt)], ["Expires", date(t().expiresAt)], ["Last used", date(t().lastUsedAt)]]} />}</Show></div>
-    </ui.Dialog>
-  })
+  const status = (token: typeof Tokens.Type[number]) => ["Active", "Disabled"].includes(token.status) && token.expiresAt !== null && token.expiresAt <= props.now ? "Expired" : token.status
   return <div class="exr-view"><Section title="Your tokens" action={<ui.Button size="small" disabled={state()?.clipboardPending} onClick={() => tokenForm(open, undefined, refresh)}>Create token</ui.Button>}>
     <ClipboardNotice refresh={refresh} />
     <SearchField label="Search tokens" value={query()} onInput={setQuery} />
     <ReadState loading={report.loading} error={report.error} hasData={report.latest !== undefined} noun="tokens" />
     <Show when={report.latest}><List><For each={rows()} fallback={<EmptyState icon="lock" title={query() ? "No matching tokens" : "No API tokens yet"} description={query() ? "Try another name or token ID." : "Create your first token to connect an app."} />}>
-      {(token) => <Row title={token.name} description={<><code class="exr-truncate" title={token.id}>{token.id}</code><span>Expires {date(token.expiresAt)}</span><span>Last used {date(token.lastUsedAt)}</span></>}>
-        <Badge tone={status(token) === "Active" ? "success" : "neutral"}>{status(token)}</Badge><ui.Menu label={`Actions for ${token.name}`} trigger="icon" items={[
-          { label: "Rename token", onSelect: () => tokenForm(open, token, refresh) },
-          { label: "Rotate token", disabled: state()?.clipboardPending, onSelect: () => confirmAction(open, { title: "Rotate token?", description: `Replace ${token.name}. The old secret stops working immediately. The new secret is copied directly to your clipboard.`, submit: "Rotate and copy", input: { action: "token_rotate", id: token.id, confirmed: true }, danger: true, done: refresh }) },
-          { label: "Revoke token", disabled: token.status === "Revoked", onSelect: () => confirmAction(open, { title: "Revoke token?", description: `${token.name} will stop authorizing new requests. This cannot be undone.`, submit: "Revoke token", input: { action: "token_revoke", id: token.id, confirmed: true }, danger: true, done: refresh }) },
-        ]} /><ui.Tooltip value="Token details"><ui.IconButton icon="chevron-right" label={`View ${token.name} details`} onClick={() => details(token.id)} /></ui.Tooltip>
+      {(token) => <Row title={token.name} description={<><span class="exr-inline-start"><code class="exr-truncate" title={token.id}>{token.id}</code><CopyButton value={token.id} label="Copy token ID" /></span><span>Created {date(token.createdAt)}</span><span>Expires {date(token.expiresAt)}</span><span>Last used {date(token.lastUsedAt)}</span></>}>
+        <Badge tone={status(token) === "Active" ? "success" : "neutral"}>{status(token)}</Badge>
+        <Badge>Fast: {token.fastMode == null ? "Default" : token.fastMode ? "Allow" : "Block"}</Badge>
+        <ActionMenu label={`Actions for ${token.name}`} entries={[
+          { label: "Rename", run: () => tokenForm(open, token, refresh) },
+          { label: "Fast mode", disabled: !["Active", "Disabled"].includes(status(token)), items: [{ label: "Default", value: null }, { label: "Allow", value: true }, { label: "Block", value: false }].map((mode) => ({ label: mode.label, checked: (token.fastMode ?? null) === mode.value, run: () => confirmAction(open, { title: "Change Fast mode?", description: `${token.name}: ${mode.label.toLowerCase()}. Default inherits the server policy; allow and block override it.`, submit: "Save", input: { action: "token_fast_mode", id: token.id, enabled: mode.value, confirmed: true }, done: refresh }) })) },
+          { label: token.status === "Disabled" ? "Enable" : "Disable", disabled: !["Active", "Disabled"].includes(status(token)), run: () => confirmAction(open, { title: token.status === "Disabled" ? "Enable token?" : "Disable token temporarily?", description: token.status === "Disabled" ? `${token.name} will work again with its existing secret.` : `${token.name} will stop authorizing new requests. You can enable it later without changing the secret.`, submit: token.status === "Disabled" ? "Enable" : "Disable", input: { action: "token_set_enabled", id: token.id, enabled: token.status === "Disabled", confirmed: true }, done: refresh }) },
+          { label: "Rotate", disabled: state()?.clipboardPending, run: () => confirmAction(open, { title: "Rotate token?", description: `Replace ${token.name}. The old secret stops working immediately. The new secret is copied directly to your clipboard.`, submit: "Rotate and copy", input: { action: "token_rotate", id: token.id, confirmed: true }, danger: true, done: refresh }) },
+          { label: "Revoke", disabled: token.status === "Revoked", run: () => confirmAction(open, { title: "Revoke token?", description: `${token.name} will stop authorizing new requests. This cannot be undone.`, submit: "Revoke", input: { action: "token_revoke", id: token.id, confirmed: true }, danger: true, done: refresh }) },
+        ]} />
       </Row>}
     </For></List></Show>
   </Section></div>

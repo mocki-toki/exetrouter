@@ -1,6 +1,7 @@
 /* Scoped adaptations of OpenCode Desktop 2.2.5: Context, SettingsList/Row,
    tabs-current.css and badge.css. See docs/opencode-desktop.md for sources.
-   Host controls remain ctx.ui components; no dependency on lazy host CSS. */
+   Host controls use ctx.ui where exposed; submenu structure is local.
+   No dependency on lazy host CSS. */
 .exr {
   --font-family-mono: var(--font-family-sans);
   --v2-font-family-code: var(--font-family-sans);
@@ -24,6 +25,13 @@
   -webkit-font-smoothing: antialiased;
 }
 .exr *, .exr *::before, .exr *::after { box-sizing: border-box; }
+.exr-action-menu { position: fixed; z-index: 1000; width: 188px; padding: 4px; border: 1px solid var(--exr-border); border-radius: 8px; background: var(--v2-background-bg-layer-02); box-shadow: 0 6px 24px #0003; }
+.exr-action-entry { position: relative; }
+.exr-action-entry > button { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 6px 8px; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.exr-action-entry > button:hover, .exr-action-entry > button:focus-visible { background: var(--v2-background-bg-layer-03); outline: none; }
+.exr-action-entry > button:disabled { opacity: .4; cursor: default; }
+.exr-action-submenu { position: absolute; top: -4px; left: 100%; width: 156px; }
+.exr-action-submenu[data-flip] { left: auto; right: 100%; }
 .exr :is(h2, h3, h4, p, dl) { margin: 0; }
 .exr :is(h3, h4, strong) { font-size: inherit; font-weight: 530; }
 .exr h2 { font-size: 15px; font-weight: 640; }
@@ -159,6 +167,15 @@
 .exr-toolbar, .exr-chart-toolbar { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .exr-chart-toolbar { margin-top: 0; margin-bottom: 8px; }
 .exr-toolbar { margin-bottom: 8px; }
+.exr-range-actions { margin-inline-start: auto; }
+.exr-capacity { margin-block: 12px; padding: 16px; border: .5px solid var(--exr-tone-border, var(--exr-border)); border-radius: 8px; background: var(--v2-background-bg-layer-01); }
+.exr-capacity > .exr-fields { margin-block: 10px; }
+.exr-capacity footer { margin-top: 8px; gap: 12px; }
+.exr-capacity-table { overflow-x: auto; }
+.exr-capacity-table table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; }
+.exr-capacity-table :is(th,td) { padding: 10px 8px; border-bottom: .5px solid var(--exr-border); vertical-align: top; }
+.exr-capacity-table td { min-width: 120px; }
+.exr-capacity-table td > :is(span,strong) { display: block; }
 .exr-menu-select { min-width: 0; max-width: 100%; }
 .exr-menu-select button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .exr-chart { margin-block: 16px; padding: 16px; border: .5px solid var(--v2-border-border-muted); border-radius: 8px; background: var(--v2-background-bg-layer-01); }

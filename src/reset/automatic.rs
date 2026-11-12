@@ -31,7 +31,13 @@ fn request_id(digest: &[u8; 32]) -> String {
     )
 }
 fn eligible(current: &Live, now: i64) -> Option<&Credit> {
-    let credits = current.credits.as_ref()?;
+    eligible_metadata(&current.quota, current.credits.as_ref()?, now)
+}
+pub(super) fn eligible_metadata<'a>(
+    quota: &crate::quota::Summary,
+    credits: &'a Credits,
+    now: i64,
+) -> Option<&'a Credit> {
     if !credits.details_available
         || credits.available_count <= 0
         || !crate::routing::fresh(credits.observed_at, now)
@@ -43,8 +49,7 @@ fn eligible(current: &Live, now: i64) -> Option<&Credit> {
     if expiry <= now {
         return None;
     }
-    let windows: Vec<_> = current
-        .quota
+    let windows: Vec<_> = quota
         .windows
         .iter()
         .filter(|w| {
@@ -62,7 +67,7 @@ fn eligible(current: &Live, now: i64) -> Option<&Credit> {
         return None;
     }
     // A full reset is not spent just because the renewable short window ran out.
-    let week = weekly(&current.quota)?;
+    let week = weekly(quota)?;
     (week.remaining_percent <= 1.0 && windows.iter().any(|w| w.window_minutes == Some(10080)))
         .then_some(credit)
 }
@@ -399,6 +404,57 @@ mod tests {
     }
     fn usage_value(now: i64) -> Value {
         json!({"rate_limit":{"allowed":true,"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":now+3600},"secondary_window":{"used_percent":99,"limit_window_seconds":604800,"reset_at":now+5*DAY}},"rate_limit_reset_credits":{"available_count":2}})
+    }
+
+    #[tokio::test]
+    async fn outlook_credit_preview_is_read_only_and_respects_pending_recovery() {
+        let f = Fixture::new().await;
+        let current = f.upstream.live_limits(1).await.unwrap();
+        let now = Utc::now().timestamp();
+        // Before the worker has observed inventory, the dashboard cannot assume
+        // recovery/cohort fences have been checked.
+        assert!(f
+            .upstream
+            .db
+            .call(move |conn| crate::reset::preview(conn, 1, now))
+            .await
+            .unwrap()
+            .is_none());
+        let attempt = f
+            .upstream
+            .reset_attempt(&current, now)
+            .await
+            .unwrap()
+            .unwrap();
+        let expiry = current.credits.as_ref().unwrap().credits[0].expires_at;
+        let generation = current.account.info.generation;
+        let order = current.order;
+        f.upstream
+            .db
+            .call(move |conn| {
+                let before = conn.total_changes();
+                assert_eq!(crate::reset::preview(conn, 1, now)?, expiry);
+                assert_eq!(
+                    conn.total_changes(),
+                    before,
+                    "preview never claims, observes or recovers a credit"
+                );
+                assert!(crate::reset::preview(conn, 1, now + 60)?.is_none());
+                assert!(ledger::claim(conn, 1, generation, order, now, attempt)?);
+                assert!(
+                    crate::reset::preview(conn, 1, now)?.is_none(),
+                    "submitted without recovery is never reserve capacity"
+                );
+                conn.execute("UPDATE automatic_reset_attempts SET status='unknown'", [])?;
+                assert!(crate::reset::preview(conn, 1, now)?.is_none());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            f.mock.bodies.lock().unwrap().is_empty(),
+            "dashboard preview must not POST a reset"
+        );
     }
     async fn upstream(url: &str, db: crate::store::Database) -> Upstream {
         db.call(|conn|{

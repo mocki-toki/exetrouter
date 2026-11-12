@@ -18,6 +18,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/012_automatic_routing.sql"),
     include_str!("migrations/013_native_tools.sql"),
     include_str!("migrations/014_quota_history.sql"),
+    include_str!("migrations/015_fast_mode.sql"),
 ];
 pub const SCHEMA_VERSION: usize = MIGRATIONS.len();
 const QUEUE_CAPACITY: usize = 32;
@@ -127,6 +128,40 @@ mod tests {
     use crate::{authenticate, create_token, create_user};
 
     #[test]
+    fn schema_15_preserves_existing_token_secret_and_defaults_to_enabled_without_fast() {
+        let conn = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..14] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 14).unwrap();
+        let user = create_user(&conn, "alice").unwrap();
+        let token = create_token(&conn, &[1; 32], user, "laptop", 90).unwrap();
+        init(&conn).unwrap();
+        let metadata = crate::token_info(&conn, user, &token.token.id)
+            .unwrap()
+            .unwrap();
+        assert!(!metadata.disabled);
+        assert_eq!(metadata.fast_mode, None);
+        assert_eq!(
+            authenticate(&conn, &[1; 32], &token.secret)
+                .unwrap()
+                .unwrap()
+                .0,
+            user
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, usize>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+    }
+
+    #[test]
     fn native_tools_migration_and_reupgrade_preserve_policy_credentials_and_bindings() {
         let conn = Connection::open_in_memory().unwrap();
         for migration in &MIGRATIONS[..12] {
@@ -154,6 +189,7 @@ mod tests {
         .unwrap();
         // The reviewed offline rollback retains additive tables, then migration
         // 013 can run again without losing backend ownership or cooldown.
+        conn.execute_batch("ALTER TABLE access_tokens DROP COLUMN fast_mode; ALTER TABLE access_tokens DROP COLUMN disabled;").unwrap();
         conn.pragma_update(None, "user_version", 12).unwrap();
         init(&conn).unwrap();
         assert!(authenticate(&conn, &[1; 32], &token.secret)
@@ -214,7 +250,7 @@ mod tests {
         assert_eq!(state, ("1234".into(), 7, 2000, "upstream_reset".into(), 0));
         let tx = conn.transaction().unwrap();
         tx.execute_batch(
-            "DROP TABLE account_routing_metadata; DROP TABLE automatic_reset_attempts; ALTER TABLE oauth_accounts DROP COLUMN cooldown_order; PRAGMA user_version=10;",
+            "DROP TABLE account_routing_metadata; DROP TABLE automatic_reset_attempts; ALTER TABLE oauth_accounts DROP COLUMN cooldown_order; ALTER TABLE access_tokens DROP COLUMN fast_mode; ALTER TABLE access_tokens DROP COLUMN disabled; PRAGMA user_version=10;",
         )
         .unwrap();
         tx.commit().unwrap();
@@ -242,6 +278,7 @@ mod tests {
         init(&conn).unwrap();
         conn.execute("INSERT INTO automatic_reset_attempts(cycle_digest,credit_digest,account_id,attempted_at,quota_snapshot,status) VALUES(zeroblob(32),zeroblob(32),1,0,'[]','unknown')",[]).unwrap();
         // Reviewed rollback keeps the additive tables; re-upgrade must not erase the guard.
+        conn.execute_batch("ALTER TABLE access_tokens DROP COLUMN fast_mode; ALTER TABLE access_tokens DROP COLUMN disabled;").unwrap();
         conn.pragma_update(None, "user_version", 11).unwrap();
         init(&conn).unwrap();
         assert_eq!(

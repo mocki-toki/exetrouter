@@ -204,7 +204,8 @@ impl Vault {
 }
 
 pub(super) async fn request(args: &Session, mut request: ControlRequest) -> Result<Value> {
-    if matches!(&request, ControlRequest::Usage { by: Some(by), .. } if by == "token") {
+    if matches!(&request, ControlRequest::Usage { by: Some(by), .. } | ControlRequest::UsageRange { by: Some(by), .. } if by == "token")
+    {
         let mut result = raw_request(args, request).await?;
         let vault = args
             .connection

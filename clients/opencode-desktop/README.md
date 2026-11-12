@@ -49,6 +49,34 @@ OpenCode's native credential store.
 Do not put a token in plugin options, configuration, command arguments or logs.
 This plugin never issues/rotates a token automatically.
 
+## Updating a local installation
+
+This package is loaded from the configured local directory. Neither `exr update`
+nor an OpenCode update downloads new plugin sources or rebuilds its GUI bundle.
+For a checkout with no local changes, update to the reviewed release and rebuild:
+
+```sh
+cd /absolute/path/to/exetrouter
+git fetch origin tag v0.9.0
+git switch --detach v0.9.0
+cd clients/opencode-desktop
+npm ci --ignore-scripts --no-audit --no-fund
+npm run typecheck
+npm run build
+exr update
+opencode service restart
+```
+
+Use the installation method's update command for Homebrew or Nix clients instead
+of `exr update`. If the checkout has local changes, preserve it and use a separate
+clone at the release tag, then change only this plugin's `package` path in global
+OpenCode configuration. Keep existing connection options and credentials. The
+native `exr` client and router server should both be 0.9.0 for all 0.4.0 features.
+Restart the OpenCode background service after rebuilding; reopening a window
+alone does not reload the server plugin. Reopen the panel afterward.
+
+## Using the provider
+
 Select an `exetrouter/<model>` through the normal model picker. No default model
 is forcibly selected. **Open ExetRouter** opens the panel in the current session.
 The side panel's **+** menu also offers ExetRouter. A native quota indicator above
@@ -64,12 +92,19 @@ last confirmed account. Completion, idle periods and metadata without an account
 alias do not clear it; a confirmed transfer updates it and switching to another
 provider clears it.
 Observations are bounded in memory only; loading the panel never submits inference.
-Account details show short and weekly windows together in a seven-day hourly
-quota chart, with distinct colors and pointer/keyboard values. The router collects
+Account details show short and weekly windows together in an hourly quota chart,
+with distinct colors and pointer/keyboard values. Usage and Limit history offer
+rolling **24 hours, 7 days, 30 days and 90 days**, with arrows to previous/next
+intervals. The router collects
 numeric history through existing metadata observations, including while this
 panel is closed. This requires router/native exr 0.8.4 or later; collection starts
-after upgrade and missing hours remain gaps. See the reviewed
+after upgrade and missing hours remain gaps. Paging requires updated router/native
+binaries (0.9.0 or later) with `usage_range` and `quota_history` management reads; 0.8.4 supplies
+only the latest seven-day limit snapshot. Retention is bounded to 365 days, and
+previously discarded observations cannot be backfilled. See the reviewed
 [schema-14 migration/rollback](../../docs/quota-history.md).
+Upgrading a 0.8.4 router to 0.9.0 also requires the reviewed
+[schema 14 to 15 migration](../../docs/fast-mode-migration.md); Fast defaults off.
 There is no separate ExetRouter page in OpenCode Settings.
 
 The panel follows the TUI's five views with a compact, theme-aware web layout.
@@ -77,21 +112,30 @@ It uses OpenCode's buttons, icon buttons, menus, search fields, loaders,
 tooltips and dialogs. Shared layout components live in `src/ui.tsx`; the shell,
 overview, usage and resource views are separate modules. Tabs and quota bars
 are accessible custom components because the host SDK does not provide them.
+The token action menu also uses a local accessible submenu, which the SDK's
+item-list menu API cannot represent.
 No separate UI framework or terminal renderer is bundled.
 
 - **Overview:** router status, OAuth/catalog/concurrency, account availability,
+  a compact [capacity outlook](../../docs/capacity-outlook.md) with model-scoped
+  runway/interruption estimates, expiring credits and detailed reserve/scenario
+  inspection (requires updated router/native metadata),
   Best/Priority markers, reset credits/expiry, automatic reset and weekly
   activation status, reported quota windows/reset times, cooldown and bounded
   session-local forecasts. Open account details for routing/target share/deadline
   and server-wide client activity (own names and other users' aliases) in a
   live-updating details dialog.
-- **Usage:** the same four periods, total/user/model/token grouping, requests or
-  reported-token activity, series selection and cached/nullable breakdown cards.
+- **Usage:** rolling periods and interval paging, total/user/model/token grouping,
+  requests, reported tokens or a [standard API USD estimate](../../docs/usage-pricing.md),
+  series selection and cached/nullable breakdown cards. The estimate is model-weighted,
+  excludes unpriced requests and is not actual ChatGPT subscription spending.
   The chart has its own inset container; hover/keyboard values sit away from its
   cursor and use one hourly timestamp or one daily date.
   Large grouped reports select one series rather than rendering unbounded lines.
-- **Tokens:** searchable decrypted token labels and metadata dialogs: ID, status,
-  creation, expiry and last use; create, rename, rotate and revoke actions.
+- **Tokens:** searchable decrypted labels with inline ID, status, creation, expiry
+  and last use. Fast preference appears beside status; **Fast mode → Default /
+  Allow / Block** changes the per-token override. Create, rename, temporarily
+  disable/re-enable, rotate and revoke actions remain available.
   Issuance copies secrets natively. A failed copy retains one secret for retry,
   without issuing another token or returning it to the window.
 - **Models:** searchable catalog in reverse order, model ID, display name,
@@ -206,9 +250,11 @@ full inference compatibility matrix.
 
 OpenCode Desktop 2.2.6+ uses this extension's `CodeBlock` renderer for ExetRouter
 MCP image results. A `fleet-image` reference emitted immediately before each call
-binds to the next image tool in the same assistant message. The server hook supplies
-the instructions and a unique response prefix. Existing references stay readable;
-history is never rewritten. A missing reference cannot be inserted by the GUI API.
+binds to the next image tool in the same assistant message. The plugin leaves
+system instructions, messages and tool definitions unchanged and does not ask the
+model to emit these references. Existing references stay readable; history is
+never rewritten. Without a reference, this custom renderer does not create a card;
+a missing reference cannot be inserted by the GUI API.
 
 Previews preserve the image's aspect ratio within 300 × 300 CSS pixels (shrinking
 on narrow screens), with no caption, download row or extra padding. Waiting shows a

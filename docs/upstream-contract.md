@@ -20,6 +20,8 @@ Reviewed client revisions live in [protocol-sources.json](protocol-sources.json)
 
 Redirects are disabled. Mock upstream requires explicitly enabled literal loopback HTTP. Server-owned headers never forward the client bearer, arbitrary account selection or an arbitrary upstream URL.
 
+Fast (`service_tier: "priority"`) is stripped from transient inference payloads unless permitted by the global/token policy, before transport selection or upstream submission. It is not a quota-reset or account-routing control. See [Fast-mode policy](server-cli.md).
+
 The upstream WS handshake offers RFC 7692 `permessage-deflate`, using the exact transport forks pinned by the reviewed Codex 0.164.0 release. Compression is used only after valid negotiation; a declined extension retains plain continuation frames. Decoded upstream event bounds remain independent of the input/context size. See the [targeted source review](native-protocol-audit.md#targeted-websocket-compression-follow-up--october-26-2026); no inference is replayed to negotiate or recover from a size rejection.
 
 Prepared complete generation JSON of at least 16 MiB selects HTTP SSE before submission, including behind a client-facing native WS. This heuristic avoids the WS whole-message boundary without claiming an exact provider limit or rejecting input. Keep the selected account, scoped identity, Lite mode, full input and durable accounting; never retry a submitted WS message over HTTP. HTTP continuations expand the bounded latest window or return a pre-submission `previous_response_not_found` for client-controlled full input. Native non-generating warmup stays on WS. HTTP status errors remain redacted; quota/auth/health are observed from the actual HTTP response, not reinterpreted from their downstream projection.
@@ -49,6 +51,13 @@ Observation order and credential generation reject old updates; parallel success
 A dedicated live usage refresh with explicit `rate_limit.allowed: true` and valid general-meter windows may clear an `upstream_reset` cooldown, including after a reset outside the router. It never clears `retry_after`, `local_backoff` or operational health pauses. Recovery and window storage are atomic and require the same active credential generation. Any quota rejection saved for that account after the refresh order was allocated conservatively defers recovery until another refresh, even if the rejection has no windows or leaves the deadline unchanged. Newer stored windows also prevent recovery. Ordinary inference successes still cannot clear cooldown. See [schema 10 to 11](cooldown-recovery-migration.md) for the durable per-account fence and deployment/rollback requirements.
 
 ## Operational failures
+
+HTTP read budgets are 900 seconds for inference and 300 seconds for metadata.
+On platforms supporting `TCP_USER_TIMEOUT`, the socket's unacknowledged-data
+budget matches the read budget instead of reqwest's shorter 30-second default.
+TCP keepalive remains enabled; neither it nor downstream heartbeats renew the
+application read deadline. A transport failure still never authorizes replay of
+an ambiguously submitted inference.
 
 Catalog, refresh and Responses have separate 5–300-second backoff, extended by valid `Retry-After`. Upstream 401 returns a redacted authentication error and schedules refresh for a separate next operation; repeated rejection of refreshed credentials requires reauthorization. Transfers never bypass authentication or operational backoff and always require an enabled replacement account.
 

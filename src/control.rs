@@ -14,6 +14,15 @@ pub enum ControlRequest {
         id: String,
         name: String,
     },
+    /// None inherits the operator setting; true/false override it for this token.
+    TokenFastMode {
+        id: String,
+        enabled: Option<bool>,
+    },
+    TokenSetEnabled {
+        id: String,
+        enabled: bool,
+    },
     PrivateList,
     PrivatePut {
         id: String,
@@ -35,6 +44,17 @@ pub enum ControlRequest {
         timezone: Option<String>,
     },
     Models,
+    UsageRange {
+        period: String,
+        by: Option<String>,
+        timezone: Option<String>,
+        before: Option<i64>,
+    },
+    QuotaHistory {
+        account: i64,
+        period: String,
+        before: Option<i64>,
+    },
     Doctor,
     Limits,
     ResetPrepare {
@@ -70,6 +90,18 @@ pub fn control(
                 return Err("token not found".into());
             }
             serde_json::json!({"updated":true})
+        }
+        ControlRequest::TokenFastMode { id, enabled } => {
+            if conn.execute("UPDATE access_tokens SET fast_mode=?1 WHERE id=?2 AND user_id=?3 AND revoked_at IS NULL AND expires_at>?4", rusqlite::params![enabled,id,user_id,chrono::Utc::now().timestamp()])? != 1 {
+                return Err("token not found or inactive".into());
+            }
+            serde_json::json!({"updated":true,"fast_mode":enabled})
+        }
+        ControlRequest::TokenSetEnabled { id, enabled } => {
+            if conn.execute("UPDATE access_tokens SET disabled=?1 WHERE id=?2 AND user_id=?3 AND revoked_at IS NULL AND expires_at>?4", rusqlite::params![!enabled,id,user_id,chrono::Utc::now().timestamp()])? != 1 {
+                return Err("token not found or inactive".into());
+            }
+            serde_json::json!({"updated":true,"enabled":enabled})
         }
         ControlRequest::PrivateList => {
             let mut statement = conn.prepare("SELECT object_id,ciphertext FROM private_metadata WHERE user_id=?1 ORDER BY object_id")?;
@@ -133,6 +165,30 @@ pub fn control(
             timezone.as_deref(),
         )?)?,
         ControlRequest::Models => serde_json::json!({"data":[],"object":"list"}),
+        ControlRequest::UsageRange {
+            period,
+            by,
+            timezone,
+            before,
+        } => serde_json::to_value(crate::usage::usage_range_for_user(
+            conn,
+            user_id,
+            &period,
+            by.as_deref(),
+            timezone.as_deref(),
+            before,
+        )?)?,
+        ControlRequest::QuotaHistory {
+            account,
+            period,
+            before,
+        } => serde_json::to_value(crate::quota_history::range(
+            conn,
+            account,
+            &period,
+            before,
+            chrono::Utc::now().timestamp(),
+        )?)?,
         ControlRequest::ResetPrepare { .. } | ControlRequest::ResetConfirm { .. } => {
             return Err(
                 "Reset credits are managed automatically; manual redemption is no longer supported"

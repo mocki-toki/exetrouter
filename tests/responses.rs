@@ -172,6 +172,9 @@ impl Fixture {
         Self::with_limits(expired, 8).await
     }
     async fn with_limits(expired: bool, limit: usize) -> Self {
+        Self::with_fast_mode(expired, limit, false).await
+    }
+    async fn with_fast_mode(expired: bool, limit: usize, fast_mode: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path().join("state.sqlite"))
             .await
@@ -223,6 +226,7 @@ impl Fixture {
             upstream: Some(upstream.clone()),
             generations_per_user: limit,
             websockets_per_user: limit,
+            fast_mode,
         };
         let server = tokio::spawn(server::serve(serve_db, vec![1; 32], config, async {
             let _ = stopped.await;
@@ -302,6 +306,7 @@ impl Fixture {
             upstream: Some(self.upstream.clone()),
             generations_per_user: 8,
             websockets_per_user: 8,
+            fast_mode: false,
         };
         self.server = tokio::spawn(server::serve(self.db.clone(), vec![1; 32], config, async {
             let _ = stopped.await;
@@ -809,6 +814,182 @@ async fn backend_options_are_forwarded_over_http_and_websocket() {
         }
     }
     socket.close(None).await.unwrap();
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn fast_mode_defaults_off_and_token_override_controls_all_inference_surfaces() {
+    use exetrouter::ControlRequest;
+    let fixture = Fixture::start(false).await;
+    let mut socket = fixture.ws().await;
+    // HTTP Responses, Chat, compaction and native WS share the same policy.
+    let mut body = request();
+    body["service_tier"] = json!("priority");
+    assert_eq!(fixture.post(body.clone()).await.status(), 200);
+    let mut chat = chat_request(false);
+    chat["service_tier"] = json!("priority");
+    assert_eq!(fixture.chat(chat.clone()).await.status(), 200);
+    assert_eq!(fixture.compact(body.clone()).await.status(), 200);
+    body["type"] = json!("response.create");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    terminal(&mut socket).await;
+    assert!(fixture
+        .mock
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| r.get("service_tier").is_none()));
+    assert!(fixture.mock.compactions.lock().unwrap()[0]
+        .1
+        .get("service_tier")
+        .is_none());
+
+    let user = 1;
+    let id = fixture.token_id.clone();
+    fixture
+        .db
+        .call(move |conn| {
+            exetrouter::control(
+                conn,
+                &[1; 32],
+                user,
+                ControlRequest::TokenFastMode {
+                    id,
+                    enabled: Some(true),
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(fixture.post(request_with_fast()).await.status(), 200);
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    terminal(&mut socket).await;
+    assert_eq!(
+        fixture.mock.requests.lock().unwrap().last().unwrap()["service_tier"],
+        "priority"
+    );
+    let id = fixture.token_id.clone();
+    fixture
+        .db
+        .call(move |conn| {
+            exetrouter::control(
+                conn,
+                &[1; 32],
+                user,
+                ControlRequest::TokenFastMode { id, enabled: None },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    terminal(&mut socket).await;
+    assert!(fixture
+        .mock
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .get("service_tier")
+        .is_none());
+    socket.close(None).await.unwrap();
+    fixture.stop().await;
+}
+
+fn request_with_fast() -> Value {
+    let mut body = request();
+    body["service_tier"] = json!("priority");
+    body
+}
+
+#[tokio::test]
+async fn global_fast_mode_allows_fast_but_token_can_deny_it() {
+    let fixture = Fixture::with_fast_mode(false, 8, true).await;
+    assert_eq!(fixture.post(request_with_fast()).await.status(), 200);
+    assert_eq!(
+        fixture.mock.requests.lock().unwrap()[0]["service_tier"],
+        "priority"
+    );
+    let id = fixture.token_id.clone();
+    fixture
+        .db
+        .call(move |conn| {
+            exetrouter::control(
+                conn,
+                &[1; 32],
+                1,
+                exetrouter::ControlRequest::TokenFastMode {
+                    id,
+                    enabled: Some(false),
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(fixture.post(request_with_fast()).await.status(), 200);
+    assert!(fixture.mock.requests.lock().unwrap()[1]
+        .get("service_tier")
+        .is_none());
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn temporarily_disabled_token_rejects_http_and_next_websocket_frame_until_enabled() {
+    let fixture = Fixture::start(false).await;
+    let mut socket = fixture.ws().await;
+    let id = fixture.token_id.clone();
+    fixture
+        .db
+        .call(move |conn| {
+            exetrouter::control(
+                conn,
+                &[1; 32],
+                1,
+                exetrouter::ControlRequest::TokenSetEnabled { id, enabled: false },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(fixture.post(request()).await.status(), 401);
+    let mut body = request();
+    body["type"] = json!("response.create");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    let event: Value =
+        serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(event["error"]["code"], "authentication_error");
+    assert!(fixture.mock.requests.lock().unwrap().is_empty());
+    let id = fixture.token_id.clone();
+    fixture
+        .db
+        .call(move |conn| {
+            exetrouter::control(
+                conn,
+                &[1; 32],
+                1,
+                exetrouter::ControlRequest::TokenSetEnabled { id, enabled: true },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(fixture.post(request()).await.status(), 200);
     fixture.stop().await;
 }
 
@@ -3307,6 +3488,56 @@ async fn backend_validation_status_is_retained_but_errors_are_redacted_without_r
     assert!(rows
         .iter()
         .all(|r| r["status"] == "upstream_rejected" && r["input"].is_null()));
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn reviewer_style_chat_options_preserve_the_responses_contract() {
+    let fixture = Fixture::start(false).await;
+    let schema = json!({"type":"object","properties":{"approved":{"type":"boolean"}},"required":["approved"],"additionalProperties":false});
+    let mut body = chat_request(false);
+    body["messages"] = json!([
+        {"role":"system","content":"Review the synthetic change."},
+        {"role":"user","content":"Synthetic change only."}
+    ]);
+    body["reasoning_effort"] = json!("high");
+    body["max_tokens"] = json!(32);
+    body["max_completion_tokens"] = json!(64);
+    body["temperature"] = json!(0.2);
+    body["tools"] = json!([{"type":"function","function":{"name":"inspect_change","parameters":{"type":"object","properties":{}},"strict":true}}]);
+    body["tool_choice"] = json!({"type":"function","function":{"name":"inspect_change"}});
+    body["response_format"] =
+        json!({"type":"json_schema","json_schema":{"name":"review","strict":true,"schema":schema}});
+    assert_eq!(fixture.chat(body).await.status(), 200);
+    {
+        let requests = fixture.mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let sent = &requests[0];
+        assert_eq!(sent["model"], "gpt-test");
+        assert_eq!(sent["input"][0]["role"], "developer");
+        assert_eq!(sent["reasoning"], json!({"effort":"high"}));
+        assert_eq!(sent["max_output_tokens"], 64);
+        assert_eq!(sent["temperature"], 0.2);
+        assert_eq!(sent["tools"][0]["name"], "inspect_change");
+        assert_eq!(sent["tools"][0]["strict"], true);
+        assert_eq!(
+            sent["tool_choice"],
+            json!({"type":"function","name":"inspect_change"})
+        );
+        assert_eq!(
+            sent["text"]["format"],
+            json!({"type":"json_schema","name":"review","strict":true,"schema":schema})
+        );
+        for field in [
+            "messages",
+            "reasoning_effort",
+            "max_tokens",
+            "max_completion_tokens",
+            "response_format",
+        ] {
+            assert!(sent.get(field).is_none(), "{field}");
+        }
+    }
     fixture.stop().await;
 }
 
