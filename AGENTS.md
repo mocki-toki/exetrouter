@@ -75,6 +75,12 @@ python3 scripts/check-publication.py --package-list target/package-files.txt
 
 Ordinary tests are offline with synthetic fixtures and temporary private state. Ignored live/deployed tests require explicit user authorization; follow `docs/live-testing.md`. Never exhaust subscriptions deliberately. Resolve current native client versions and inspect their exact sources before making new compatibility claims; do not treat the recorded matrix as permanently current.
 
+### Nix dependency hashes
+
+Dependency updates must include the corresponding lockfiles and all affected Nix fixed-output hashes in the same change. In particular, refresh `npmDepsHash` in `nix/opencode-plugin.nix` when the desktop plugin's npm dependency tree changes, and review `cargoLock.outputHashes` in `nix/package.nix` when locked Cargo Git dependencies change. Review any source, vendor or platform-specific hashes affected by other package updates; do not change unrelated hashes merely because a version changed.
+
+Use Nix's supported hash-prefetch tooling or temporarily set the affected hash to `lib.fakeHash`, build the derivation, and replace it with the reported actual hash. Never commit placeholder hashes or disable verification to make a build pass. Build every affected package with its final hashes (for example, `nix build path:.#exetrouter-opencode-plugin --no-link` and `nix build path:.#exetrouter --no-link`), and run `nix build path:.#checks.x86_64-linux.modules --no-link` for module changes. Evaluation alone (`--no-build`) does not verify dependency hashes; report the platforms actually built and any unverified platform-specific hashes.
+
 ## Publication and operations
 
 Keep real domains, personal paths, emails, databases, keys, secrets, private backups and runtime logs out of published files. Use example domains and synthetic identities. Review assets for visible private information and metadata. Extend the publication allowlist deliberately when adding a new public file; do not weaken its credential checks.
