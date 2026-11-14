@@ -238,7 +238,8 @@ export class NativeClient {
 
   async snapshot(signal: AbortSignal): Promise<Snapshot> {
     // Never use `limits`: it may submit a weekly activation request. Doctor is passive.
-    return snapshot(await this.read(["doctor"], signal, true))
+    // Doctor embeds per-account history too, not just the explicit history read.
+    return snapshot(await this.read(["doctor"], signal, true, 8_388_608))
   }
 
   async usage(input: UsageInput, signal: AbortSignal): Promise<Usage> {

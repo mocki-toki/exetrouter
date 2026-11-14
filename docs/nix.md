@@ -92,6 +92,15 @@ production npm dependencies and the prebuilt experimental GUI bundle. Its
 dependencies are pinned by the committed npm lockfile and a Nix dependency
 hash. Nix runs its typecheck and synthetic test suite during the build.
 
+For the Overview ten-minute history fix, update the ExetRouter input to the
+`v0.9.2` release (plugin 0.4.1, native client 0.9.2) and rebuild the managed
+configuration. For the `inputs.exetrouter` example above, use
+`nix flake update exetrouter` in your configuration checkout, or pin
+`inputs.exetrouter.url = "github:mocki-toki/exetrouter/v0.9.2"` before updating
+the lockfile. Rebuilding only an unrelated `exr` executable does not replace
+the immutable plugin directory already registered with OpenCode. This client
+fix does not require changing an existing shared server or migrating its state.
+
 The Home Manager module extends `programs.opencode.exr`:
 
 ```nix

@@ -41,7 +41,8 @@ OpenCode Desktop also accepts ten-minute (`interval_seconds: 600`) reports from
 compatible routers. It preserves their bucket alignment, observation times and
 gaps, labels the reported interval, and permits ten-minute-aligned paging ends.
 Both resolutions are bounded to 90 days and two window kinds (at most 25,920
-ten-minute points); explicit history reads have an 8 MiB output bound. Unsupported
+ten-minute points); Doctor and explicit history reads have an 8 MiB output bound
+in plugin 0.4.1 and native client 0.9.2. Other plugin reads retain a 1 MiB bound. Unsupported
 or malformed optional snapshot history is shown as unavailable without hiding
 current account details. Explicit history reads still reject invalid reports.
 

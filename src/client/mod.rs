@@ -754,8 +754,14 @@ async fn exchange(
         drop(stdin);
         let stdout = child.stdout.take().ok_or("SSH stdout unavailable")?;
         let mut reply = Vec::new();
-        stdout.take(1_048_577).read_to_end(&mut reply).await?;
-        if reply.len() > 1_048_576 {
+        // Compatible newer servers can include dense quota histories. Keep a
+        // bounded reply without truncating valid metadata at the old 1 MiB cap.
+        const REPLY_LIMIT: usize = 8 * 1024 * 1024;
+        stdout
+            .take(REPLY_LIMIT as u64 + 1)
+            .read_to_end(&mut reply)
+            .await?;
+        if reply.len() > REPLY_LIMIT {
             return Err("control reply too large".into());
         }
         let status = child.wait().await?;
@@ -859,5 +865,27 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.to_string(), "control reply too large");
         assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn dense_history_reply_passes_the_former_megabyte_boundary_without_truncation() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let mut payload = vec![b' '; 2 * 1024 * 1024];
+        payload.extend_from_slice(br#"{"ok":true,"result":{"points":[]}}"#);
+        file.write_all(&payload).unwrap();
+        let mut child = Command::new("cat")
+            .arg(file.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let (status, reply) = exchange(&mut child, b"{}".to_vec(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(reply, payload);
+        assert_eq!(serde_json::from_slice::<Value>(&reply).unwrap()["ok"], true);
     }
 }

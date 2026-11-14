@@ -57,23 +57,31 @@ For a checkout with no local changes, update to the reviewed release and rebuild
 
 ```sh
 cd /absolute/path/to/exetrouter
-git fetch origin tag v0.9.1
-git switch --detach v0.9.1
+git fetch origin tag v0.9.2
+git switch --detach v0.9.2
 cd clients/opencode-desktop
 npm ci --ignore-scripts --no-audit --no-fund
 npm run typecheck
 npm run build
 exr update
-opencode service restart
 ```
 
 Use the installation method's update command for Homebrew or Nix clients instead
 of `exr update`. If the checkout has local changes, preserve it and use a separate
 clone at the release tag, then change only this plugin's `package` path in global
 OpenCode configuration. Keep existing connection options and credentials. The
-native `exr` client and router server should both be 0.9.1 for all 0.4.0 features.
-Restart the OpenCode background service after rebuilding; reopening a window
-alone does not reload the server plugin. Reopen the panel afterward.
+plugin 0.4.1 and native `exr` 0.9.2 include the history compatibility fix. The GUI
+reloads when its local bundle is rebuilt; the server plugin is unchanged, so a
+background-service restart is not needed for this patch. Reopen the panel if
+necessary. Nix users must update the ExetRouter flake input and rebuild their
+managed configuration so that both the plugin and native client are updated.
+
+This is a **client compatibility update**, not a server migration. Routers with
+hourly history remain supported, and a newer shared router already reporting
+ten-minute history does not need replacing. The tagged server/standalone binary
+still uses schema 15: do not replace a newer-schema development deployment with
+this older-schema server or point it at newer standalone state. Keep that
+deployment and its matching development client; updating its GUI plugin is safe.
 
 ## Using the provider
 
@@ -92,13 +100,16 @@ last confirmed account. Completion, idle periods and metadata without an account
 alias do not clear it; a confirmed transfer updates it and switching to another
 provider clears it.
 Observations are bounded in memory only; loading the panel never submits inference.
-Account details show short and weekly windows together in an hourly quota chart,
+Account details show short and weekly windows together in a quota chart,
 with distinct colors and pointer/keyboard values. Usage and Limit history offer
 rolling **24 hours, 7 days, 30 days and 90 days**, with arrows to previous/next
 intervals. The router collects
 numeric history through existing metadata observations, including while this
 panel is closed. This requires router/native exr 0.8.4 or later; collection starts
-after upgrade and missing hours remain gaps. Paging requires updated router/native
+after upgrade and missing observations remain gaps. Plugin 0.4.1 accepts both
+hourly and ten-minute history from compatible routers and preserves older IPC
+state while reloading. Invalid optional history no longer hides Overview accounts.
+Paging requires updated router/native
 binaries (0.9.1 or later) with `usage_range` and `quota_history` management reads; 0.8.4 supplies
 only the latest seven-day limit snapshot. Retention is bounded to 365 days, and
 previously discarded observations cannot be backfilled. See the reviewed
