@@ -22,7 +22,7 @@ export function QuotaHistoryView(props: { account: Account }) {
     return snapshot && (!fetched || snapshot.to >= fetched.to && newest(snapshot) >= newest(fetched)) ? snapshot : fetched
   })
   const data = createMemo(() => quotaTimeline({...props.account,history:history()}))
-  // Retain the selected absolute hour through background snapshots, not its shifting index.
+  // Retain the selected absolute bucket through background snapshots, not its shifting index.
   const [selected, setSelected] = createSignal<number>()
   const index = () => selected() === undefined ? -1 : data().hours.indexOf(selected()!)
   const cursor = () => index() >= 0 ? quotaX(index(), data().hours.length) : undefined
@@ -42,13 +42,13 @@ export function QuotaHistoryView(props: { account: Account }) {
   const day = (at: number) => new Date(at * 1000).toLocaleString("en", period() === "24h" ? {hour:"2-digit",minute:"2-digit"} : { month: "short", day: "numeric" })
   const ticks = createMemo(() => [...new Set([0, 1, 2, 3, 4, 5, 6, 7].map((i) => Math.round(i / 7 * (data().hours.length - 1))))])
   return <section class="exr-section exr-history">
-    <header class="exr-history-heading"><div><h3>Limit history</h3><p class="exr-caption">Hourly observations · unavailable hours remain gaps</p></div><div class="exr-history-legend"><For each={data().series}>{(line) => <span><i style={{ background: line.color }} />{line.label}</span>}</For></div></header>
+    <header class="exr-history-heading"><div><h3>Limit history</h3><p class="exr-caption">{history()?.intervalSeconds === 600 ? "10-minute" : "Hourly"} observations · unavailable intervals remain gaps</p></div><div class="exr-history-legend"><For each={data().series}>{(line) => <span><i style={{ background: line.color }} />{line.label}</span>}</For></div></header>
     <RangeControls label="Limit history" period={period()} before={before()} end={before() ?? history()?.to ?? latestEnd()} now={latestEnd()} loading={report.loading} onPeriod={(value) => { setBefore(undefined); setPeriod(value) }} onBefore={setBefore} />
     <ReadState loading={report.loading} error={report.error} hasData={!!history()} noun="limit history" />
     <Show when={history()}>{(h) => <p class="exr-caption">{date(h().from)} – {date(h().to)}</p>}</Show>
-    <Show when={data().series.length > 0} fallback={<p class="exr-caption">{props.account.history ? "No recorded observations yet." : "Hourly history requires an updated router and native exr client."}</p>}>
+    <Show when={data().series.length > 0} fallback={<p class="exr-caption">{props.account.history ? "No recorded observations yet." : "History requires a compatible router and native exr client."}</p>}>
       <div class="exr-chart"><div class="exr-inline exr-caption"><span>Quota left</span><span>0–100%</span></div>
-        <div class="exr-chart-plot"><svg viewBox="0 0 668 240" role="img" tabindex="0" aria-label="Hourly subscription quota left. Left and right select an hour; Home and End select the first and latest hour." onPointerMove={move} onPointerLeave={() => setSelected(undefined)} onKeyDown={keyboard} onBlur={() => setSelected(undefined)}>
+        <div class="exr-chart-plot"><svg viewBox="0 0 668 240" role="img" tabindex="0" aria-label="Subscription quota left. Left and right select an interval; Home and End select the first and latest interval." onPointerMove={move} onPointerLeave={() => setSelected(undefined)} onKeyDown={keyboard} onBlur={() => setSelected(undefined)}>
           <For each={[0, 25, 50, 75, 100]}>{(value) => <g><line class="exr-chart-grid" x1="44" x2="644" y1={quotaY(value)} y2={quotaY(value)} /><text x="34" y={quotaY(value) + 4} text-anchor="end">{value}%</text></g>}</For>
           <For each={ticks()}>{(i) => <text x={quotaX(i, data().hours.length)} y="231" text-anchor={i === 0 ? "start" : i === data().hours.length - 1 ? "end" : "middle"}>{day(data().hours[i])}</text>}</For>
           <For each={data().series}>{(line) => <g data-window={line.kind}><For each={line.segments}>{(points) => <polyline points={points} fill="none" stroke={line.color} stroke-width="1.7" stroke-linejoin="round" />}</For><For each={line.isolated}>{(p) => <circle cx={p.x} cy={p.y} r="2.5" fill={line.color} />}</For></g>}</For>

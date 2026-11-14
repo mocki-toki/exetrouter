@@ -29,16 +29,22 @@ function list(value: unknown, max: number): unknown[] {
 export function quotaHistory(value: unknown): QuotaHistory | null {
   if (value == null) return null
   const h = record(value), from = number(h.from_utc), to = number(h.to_utc)
-  if (h.interval_seconds !== 3600 || from % 3600 || to % 3600 || to <= from || to - from > 2160 * 3600) throw new Error("Invalid quota history.")
+  const interval = h.interval_seconds
+  if ((interval !== 600 && interval !== 3600) || from % interval || to % interval || to <= from || to - from > 2160 * 3600) throw new Error("Invalid quota history.")
   const seen = new Set<string>()
-  const points = list(h.points, 4320).map((entry) => {
+  const points = list(h.points, 2 * (to - from) / interval).map((entry) => {
     const p = record(entry), hour = number(p.hour), observedAt = number(p.observed_at), kind = text(p.kind, 16)
     const key = `${kind}:${hour}`
-    if (!["primary", "secondary"].includes(kind) || hour % 3600 || hour < from || hour >= to || observedAt < hour || observedAt >= hour + 3600 || seen.has(key)) throw new Error("Invalid quota history.")
+    if (!["primary", "secondary"].includes(kind) || hour % interval || hour < from || hour >= to || observedAt < hour || observedAt >= hour + interval || seen.has(key)) throw new Error("Invalid quota history.")
     seen.add(key)
     return { kind, hour, observedAt, used: number(p.used_percent), minutes: nullable(p.window_minutes), resetAt: nullable(p.reset_at) }
   }).sort((a, b) => a.hour - b.hour)
-  return { from, to, points }
+  return { from, to, intervalSeconds: interval, points }
+}
+
+/** Optional history must not hide otherwise usable current account metadata. */
+function optionalQuotaHistory(value: unknown): QuotaHistory | null {
+  try { return quotaHistory(value) } catch { return null }
 }
 
 function capacityProfile(value: unknown): typeof CapacityProfile.Type | null {
@@ -88,7 +94,7 @@ export function snapshot(value: unknown): Snapshot {
         locked: preference?.locked === true,
         cooldownUntil: nullable(quota.cooldown_until),
         quotaStatus: string(quota.status), cooldownSource: string(quota.cooldown_source, "Not reported"),
-        history: quotaHistory(account.quota_history),
+        history: optionalQuotaHistory(account.quota_history),
         routing: { reason: string(routing.reason, "unknown"), best: routing.best === true, observedAt: nullable(routing.observed_at), validUntil: nullable(routing.valid_until), deadline: nullable(routing.deadline), targetShare: nullable(routing.target_share_percent) },
         credits: { count: nullable(credits.available_count), observedAt: nullable(credits.observed_at), expiries: list(credits.credits ?? [], 4096).map((entry) => nullable(record(entry).expires_at)).filter((at): at is number => at !== null) },
         automaticReset: string(object(account.automatic_reset).status, "idle"),
@@ -219,14 +225,14 @@ export class NativeClient {
     }
   }
 
-  private async read(args: string[], signal: AbortSignal, allowNonzero = false): Promise<unknown> {
+  private async read(args: string[], signal: AbortSignal, allowNonzero = false, maxBytes = 1_048_576): Promise<unknown> {
     // Refuse excess work rather than retain an unbounded queue across desktop windows.
     if (this.active >= 2) throw new Error("ExetRouter is busy. Try again after the current read.")
     const profile = this.config.exrConfig && expand(this.config.exrConfig)
     if (profile && !isAbsolute(profile)) throw new Error("exrConfig must be an absolute path or start with ~/.")
     this.active++
     try {
-      return await this.run(expand(this.config.exrBinary), [...(profile ? ["--config", profile] : []), ...args, "--json"], signal, allowNonzero)
+      return await this.run(expand(this.config.exrBinary), [...(profile ? ["--config", profile] : []), ...args, "--json"], signal, allowNonzero, 50_000, maxBytes)
     } finally { this.release() }
   }
 
@@ -243,8 +249,8 @@ export class NativeClient {
   }
 
   async quotaHistory(input: HistoryInput, signal: AbortSignal): Promise<QuotaHistory> {
-    if (!Number.isSafeInteger(input.account) || input.account <= 0 || !["24h", "7d", "30d", "90d"].includes(input.period) || input.before !== undefined && (!Number.isSafeInteger(input.before) || input.before <= 0 || input.before % 3600 !== 0)) throw new Error("Invalid history selection.")
-    const history = quotaHistory(await this.read(["quota-history", String(input.account), "--period", input.period, ...(input.before === undefined ? [] : ["--before", String(input.before)])], signal))
+    if (!Number.isSafeInteger(input.account) || input.account <= 0 || !["24h", "7d", "30d", "90d"].includes(input.period) || input.before !== undefined && (!Number.isSafeInteger(input.before) || input.before <= 0 || input.before % 600 !== 0)) throw new Error("Invalid history selection.")
+    const history = quotaHistory(await this.read(["quota-history", String(input.account), "--period", input.period, ...(input.before === undefined ? [] : ["--before", String(input.before)])], signal, false, 8_388_608))
     if (!history) throw new Error("Quota history unavailable.")
     return history
   }

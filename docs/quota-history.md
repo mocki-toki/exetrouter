@@ -37,6 +37,14 @@ contents or credentials are retained in history. Capability
 `hourly_quota_history: 1` identifies collection support. Ordinary CLI reports
 remain text-only; JSON is the automation interface.
 
+OpenCode Desktop also accepts ten-minute (`interval_seconds: 600`) reports from
+compatible routers. It preserves their bucket alignment, observation times and
+gaps, labels the reported interval, and permits ten-minute-aligned paging ends.
+Both resolutions are bounded to 90 days and two window kinds (at most 25,920
+ten-minute points); explicit history reads have an 8 MiB output bound. Unsupported
+or malformed optional snapshot history is shown as unavailable without hiding
+current account details. Explicit history reads still reject invalid reports.
+
 `exr quota-history ACCOUNT --period 90d --json` reads a wider interval through the
 authenticated management channel, without refreshing upstream. `--before UNIX`
 sets its exclusive, hour-aligned end; subtract the selected duration to page back.
