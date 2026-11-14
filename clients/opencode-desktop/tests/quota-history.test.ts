@@ -34,6 +34,59 @@ test("quota charts omit series without a known duration and retain known-window 
   const unknownOnly = quotaTimeline({ ...account, windows: [], history: { ...history, points: [points.at(-1)!] } })
   assert.deepEqual(unknownOnly.series, [])
 })
+test("ten-minute history preserves non-hour-aligned bounds, samples and gaps", () => {
+  const raw = doctor(), original = raw.quota_accounts[0].quota_history
+  const from = original.from_utc + 600, to = from + 7 * 86400
+  const point = original.points[0]
+  const history = { from_utc: from, to_utc: to, interval_seconds: 600, points: [
+    { ...point, hour: from, observed_at: from + 60 },
+    { ...point, hour: from + 600, observed_at: from + 660 },
+    { ...point, hour: from + 1800, observed_at: from + 1860 },
+  ] }
+  const account = snapshot({ ...raw, quota_accounts: [{ ...raw.quota_accounts[0], quota_history: history }] }).accounts[0]
+  assert.equal(account.history?.intervalSeconds, 600)
+  const chart = quotaTimeline(account)
+  assert.equal(chart.hours.length, 1008)
+  assert.equal(chart.hours[1], from + 600)
+  assert.equal(chart.series[0].points.size, 3)
+  assert.equal(chart.series[0].segments.length, 1)
+  assert.equal(chart.series[0].isolated.length, 1)
+  assert.throws(() => quotaHistory({ ...history, points: [{ ...history.points[0], observed_at: from + 600 }] }))
+  assert.throws(() => quotaHistory({ ...history, from_utc: from + 1 }))
+})
+test("ninety-day ten-minute history accepts all bounded buckets", () => {
+  const from = 1800000000, to = from + 90 * 86400
+  const points = Array.from({ length: 12960 }, (_, i) => ["primary", "secondary"].map((kind) => ({
+    kind, hour: from + i * 600, observed_at: from + i * 600 + 1, used_percent: 50, window_minutes: 480, reset_at: null,
+  }))).flat()
+  assert.equal(quotaHistory({ from_utc: from, to_utc: to, interval_seconds: 600, points })?.points.length, 25920)
+  assert.throws(() => quotaHistory({ from_utc: from, to_utc: to + 600, interval_seconds: 600, points }))
+})
+test("legacy normalized IPC history without an interval still renders finite dates and points", () => {
+  const account = snapshot(doctor()).accounts[0]
+  const { intervalSeconds: _, ...legacy } = account.history!
+  const hourly = quotaTimeline({ ...account, history: legacy })
+  assert.equal(hourly.hours.length, 168)
+  assert.ok(hourly.hours.every(Number.isFinite))
+  assert.equal(hourly.series[0].segments.length, 1)
+  const dense = { ...legacy, from: legacy.from + 600, to: legacy.to + 600,
+    points: legacy.points.map((p) => ({ ...p, hour: p.hour + 600, observedAt: p.observedAt + 600 })) }
+  const chart = quotaTimeline({ ...account, history: dense })
+  assert.equal(chart.hours.length, 1008)
+  assert.ok(chart.hours.every(Number.isFinite))
+  assert.equal(chart.series[0].points.size, 2)
+  assert.equal(chart.series[0].isolated.length, 2)
+})
+test("unsupported or malformed optional history does not hide Overview accounts", () => {
+  const raw = doctor(), account = raw.quota_accounts[0]
+  for (const history of [{ ...account.quota_history, interval_seconds: 123 }, { points: "invalid" }]) {
+    const result = snapshot({ ...raw, quota_accounts: [{ ...account, quota_history: history }] })
+    assert.equal(result.accounts.length, 1)
+    assert.equal(result.accounts[0].history, null)
+    assert.deepEqual(result.accounts[0].windows, snapshot(raw).accounts[0].windows)
+    assert.throws(() => quotaHistory(history), "explicit history reads still reject invalid data")
+  }
+})
 test("native history projection is bounded and strips unknown payloads", () => {
   const raw=doctor().quota_accounts[0].quota_history
   assert.equal(quotaHistory(null),null)

@@ -274,7 +274,7 @@ test("rendered panel has five native web views, account details, usage graph, to
     click("View Synthetic account details")
     assert.match(window.document.querySelector('[role="dialog"]')!.textContent, /Synthetic client/)
     const accountDialog = window.document.querySelector('[role="dialog"]')!
-    const history = accountDialog.querySelector('svg[aria-label^="Hourly subscription"]')!
+    const history = accountDialog.querySelector('svg[aria-label^="Subscription quota left"]')!
     assert.ok(history)
     assert.equal(history.querySelectorAll("[data-window]").length,2,"both windows share the same chart")
     history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"End",bubbles:true}))
@@ -297,7 +297,7 @@ test("rendered panel has five native web views, account details, usage graph, to
     setState((old) => ({ ...old, refreshing:false, snapshot:{...old.snapshot, accounts:old.snapshot.accounts.map((a) => ({...a,cooldownUntil:a.windows[0].resetAt,cooldownSource:"upstream_reset",clients:{...a.clients,rows:a.clients.rows.map((c)=>({...c,name:"Updated client"}))}}))} }))
     assert.equal(window.document.querySelector('[role="dialog"]'), accountDialog)
     assert.match(accountDialog.textContent, /Updated client/)
-    assert.equal(accountDialog.querySelector('svg[aria-label^="Hourly subscription"]'),history,"background refresh preserves the chart and cursor owner")
+    assert.equal(accountDialog.querySelector('svg[aria-label^="Subscription quota left"]'),history,"background refresh preserves the chart and cursor owner")
     assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/Not observed/)
     assert.equal(root.querySelector('[role="tabpanel"]'), accountPane)
     assert.equal(accountPane.scrollTop, 90)
@@ -318,6 +318,22 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.equal(historyInputs.at(-1)?.before,latestHistoryEnd-90*86400)
     click("7 days"); await delay(10)
     assert.equal(historyInputs.at(-1)?.before,undefined,"changing the interval returns to the latest window")
+    setState((old) => ({ ...old, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => ({ ...a, history: a.history && { ...a.history, intervalSeconds: 600, to: a.history.to + 600, points: a.history.points.map((p) => { const hour = p.hour === a.history!.to - 3600 ? a.history!.to : p.hour + 600; return { ...p, hour, observedAt: hour + 60 } }) } })) } }))
+    assert.match(accountDialog.textContent, /10-minute observations/)
+    await delay(10)
+    const tenMinuteChart = accountDialog.querySelector('svg[aria-label^="Subscription quota left"]')!
+    tenMinuteChart.dispatchEvent(new window.KeyboardEvent("keydown", { key: "End", bubbles: true }))
+    assert.match(accountDialog.querySelector('[role="status"]')!.textContent, /8-hour.*0% left.*Weekly.*50% left/)
+    assert.equal(tenMinuteChart.querySelectorAll('[data-window="primary"] circle').length, 2, "missing ten-minute buckets remain gaps")
+    setState((old) => ({ ...old, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => {
+      if (!a.history) return a
+      const { intervalSeconds: _, ...history } = a.history
+      return { ...a, history }
+    }) } }))
+    await delay(10)
+    assert.doesNotMatch(accountDialog.textContent, /Invalid Date/)
+    assert.match(accountDialog.textContent, /10-minute observations/)
+    assert.equal(accountDialog.querySelectorAll('[data-window="primary"] circle').length, 2, "legacy IPC history keeps its recorded points")
     click("Done")
     await selectTab("Tokens")
     click("Create token")

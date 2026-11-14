@@ -23,7 +23,7 @@ export const Window = Schema.Struct({
 export type Window = typeof Window.Type
 
 export const QuotaHistory = Schema.Struct({
-  from: Schema.Number, to: Schema.Number,
+  from: Schema.Number, to: Schema.Number, intervalSeconds: Schema.optionalKey(Schema.Number),
   points: Schema.Array(Schema.Struct({ kind: Schema.String, hour: Schema.Number, observedAt: Schema.Number, used: Schema.Number, minutes: Schema.NullOr(Schema.Number), resetAt: Schema.NullOr(Schema.Number) })),
 })
 export type QuotaHistory = typeof QuotaHistory.Type

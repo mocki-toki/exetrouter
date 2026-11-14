@@ -96,6 +96,8 @@ test("rolling usage and limit history forward exclusive ends only as validated p
   await assert.rejects(client.quotaHistory({account:1,period:"7d",before:raw.to_utc-1},signal))
   await assert.rejects(client.quotaHistory({account:0,period:"7d"},signal))
   assert.equal(calls.length,2,"invalid selections never launch subprocesses")
+  await client.quotaHistory({account:1,period:"7d",before:raw.to_utc-600},signal)
+  assert.deepEqual(calls.at(-1),["quota-history","1","--period","7d","--before",String(raw.to_utc-600),"--json"])
 })
 
 test("refuses excessive concurrent reads instead of building a queue", async () => {
@@ -110,6 +112,18 @@ test("refuses excessive concurrent reads instead of building a queue", async () 
   gate.resolve(doctor())
   await Promise.all([first, second])
   await available
+})
+
+test("dense history reads have a bounded larger subprocess budget", async () => {
+  const budgets: number[] = []
+  const client = new NativeClient(options({}), async (_, args, _signal, _allowNonzero, _timeout, maxBytes) => {
+    budgets.push(maxBytes!)
+    return args[0] === "doctor" ? doctor() : doctor().quota_accounts[0].quota_history
+  })
+  const signal = new AbortController().signal
+  await client.snapshot(signal)
+  await client.quotaHistory({ account: 1, period: "90d" }, signal)
+  assert.deepEqual(budgets, [1_048_576, 8_388_608])
 })
 
 test("subprocess JSON accepts nonzero doctor diagnostics only when explicitly requested", async () => {
