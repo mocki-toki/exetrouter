@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.2
+
+- Fix OpenCode Desktop Overview with routers reporting ten-minute quota history. Plugin 0.4.1 accepts both 600-second and legacy 3600-second buckets, preserves gaps and paging alignment, and keeps malformed optional history from hiding current account metadata. Thanks to @Exeteres for PR #13.
+- Preserve chart rendering across GUI reloads with older normalized IPC state, avoiding empty charts and Invalid Date axes.
+- Bound Doctor and explicit history subprocess output to 8 MiB, and let the native SSH client receive history-sized replies from compatible servers without the previous 1 MiB truncation. Other plugin reads retain their 1 MiB bound.
+- This compatibility patch retains schema 15 and does not introduce Platform API routing, manual balances or a server database migration. A shared server already returning ten-minute history does not need replacing to apply the client fix.
+
 ## 0.9.1
 
 - Remove the OpenCode Desktop plugin's system-instruction injection, including its per-request random image-reference prefix. Leave model context unchanged and retain rendering of saved image references; new custom image cards are no longer requested through prompt instructions.
