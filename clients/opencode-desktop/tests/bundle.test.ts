@@ -325,6 +325,15 @@ test("rendered panel has five native web views, account details, usage graph, to
     tenMinuteChart.dispatchEvent(new window.KeyboardEvent("keydown", { key: "End", bubbles: true }))
     assert.match(accountDialog.querySelector('[role="status"]')!.textContent, /8-hour.*0% left.*Weekly.*50% left/)
     assert.equal(tenMinuteChart.querySelectorAll('[data-window="primary"] circle').length, 2, "missing ten-minute buckets remain gaps")
+    setState((old) => ({ ...old, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => {
+      if (!a.history) return a
+      const { intervalSeconds: _, ...history } = a.history
+      return { ...a, history }
+    }) } }))
+    await delay(10)
+    assert.doesNotMatch(accountDialog.textContent, /Invalid Date/)
+    assert.match(accountDialog.textContent, /10-minute observations/)
+    assert.equal(accountDialog.querySelectorAll('[data-window="primary"] circle').length, 2, "legacy IPC history keeps its recorded points")
     click("Done")
     await selectTab("Tokens")
     click("Create token")

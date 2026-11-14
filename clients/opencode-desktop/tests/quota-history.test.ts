@@ -62,6 +62,21 @@ test("ninety-day ten-minute history accepts all bounded buckets", () => {
   assert.equal(quotaHistory({ from_utc: from, to_utc: to, interval_seconds: 600, points })?.points.length, 25920)
   assert.throws(() => quotaHistory({ from_utc: from, to_utc: to + 600, interval_seconds: 600, points }))
 })
+test("legacy normalized IPC history without an interval still renders finite dates and points", () => {
+  const account = snapshot(doctor()).accounts[0]
+  const { intervalSeconds: _, ...legacy } = account.history!
+  const hourly = quotaTimeline({ ...account, history: legacy })
+  assert.equal(hourly.hours.length, 168)
+  assert.ok(hourly.hours.every(Number.isFinite))
+  assert.equal(hourly.series[0].segments.length, 1)
+  const dense = { ...legacy, from: legacy.from + 600, to: legacy.to + 600,
+    points: legacy.points.map((p) => ({ ...p, hour: p.hour + 600, observedAt: p.observedAt + 600 })) }
+  const chart = quotaTimeline({ ...account, history: dense })
+  assert.equal(chart.hours.length, 1008)
+  assert.ok(chart.hours.every(Number.isFinite))
+  assert.equal(chart.series[0].points.size, 2)
+  assert.equal(chart.series[0].isolated.length, 2)
+})
 test("unsupported or malformed optional history does not hide Overview accounts", () => {
   const raw = doctor(), account = raw.quota_accounts[0]
   for (const history of [{ ...account.quota_history, interval_seconds: 123 }, { points: "invalid" }]) {
