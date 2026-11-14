@@ -28,9 +28,6 @@ pub struct Credits {
     pub observed_at: i64,
 }
 
-pub(crate) fn preview(conn: &rusqlite::Connection, id: i64, now: i64) -> Result<Option<i64>> {
-    ledger::preview(conn, id, now)
-}
 #[derive(Default)]
 pub(crate) struct State {
     pending: HashMap<i64, automatic::Pending>,

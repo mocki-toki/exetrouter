@@ -1,9 +1,9 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Schema } from "effect"
-import { execJSON, NativeClient, snapshot, usage } from "../src/native"
+import { execJSON, NativeClient, platformHistory, snapshot, usage } from "../src/native"
 import { options } from "../src/options"
-import { count, date, duration, freshness, percent } from "../src/format"
+import { count, date, duration, freshness, percent, subscriptionPlan } from "../src/format"
 import { Snapshot, Usage } from "../src/schemas"
 import { deferred, doctor, usage as usageFixture } from "./fixtures"
 
@@ -20,20 +20,6 @@ test("normalizes both standalone and remote diagnostics without forwarding arbit
   assert.throws(() => snapshot({ ...value, schema_version: 99 }))
 })
 
-test("capacity metadata is optional, bounded, numeric and strips private fields",()=>{
-  const d=doctor(), c={state:"available",short_window:false,models:["synthetic"],costs:[{kind:"secondary",per_request:0.1,from_utc:1799996400,to_utc:1800000000,requests:10}],reset_eligible_until:null,credential:"private-body-marker"}
-  const raw={...d,capacity:{last_hour:10,previous_hour:8,in_flight:0,complete:true,secret:"private-body-marker"},quota_accounts:[{...d.quota_accounts[0],capacity:c}]}
-  const result=snapshot(raw)
-  assert.equal(result.capacity?.lastHour,10)
-  assert.equal(result.accounts[0].capacity?.costs[0].perRequest,0.1)
-  assert.doesNotMatch(JSON.stringify(result),/private-body-marker|credential/)
-  Schema.decodeUnknownSync(Snapshot)(result)
-  assert.equal(snapshot(d).capacity,null)
-  assert.equal(snapshot(d).accounts[0].capacity,null)
-  assert.throws(()=>snapshot({...raw,quota_accounts:[{...raw.quota_accounts[0],capacity:{...c,models:Array(257).fill("synthetic")}}]}))
-  assert.throws(()=>snapshot({...raw,quota_accounts:[{...raw.quota_accounts[0],capacity:{...c,costs:[{...c.costs[0],per_request:-1}]}}]}))
-})
-
 test("preserves nullable usage and hides token identifiers when a private label is unavailable", () => {
   const report = usageFixture()
   const result = usage(report, "model")
@@ -44,6 +30,72 @@ test("preserves nullable usage and hides token identifiers when a private label 
   Schema.decodeUnknownSync(Usage)(result)
   report.rows[0].name = "private-token-id"
   assert.equal(usage(report, "token").rows[0].name, "Label unavailable")
+})
+
+test("billing metadata is identical in remote and standalone projections and never fabricates credit", () => {
+  const raw = doctor()
+  const value = { ...raw, quota_accounts: [{ ...raw.quota_accounts[0], subscription: { billing_day: 8, plan_usd: 100, effective_api_budget_cents: 10000, secret: "private-body-marker" } }] }
+  const result = snapshot(value)
+  assert.deepEqual(snapshot({ server: value }), result)
+  assert.deepEqual(result.accounts[0].subscription, { billingDay: 8, planUSD: 100, apiBudgetCents: 10000 })
+  assert.equal(snapshot(raw).accounts[0].subscription, null)
+  assert.doesNotMatch(JSON.stringify(result), /private-body-marker|remainingBalance/)
+  for (const billing_day of [0, 32, 1.5]) assert.throws(() => snapshot({ ...value, quota_accounts: [{ ...value.quota_accounts[0], subscription: { billing_day } }] }))
+})
+
+test("account subscription text describes the configured plan, not Platform connectivity", () => {
+  assert.equal(subscriptionPlan(20), "Plus $20")
+  assert.equal(subscriptionPlan(100), "Pro $100")
+  assert.equal(subscriptionPlan(200), "Pro $200")
+  assert.equal(subscriptionPlan(5000), "$5k/month")
+  for (const price of [null, undefined, 0, NaN]) assert.equal(subscriptionPlan(price), undefined)
+})
+
+test("Platform credential presence is optional, redacted and never an inferred credit balance", () => {
+  const raw = doctor()
+  const value = { ...raw, quota_accounts: [{ ...raw.quota_accounts[0], platform: { configured_at: 1800000000, credit_status: "unverified", inference_enabled: false, admin_key: "private-body-marker" } }] }
+  const result = snapshot(value)
+  assert.deepEqual(snapshot({ server: value }), result)
+  assert.deepEqual(result.accounts[0].platform, { configuredAt: 1800000000, creditStatus: "unknown", inferenceEnabled: false })
+  const current = { ...value, quota_accounts: [{ ...value.quota_accounts[0], platform: { ...value.quota_accounts[0].platform, credit_status: "unknown" } }] }
+  assert.deepEqual(snapshot(current).accounts[0].platform, result.accounts[0].platform)
+  assert.equal(snapshot(raw).accounts[0].platform, null)
+  assert.doesNotMatch(JSON.stringify(result), /private-body-marker|admin_key|remainingBalance/)
+  assert.equal(snapshot({ ...value, quota_accounts: [{ ...value.quota_accounts[0], platform: { ...value.quota_accounts[0].platform, inference_enabled: true } }] }).accounts[0].platform?.inferenceEnabled,true)
+  assert.throws(() => snapshot({ ...value, quota_accounts: [{ ...value.quota_accounts[0], platform: { ...value.quota_accounts[0].platform, inference_enabled: "true" } }] }))
+})
+
+test("Platform Costs and daily history stay distinct from free credit and discard secrets", () => {
+  const raw=doctor(), base=Math.floor(1800000000/86400)*86400
+  const value={...raw,quota_accounts:[{...raw.quota_accounts[0],platform:{configured_at:base,inference_enabled:false,credit_status:"unverified",codex_fallback_allowed:false,costs:{from_utc:base,to_utc:base+86400,observed_at:base+86400,basis:"calendar_month_utc",spent_usd_nanos:5000e9,budget_cents:1000000,complete:true,secret:"private-body-marker"},key:{state:"active",created_at:base,expires_at:base+30*86400,last_used_at:null,checked_at:base+86400,secret:"private-body-marker"}}}]}
+  const result=snapshot(value)
+  assert.equal(result.accounts[0].platform?.costs?.spentUSD,5000)
+  assert.equal(result.accounts[0].platform?.codexFallbackAllowed,false)
+  assert.equal(result.accounts[0].platform?.key?.expiresAt,base+30*86400)
+  assert.doesNotMatch(JSON.stringify(result),/private-body-marker/)
+  const history=platformHistory({from_utc:base,to_utc:base+86400,interval_seconds:86400,points:[{from_utc:base,to_utc:base+86400,observed_at:base+86400,usd_nanos:0,secret:"private-body-marker"}]})
+  assert.equal(history.points[0].usd,0)
+  assert.doesNotMatch(JSON.stringify(history),/private-body-marker/)
+  assert.throws(()=>platformHistory({from_utc:base,to_utc:base+86400,interval_seconds:600,points:[]}))
+})
+
+test("manual balance projects independent estimates, unknowns and overspend without secrets", () => {
+  const raw=doctor(), at=1800000000
+  const estimate={remaining_usd_nanos:99e9 as number|null,spent_usd_nanos:1e9,through_utc:at+100,observed_at:at+100,unpriced_requests:0,status:"estimated",secret:"private-body-marker"}
+  const platform={configured_at:at,inference_enabled:true,credit_status:"unknown",balance:{entered_at:at,initial_usd_nanos:100e9,exetrouter:estimate,organization:{...estimate,remaining_usd_nanos:97e9,spent_usd_nanos:3e9,status:"delayed_report"},secret:"private-body-marker"}}
+  const value={...raw,quota_accounts:[{...raw.quota_accounts[0],platform}]}
+  const result=snapshot(value)
+  assert.deepEqual(snapshot({server:value}),result)
+  Schema.decodeUnknownSync(Snapshot)(result)
+  assert.equal(result.accounts[0].platform?.balance?.exetrouter.remainingUSD,99)
+  assert.equal(result.accounts[0].platform?.balance?.organization.remainingUSD,97)
+  assert.doesNotMatch(JSON.stringify(result),/private-body-marker/)
+  const withEstimate=(e:typeof estimate)=>snapshot({...value,quota_accounts:[{...value.quota_accounts[0],platform:{...platform,balance:{...platform.balance,exetrouter:e}}}]}).accounts[0].platform?.balance
+  assert.equal(withEstimate({...estimate,remaining_usd_nanos:-1e9,spent_usd_nanos:101e9})?.exetrouter.remainingUSD,-1)
+  assert.equal(withEstimate({...estimate,remaining_usd_nanos:null,unpriced_requests:1,status:"unpriced_requests"})?.exetrouter.remainingUSD,null)
+  assert.throws(()=>withEstimate({...estimate,unpriced_requests:1}))
+  assert.throws(()=>withEstimate({...estimate,remaining_usd_nanos:100e9}))
+  assert.throws(()=>withEstimate({...estimate,status:"confirmed_provider_balance"}))
 })
 
 test("formats unknowns, actual durations and historical quota honestly", () => {

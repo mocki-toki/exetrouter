@@ -3,6 +3,12 @@ use crate::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+pub(crate) const CACHE_TTL_SECONDS: i64 = 15 * 60;
+
+pub(crate) fn fresh(updated_at: Option<i64>, now: i64) -> bool {
+    updated_at.is_some_and(|at| at <= now && now.saturating_sub(at) < CACHE_TTL_SECONDS)
+}
+
 // Model-owned fields from the pinned Codex ModelInfo schema. Never expose
 // account/credential fields or arbitrary additions to an upstream response.
 const FIELDS: &[&str] = &[
@@ -74,6 +80,10 @@ pub struct Model {
     pub object: String,
     pub owned_by: String,
     pub display_name: String,
+    #[serde(default = "codex_source")]
+    pub source: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(
         default,
         rename = "exetrouter",
@@ -82,7 +92,68 @@ pub struct Model {
     pub metadata: Option<Value>,
 }
 
+fn codex_source() -> String {
+    "codex".into()
+}
+
+/// Presentation only: model IDs and request parameters never pass through this.
+pub fn display_name(name: &str) -> String {
+    name.replace('-', " ")
+        .split_whitespace()
+        .map(|word| match word.to_ascii_lowercase().as_str() {
+            "gpt" => "GPT".into(),
+            "sol" => "Sol".into(),
+            "astra" => "Astra".into(),
+            "terra" => "Terra".into(),
+            "luna" => "Luna".into(),
+            "codex" => "Codex".into(),
+            "mini" => "Mini".into(),
+            "nano" => "Nano".into(),
+            "pro" => "Pro".into(),
+            "image" => "Image".into(),
+            _ => word.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl Model {
+    pub(crate) fn present(&mut self) {
+        self.display_name = display_name(&self.display_name);
+        self.capabilities.clear();
+        if let Some(meta) = &mut self.metadata {
+            meta["display_name"] = json!(self.display_name);
+            if meta["supported_reasoning_levels"]
+                .as_array()
+                .is_some_and(|levels| {
+                    levels.iter().any(|level| {
+                        level["effort"]
+                            .as_str()
+                            .is_some_and(|effort| effort != "none")
+                    })
+                })
+            {
+                self.capabilities.push("reasoning".into());
+            }
+            if meta["shell_type"]
+                .as_str()
+                .is_some_and(|shell| !shell.is_empty() && shell != "none")
+            {
+                self.capabilities.push("tools".into());
+            }
+            if meta["input_modalities"]
+                .as_array()
+                .is_some_and(|m| m.iter().any(|v| v == "image"))
+            {
+                self.capabilities.push("image_input".into());
+            }
+        }
+        // The native image adapter implements these two operations explicitly.
+        if self.id == "gpt-image-2" {
+            self.capabilities
+                .extend(["image_generation".into(), "image_editing".into()]);
+        }
+    }
     pub(crate) fn parse(row: &Value) -> Result<Self> {
         let id = row["slug"].as_str().ok_or("catalog model ID missing")?;
         let name = row["display_name"].as_str().unwrap_or(id);
@@ -128,6 +199,8 @@ impl Model {
             object: "model".into(),
             owned_by: "openai".into(),
             display_name: name.into(),
+            source: codex_source(),
+            capabilities: Vec::new(),
             metadata: Some(metadata),
         })
     }
@@ -355,6 +428,33 @@ fn opencode_projection(models: &[Model], v1: bool) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn presentation_keeps_ids_and_only_reports_observed_capabilities() {
+        use super::*;
+        let mut model = Model::parse(&json!({"slug":"gpt-6.1-sol","display_name":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"}],"shell_type":"shell_command","input_modalities":["text","image"]})).unwrap();
+        model.present();
+        assert_eq!(model.id, "gpt-6.1-sol");
+        assert_eq!(model.display_name, "GPT 6.1 Sol");
+        assert_eq!(model.capabilities, ["reasoning", "tools", "image_input"]);
+        assert_eq!(
+            model.metadata.as_ref().unwrap()["display_name"],
+            "GPT 6.1 Sol"
+        );
+        let mut unknown = Model::parse(&json!({"slug":"synthetic-model"})).unwrap();
+        unknown.present();
+        assert!(unknown.capabilities.is_empty());
+        let mut no_reasoning = Model::parse(&json!({"slug":"synthetic-model","supported_reasoning_levels":[{"effort":"none"}],"shell_type":"none"})).unwrap();
+        no_reasoning.present();
+        assert!(no_reasoning.capabilities.is_empty());
+    }
+    #[test]
+    fn catalog_cache_lasts_fifteen_minutes_and_rejects_unknown_or_future_times() {
+        assert!(super::fresh(Some(1000), 1060));
+        assert!(super::fresh(Some(1000), 1899));
+        assert!(!super::fresh(Some(1000), 1900));
+        assert!(!super::fresh(Some(1000), 999));
+        assert!(!super::fresh(None, 1000));
+    }
     use super::*;
     #[test]
     fn opencode_versions_export_their_native_shapes_with_reported_defaults() {

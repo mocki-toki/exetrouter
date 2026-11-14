@@ -213,6 +213,8 @@ fn inspect(conn: &Connection, oauth_key: [u8; 32], created_at: i64) -> Result<Re
         oauth::load(conn, &vault, account.id)
             .map_err(|_| "snapshot OAuth credentials do not match the encryption key")?;
     }
+    crate::platform::verify_credentials(conn, &vault)
+        .map_err(|_| "snapshot Platform credentials do not match the encryption key")?;
     let (users,accounts,usage,pending) = conn.query_row("SELECT (SELECT COUNT(*) FROM users),(SELECT COUNT(*) FROM oauth_accounts),(SELECT COUNT(*) FROM usage_events),(SELECT COUNT(*) FROM usage_events WHERE status IN ('accepted','sent'))", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
     Ok(Report {
         format_version: FORMAT,

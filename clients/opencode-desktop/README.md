@@ -5,6 +5,12 @@ a single native-web dashboard panel. Targets the
 OpenCode **2.2.6** plugin contract; GUI APIs are experimental. This package is not
 published to npm. See [the integration guide](../../docs/opencode-desktop.md).
 
+For configured Platform accounts, Overview shows estimated remaining funds from
+the operator's manual balance minus ExetRouter standard token costs. Account
+details also show a separate organization-wide estimate from delayed Costs API
+reports. New entries restart both calculations; neither is a live provider
+balance. Missing data stays explicitly unavailable. See [manual balance setup](../../docs/platform-api.md#manual-remaining-funds-estimates).
+
 ## Build
 
 Nix users can build `.#exetrouter-opencode-plugin` or use the Home Manager
@@ -57,8 +63,8 @@ For a checkout with no local changes, update to the reviewed release and rebuild
 
 ```sh
 cd /absolute/path/to/exetrouter
-git fetch origin tag v0.9.2
-git switch --detach v0.9.2
+git fetch origin tag v0.10.0
+git switch --detach v0.10.0
 cd clients/opencode-desktop
 npm ci --ignore-scripts --no-audit --no-fund
 npm run typecheck
@@ -70,18 +76,20 @@ Use the installation method's update command for Homebrew or Nix clients instead
 of `exr update`. If the checkout has local changes, preserve it and use a separate
 clone at the release tag, then change only this plugin's `package` path in global
 OpenCode configuration. Keep existing connection options and credentials. The
-plugin 0.4.1 and native `exr` 0.9.2 include the history compatibility fix. The GUI
-reloads when its local bundle is rebuilt; the server plugin is unchanged, so a
-background-service restart is not needed for this patch. Reopen the panel if
-necessary. Nix users must update the ExetRouter flake input and rebuild their
-managed configuration so that both the plugin and native client are updated.
+plugin 0.5.0 and native `exr` 0.10.0 include Platform metadata and the 0.9.2 history
+compatibility fixes. Update **both**: a 0.9.2 native client can still show Codex
+accounts but drops newer Platform/billing fields, so rebuilding only the GUI
+cannot show their balances. The GUI reloads when its local bundle is rebuilt;
+reopen the panel if necessary. Nix users must update the ExetRouter flake input
+and rebuild their managed configuration, including its plugin directory and
+configured `exrBinary`.
 
-This is a **client compatibility update**, not a server migration. Routers with
-hourly history remain supported, and a newer shared router already reporting
-ten-minute history does not need replacing. The tagged server/standalone binary
-still uses schema 15: do not replace a newer-schema development deployment with
-this older-schema server or point it at newer standalone state. Keep that
-deployment and its matching development client; updating its GUI plugin is safe.
+Platform routing, billing, costs and manual-balance estimates require a server
+with schema 20 support. Upgrading an older server or standalone state requires
+the reviewed [0.10.0 migration and rollback](../../docs/platform-api.md#release-upgrade-from-schema-15).
+Do not downgrade a newer-schema development deployment or point an older binary
+at newer standalone state. An existing schema-20 shared server does not need a
+schema migration just to update its native client and GUI.
 
 ## Using the provider
 
@@ -127,13 +135,10 @@ The token action menu also uses a local accessible submenu, which the SDK's
 item-list menu API cannot represent.
 No separate UI framework or terminal renderer is bundled.
 
-- **Overview:** router status, OAuth/catalog/concurrency, account availability,
-  a compact [capacity outlook](../../docs/capacity-outlook.md) with model-scoped
-  runway/interruption estimates, expiring credits and detailed reserve/scenario
-  inspection (requires updated router/native metadata),
+- **Overview:** router status, concurrency, account availability,
   Best/Priority markers, reset credits/expiry, automatic reset and weekly
   activation status, reported quota windows/reset times, cooldown and bounded
-  session-local forecasts. Open account details for routing/target share/deadline
+  session-local forecasts. Open account details for subscription history, billing
   and server-wide client activity (own names and other users' aliases) in a
   live-updating details dialog.
 - **Usage:** rolling periods and interval paging, total/user/model/token grouping,
@@ -224,7 +229,7 @@ running. This is not an OS service installer or supervisor.
   concurrent subprocesses. Cancellation kills
   the read's process group. Child stderr and arbitrary errors are never shown.
 - Native actions have a separate closed, typed stdio protocol with 64 KiB input
-  frames, 1 MiB replies, one request in flight and a 55-second deadline (ten
+  frames, 8 MiB replies, one request in flight and a 55-second deadline (ten
   minutes for an explicit update install). There is no shell and no automatic
   mutation retry. Secrets stay in Rust; failed clipboard delivery can be retried
   against the same in-memory secret. Closing a dialog does not cancel issuance.

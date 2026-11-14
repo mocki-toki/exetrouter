@@ -14,6 +14,31 @@ spec.loader.exec_module(audit)
 
 
 class PublicationTests(unittest.TestCase):
+    def test_tracked_deletions_are_ignored_but_existing_secrets_and_dangling_links_fail(self):
+        with tempfile.TemporaryDirectory(prefix="exetrouter-publication-") as temp:
+            root = Path(temp)
+            subprocess.run(["git", "init", "--quiet", temp], check=True)
+            docs = root / "docs"
+            docs.mkdir()
+            removed = docs / "removed.md"
+            removed.write_text("Removed feature\n")
+            subprocess.run(["git", "add", "docs/removed.md"], cwd=root, check=True)
+            removed.unlink()
+            result = subprocess.run([sys.executable, str(SCRIPT), "--root", temp], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            kept = docs / "kept.md"
+            secret = "exr_tok_" + "0" * 16 + "_" + "a" * 64
+            kept.write_text(secret)
+            subprocess.run(["git", "add", "docs/kept.md"], cwd=root, check=True)
+            result = subprocess.run([sys.executable, str(SCRIPT), "--root", temp], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(secret, result.stderr)
+            kept.write_text("Safe metadata\n")
+            broken = docs / "broken.md"
+            broken.symlink_to("missing.md")
+            subprocess.run(["git", "add", "docs/broken.md"], cwd=root, check=True)
+            result = subprocess.run([sys.executable, str(SCRIPT), "--root", temp], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
     def test_desktop_package_is_narrowly_allowlisted(self):
         for name in ["package.json", "package-lock.json", "README.md", "src/gui.tsx", "src/window.css", "tests/catalog.test.ts"]:
             self.assertTrue(audit.allowed_path(f"clients/opencode-desktop/{name}"))

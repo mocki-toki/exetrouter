@@ -12,13 +12,17 @@ Use [GitHub private vulnerability reporting](https://github.com/mocki-toki/exetr
 | Tool definitions, arguments/results and attachments | Forwarded in memory; never retained as payloads |
 | Bearer/authorization headers | Never logged; router bearer verification uses keyed hashes |
 | OAuth tokens | Encrypted with account-bound AEAD under a separate private key |
+| Platform Admin Keys | Encrypted with account-bound, domain-separated AEAD under the credential key; provisioned only by local operator/standalone owner from a private file, never returned in reports or through the gateway |
+| Platform working keys and costs | Project/account/key-bound encrypted one-time secrets; numeric daily organization costs retained for at most 366 buckets, fixed refresh states, and durable pre-POST uncertain-operation fences retained across Admin Key replacement/removal. No raw Platform payloads, credentials or cost line items are retained. Costs are not a remaining balance; funds may be free or purchased. Operator model inspection returns only validated IDs/presentation fields, not owners, arbitrary metadata or credentials |
+| Platform routes | Monotonic project-scoped context identities, allowlisted observed model descriptors and independent numeric health/cooldown state. Inference uses only the project working key at the fixed public API origin; accounting/display uses the parent account. Codex receipts and legacy bindings cannot authorize Platform opaque context |
 | Personal metadata | Client-encrypted token names and dashboard preferences; user key never sent to service. Retired encrypted account labels may remain in older state |
-| Usage | User/token IDs, validated model ID, numeric usage, fixed statuses, timings and request/response identifiers; model-priced aggregate USD estimates on demand, without storing per-request cost or payloads |
+| Usage | User/token IDs, validated model ID, numeric usage, fixed statuses, timings and request/response identifiers; model-priced aggregate USD estimates on demand. New Platform requests additionally retain a frozen numeric standard token-cost estimate atomically with finalization, never payloads |
 | Conversation affinity | Client-carried authenticated ownership envelopes and encrypted digest-only transfer receipts; legacy digest overrides remain readable without new rows. Unwrapped client context is rejected. Bounded current WS history exists only in transient memory |
-| Subscription limits | Percentages, durations, reset/observation times, bounded 365-day hourly numeric history, cooldowns, sanitized credit expiry/count metadata and digest-only automatic-redemption audit outcomes; upstream credit IDs remain transient |
+| Subscription limits | Percentages, durations, reset/observation times, bounded 365-day ten-minute numeric history, cooldowns, sanitized credit expiry/count metadata and digest-only automatic-redemption audit outcomes; upstream credit IDs remain transient |
 | Native tools | Fixed account/feature pause metadata and bounded user-scoped search-session HMAC/account bindings; no image bytes, prompts, raw session IDs, queries, reference strings or search results |
 | MCP | No persistent protocol sessions or payloads; authenticated user-scoped session correlations and bounded in-flight cancellation digests/signals in memory only. Same router bearer, account controls and accounting as native operations |
 | Account identity | Operator-owned account metadata and display email extracted from encrypted issuer credentials |
+| Billing metadata | Operator-owned expected billing day, subscription price, API allowance override and optional manual balance reconciliation point. Separate router-token and reported organization-cost estimates are not a live provider balance; no invoices, payment details or web-session credentials |
 
 ### Logs
 
@@ -47,12 +51,6 @@ The summary separates last non-close peer-frame/pong ages from last allowlisted 
 Use separate unprivileged service/gateway UIDs, protected state/keys and reviewed TLS ingress. [Deployment templates](deploy/README.md) disable API access/error logging, buffering and caching. Keep payload/debug/packet capture, WAF body inspection and APM body capture disabled in your ingress. Client applications and OpenAI have their own retention policies.
 
 Management exposes account identities, usage totals, model IDs and operational metadata, never conversations or request bodies. Content passes through memory after TLS termination. A host operator can inspect memory or replace software, so this is not end-to-end confidentiality against that operator. Connect directly to a trusted provider if that property is required.
-
-Capacity outlook derives bounded, numeric account/window calibrations and shared
-request counts from existing usage/quota metadata on authenticated management
-reads. It stores no new data and exposes no per-user/token traffic breakdown,
-credit ID, credential or request content. The reset-eligibility preview is
-read-only: it cannot reserve, redeem, retry or mark recovery of a credit.
 
 Account client-presence reports share server-wide token counts and pseudonymous last-request/running activity with authenticated management users. Viewers receive their own token IDs and encrypted names; other users' clients expose only domain-separated keyed aliases and timing/count metadata, never names, ciphertext, raw token IDs or user identities. Token management and detailed per-token usage remain user-scoped.
 

@@ -57,7 +57,7 @@ does not expose account management through the OpenCode HTTP RPC surface.
    the account.
   Overview includes router/account status, credits, forecasts and detailed
    routing/client activity. Account details include a shared short/weekly
-   [seven-day hourly quota chart](quota-history.md), current-window summaries and
+   [ten-minute quota chart](quota-history.md), current-window summaries and
    a pointer/keyboard cursor that survives background snapshots. Missing hours
    remain gaps; an updated router and native client are required to collect and
    retain history. Usage includes the TUI periods/groups, fine multi-color charts
@@ -89,7 +89,7 @@ does not expose account management through the OpenCode HTTP RPC surface.
 
 The bridge requires an updated exr from the same checkout, not an older release
 without the `desktop` command. It accepts a closed JSON-line protocol over private
-stdin/stdout only: one request at a time, 64 KiB input frames and 1 MiB replies.
+stdin/stdout only: one request at a time, 64 KiB input frames and 8 MiB replies.
 Secrets are copied natively after clipboard detection and never cross window IPC;
 one failed copy can be retried without reissuing. Uncertain mutations are not
 retried automatically. Ordinary CLI terminal and secret-output guards are unchanged.

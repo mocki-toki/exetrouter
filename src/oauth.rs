@@ -50,6 +50,40 @@ impl Vault {
         Self(Arc::new(key))
     }
 
+    /// Separate, versioned AAD domains are required for non-OAuth secrets.
+    pub(crate) fn seal_secret(&self, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+        let cipher = XChaCha20Poly1305::new(self.0.as_ref().into());
+        let mut nonce = [0; 24];
+        OsRng.fill_bytes(&mut nonce);
+        let encrypted = cipher
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|_| "secret encryption failed")?;
+        let mut result = nonce.to_vec();
+        result.extend(encrypted);
+        Ok(result)
+    }
+
+    pub(crate) fn open_secret(&self, aad: &[u8], encrypted: &[u8]) -> Result<Vec<u8>> {
+        if encrypted.len() < 40 {
+            return Err("invalid encrypted secret".into());
+        }
+        XChaCha20Poly1305::new(self.0.as_ref().into())
+            .decrypt(
+                XNonce::from_slice(&encrypted[..24]),
+                Payload {
+                    msg: &encrypted[24..],
+                    aad,
+                },
+            )
+            .map_err(|_| "secret decryption failed; check the encryption key".into())
+    }
+
     fn encrypt(&self, account_id: &str, credentials: &Credentials) -> Result<Vec<u8>> {
         let cipher = XChaCha20Poly1305::new(self.0.as_ref().into());
         let mut nonce = [0; 24];

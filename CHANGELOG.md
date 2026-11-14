@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.10.0
+
+- Prepare native 0.10.0 and OpenCode Desktop plugin 0.5.0 together. Older native clients omit Platform metadata even when the GUI is new. Retain the 0.9.2 history compatibility fixes and both public and pre-release normalized IPC interval shapes.
+- Add operator-entered Platform balance reconciliation with independent estimated remaining funds: ExetRouter standard token costs by default, and delayed organization Costs in account details. Each manual entry replaces both starting points; never assume a monthly refill or use the estimate as a routing cap. Schema 20 preserves numeric frozen request estimates and fenced manual epochs; follow `docs/platform-api.md` for migration and rollback.
+- Decrypt client labels in standalone `doctor` reports, hide encrypted labels from older native reports in Desktop, and format last-request ages in seconds, minutes, hours or days while preserving the exact local date.
+- Add operator-owned expected subscription billing days, plan prices and exact USD API allowance overrides through shared standalone/server configuration. Schema 17 is additive; follow `docs/subscription-metadata.md` for migration and rollback.
+- Add encrypted, account-bound Platform Admin Key provisioning from private files for the local operator or standalone owner, with redacted diagnostics and verified backups.
+- Add actual organization-wide daily Platform Costs, bounded numeric history and shared GUI/TUI/CLI spending views, without treating costs or configured allowances as verified free credit. Schema 18 adds managed thirty-day `exetrouter` service-account keys with encrypted one-time secrets, durable pre-POST fences and no retry of uncertain mutations. Project management is explicit. Follow `docs/platform-api.md` for migration and rollback.
+- Add an operator-only, durable `platform_codex_fallback` policy, off by default, configurable through server settings, startup flags or local administration. Platform may use any provider-available funds, including purchased credits; configured allowances are display references, not local spending caps.
+- Add bounded read-only Platform model availability for local operators/standalone owners using the actual working key, with credential/project generation fences and no guessed capabilities. Authenticate and validate model access before marking working keys active; failed checks preserve the confirmed secret rather than recreating it. Restrict Admin requests to the explicit management route/method allowlist.
+- Add shared Platform Responses JSON/SSE, translated Chat, unary compaction and HTTP-backed client WS routing. Schema 19 keeps project context/health separate from OAuth while retaining parent-account durable usage. Enable same-model API fallback only after all eligible Codex quotas are exhausted and the operator policy permits it; never replay ambiguous inference or migrate opaque state across backends/projects. Append distinct reviewed, key-visible Platform models after Codex without changing native descriptors. Native non-generating warmup is refused locally without spending.
+- Use compact human USD formatting (`$5k`, `$12.5k`, `$1.2M`) across CLI, TUI and Desktop without changing numeric automation values; remove the redundant model-filter explanation.
+- Remove the Capacity outlook forecast and its backend, schemas, styles and calibration. Simplify Desktop/native account details and Overview, compact token dates, hide default Fast badges and use background status badges in the TUI. Preserve token actions and add native pause/enable and Fast confirmations.
+- Normalize human-readable model names without changing IDs, report observed capabilities and add combined text/capability filters in CLI, TUI and Desktop.
+- Bring native Usage rolling ranges, previous/next paging and standard API-equivalent USD estimates in line with Desktop. Add 24-hour/7-day/30-day/90-day native account history paging and raise the shared control reply bound to 8 MiB for complete histories.
+- Bring the native dashboard closer to the Desktop layout with subdued account/resource surfaces, neutral selected tabs and a labeled Controls area. Separate model names, exact IDs and capability badges; add token search/ID copy, filtered selection preservation, keyboard paging and resize-safe mouse targets. Standalone account rows expose Reauthorize/Disable actions and scroll selected settings into view.
+- Add native Usage all-series selection for up to eight groups and a scrollable read-only counter breakdown, retaining unknown usage and partial price estimates without extra requests.
+
+- Cache account model catalogs for 15 minutes instead of one minute, with matching routing, recommendation and diagnostic freshness checks. Quota freshness and credential expiry safeguards are unchanged.
+
+- Change subscription history and native TUI/Desktop quota charts to ten-minute buckets while retaining seven-day snapshots, 90-day paging and 365-day retention. Preserve legacy observations at their actual observation times without backfilling gaps; keep the existing passive polling frequency. Updated clients also accept older hourly reports. Schema 16 requires the migration/rollback procedure in `docs/quota-history.md`.
+
 ## 0.9.2
 
 - Fix OpenCode Desktop Overview with routers reporting ten-minute quota history. Plugin 0.4.1 accepts both 600-second and legacy 3600-second buckets, preserves gaps and paging alignment, and keeps malformed optional history from hiding current account metadata. Thanks to @Exeteres for PR #13.
@@ -11,7 +33,6 @@
 
 - Remove the OpenCode Desktop plugin's system-instruction injection, including its per-request random image-reference prefix. Leave model context unchanged and retain rendering of saved image references; new custom image cards are no longer requested through prompt instructions.
 - Refresh the Nix plugin dependency hash for 0.4.0 and make the small-value USD chart test tolerant of floating-point rounding across supported Node versions.
-- Add a compact OpenCode Desktop Capacity outlook with model-scoped, calibrated request/runway estimates, useful quota recoveries, expiring-credit warnings and a read-only Details view. Keep credits conditional and stale/unknown capacity unknown; do not alter routing, reset spending or persist forecast state.
 - Gate Fast (`service_tier: priority`) at the server: disabled by default, globally configurable with per-token on/off/inherit overrides across HTTP, Chat, compaction and native WebSockets. Schema 15 stores only nullable token preferences; rotation preserves them.
 - Allow token owners to temporarily disable and re-enable an API token without changing its secret. Revocation stays irreversible; token disable/enable takes effect on subsequent authenticated requests.
 - Add a model-weighted standard OpenAI API USD estimate to usage reports and the OpenCode Desktop Usage chart. Keep unknown and unpriced requests visible; this is not actual ChatGPT subscription spending.

@@ -43,7 +43,7 @@ export function usage() {
 }
 
 export function tokenList() { return [{ id: "tok_synthetic", name: "Synthetic token", created_at: 1800000000, expires_at: 1900000000, revoked_at: null, last_used_at: null }] }
-export function modelList() { return { data: [{ id: "synthetic-model", display_name: "Synthetic model", exetrouter: { context_window: 100000 } }] } }
+export function modelList() { return { data: [{ id: "synthetic-model", display_name: "Synthetic model", capabilities: ["reasoning", "tools"], exetrouter: { context_window: 100000 } }] } }
 
 export function deferred<T>() {
   let resolve!: (value: T) => void

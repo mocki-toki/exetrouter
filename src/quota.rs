@@ -237,6 +237,7 @@ pub(crate) fn event(event: &Value, now: i64) -> Observation {
                 error.get(*key).and_then(Value::as_str),
                 Some(
                     "usage_limit_reached"
+                        | "insufficient_quota"
                         | "rate_limit_exceeded"
                         | "slow_down"
                         | "rate_limit_error"
@@ -298,6 +299,15 @@ pub(crate) fn save(
     observation: Observation,
     now: i64,
 ) -> Result<()> {
+    if account < 0 {
+        // Platform has no Codex percentage windows. Never contaminate the
+        // parent subscription with API headers or clear a rejection on success.
+        return if let Some(until) = observation.cooldown_until() {
+            crate::platform::routes::quota(conn, account, generation, order, until)
+        } else {
+            Ok(())
+        };
+    }
     if observation.is_empty() {
         return Ok(());
     }
@@ -329,9 +339,9 @@ pub(crate) fn save(
             tx.execute("INSERT INTO oauth_quota_history(account_id,kind,hour,observed_at,used_percent,window_minutes,reset_at,request_order) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
                 ON CONFLICT(account_id,kind,hour) DO UPDATE SET observed_at=excluded.observed_at,used_percent=excluded.used_percent,window_minutes=excluded.window_minutes,reset_at=excluded.reset_at,request_order=excluded.request_order
                 WHERE excluded.request_order>=oauth_quota_history.request_order AND excluded.observed_at>=oauth_quota_history.observed_at",
-                params![account,window.kind,now/3600*3600,now,window.used,window.minutes,window.reset,order])?;
+                params![account,window.kind,now/crate::quota_history::INTERVAL*crate::quota_history::INTERVAL,now,window.used,window.minutes,window.reset,order])?;
             // Retain a hard per-window bound even if the host clock moves backward.
-            tx.execute("DELETE FROM oauth_quota_history WHERE account_id=?1 AND kind=?2 AND hour<(SELECT MAX(hour) FROM oauth_quota_history WHERE account_id=?1 AND kind=?2)-(?3-1)*3600",params![account,window.kind,crate::quota_history::RETENTION_HOURS])?;
+            tx.execute("DELETE FROM oauth_quota_history WHERE account_id=?1 AND kind=?2 AND hour<(SELECT MAX(hour) FROM oauth_quota_history WHERE account_id=?1 AND kind=?2)-(?3-1)*?4",params![account,window.kind,crate::quota_history::RETENTION_BUCKETS,crate::quota_history::INTERVAL])?;
         }
     }
     crate::quota_history::prune(&tx, now)?;

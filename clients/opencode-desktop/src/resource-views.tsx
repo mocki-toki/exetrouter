@@ -1,7 +1,7 @@
 import { For, Show, createMemo, createSignal } from "solid-js"
 import { createLatest } from "@opencode/plugin/gui"
 import { Dashboard } from "./contract"
-import { count, date } from "./format"
+import { count, date, lastUsed, shortDate } from "./format"
 import type { Profile, Tokens } from "./schemas"
 import { Badge, CopyButton, EmptyState, Fields, List, Notice, ReadState, Row, SearchField, Section, useDashboardState, useDialog, useHost } from "./ui"
 import { ClipboardNotice, confirmAction, configureConnection, loginAccount, tokenForm } from "./actions"
@@ -17,14 +17,15 @@ export function TokensView(props: { now: number; revision?: string }) {
   const report = createLatest(() => ({ revision: revision(), live: live() }), (_, signal) => ctx.main(Dashboard).tokens({ signal }))
   const rows = createMemo(() => report.latest?.filter((token) => `${token.name} ${token.id}`.toLowerCase().includes(query().trim().toLowerCase())) ?? [])
   const status = (token: typeof Tokens.Type[number]) => ["Active", "Disabled"].includes(token.status) && token.expiresAt !== null && token.expiresAt <= props.now ? "Expired" : token.status
-  return <div class="exr-view"><Section title="Your tokens" action={<ui.Button size="small" disabled={state()?.clipboardPending} onClick={() => tokenForm(open, undefined, refresh)}>Create token</ui.Button>}>
+  return <div class="exr-view"><section class="exr-section">
+    <div class="exr-toolbar"><span /><ui.Button size="small" disabled={state()?.clipboardPending} onClick={() => tokenForm(open, undefined, refresh)}>Create token</ui.Button></div>
     <ClipboardNotice refresh={refresh} />
     <SearchField label="Search tokens" value={query()} onInput={setQuery} />
     <ReadState loading={report.loading} error={report.error} hasData={report.latest !== undefined} noun="tokens" />
     <Show when={report.latest}><List><For each={rows()} fallback={<EmptyState icon="lock" title={query() ? "No matching tokens" : "No API tokens yet"} description={query() ? "Try another name or token ID." : "Create your first token to connect an app."} />}>
-      {(token) => <Row title={token.name} description={<><span class="exr-inline-start"><code class="exr-truncate" title={token.id}>{token.id}</code><CopyButton value={token.id} label="Copy token ID" /></span><span>Created {date(token.createdAt)}</span><span>Expires {date(token.expiresAt)}</span><span>Last used {date(token.lastUsedAt)}</span></>}>
+      {(token) => <Row title={token.name} description={<><span class="exr-inline-start"><code class="exr-truncate" title={token.id}>{token.id}</code><CopyButton value={token.id} label="Copy token ID" /></span><span class="exr-token-dates"><ui.Tooltip value={`Created ${date(token.createdAt)}`}><span tabIndex={0}>Created {shortDate(token.createdAt)}</span></ui.Tooltip><span>·</span><ui.Tooltip value={`Expires ${date(token.expiresAt)}`}><span tabIndex={0}>Expires {shortDate(token.expiresAt)}</span></ui.Tooltip><span>·</span><ui.Tooltip value={`Last used ${date(token.lastUsedAt)}`}><span tabIndex={0}>Used {lastUsed(token.lastUsedAt, props.now)}</span></ui.Tooltip></span></>}>
         <Badge tone={status(token) === "Active" ? "success" : "neutral"}>{status(token)}</Badge>
-        <Badge>Fast: {token.fastMode == null ? "Default" : token.fastMode ? "Allow" : "Block"}</Badge>
+        <Show when={token.fastMode !== null}><Badge>Fast: {token.fastMode ? "Allow" : "Block"}</Badge></Show>
         <ActionMenu label={`Actions for ${token.name}`} entries={[
           { label: "Rename", run: () => tokenForm(open, token, refresh) },
           { label: "Fast mode", disabled: !["Active", "Disabled"].includes(status(token)), items: [{ label: "Default", value: null }, { label: "Allow", value: true }, { label: "Block", value: false }].map((mode) => ({ label: mode.label, checked: (token.fastMode ?? null) === mode.value, run: () => confirmAction(open, { title: "Change Fast mode?", description: `${token.name}: ${mode.label.toLowerCase()}. Default inherits the server policy; allow and block override it.`, submit: "Save", input: { action: "token_fast_mode", id: token.id, enabled: mode.value, confirmed: true }, done: refresh }) })) },
@@ -34,24 +35,30 @@ export function TokensView(props: { now: number; revision?: string }) {
         ]} />
       </Row>}
     </For></List></Show>
-  </Section></div>
+  </section></div>
 }
 
 export function ModelsView(props: { revision?: string }) {
   const ctx = useHost(), ui = ctx.ui
   const [query, setQuery] = createSignal("")
+  const [selected, setSelected] = createSignal<readonly string[]>([])
+  const features = [{ id: "reasoning", label: "Reasoning" }, { id: "tools", label: "Tools" }, { id: "image_input", label: "Image input" }, { id: "image_generation", label: "Image generation" }, { id: "image_editing", label: "Image editing" }]
   const live = createMemo((previous: string) => props.revision ?? previous, "initial")
   const report = createLatest(live, (_, signal) => ctx.main(Dashboard).models({ signal }))
-  const rows = createMemo(() => report.latest?.filter((model) => `${model.name} ${model.id}`.toLowerCase().includes(query().trim().toLowerCase())) ?? [])
-  return <div class="exr-view"><Section title="Models">
+  const rows = createMemo(() => report.latest?.filter((model) => `${model.name} ${model.id} ${(model.capabilities ?? []).join(" ").replaceAll("_", " ")}`.toLowerCase().includes(query().trim().toLowerCase()) && selected().every((id) => model.capabilities?.includes(id))) ?? [])
+  return <div class="exr-view"><section class="exr-section">
     <SearchField label="Search models" value={query()} onInput={setQuery} />
+    <div class="exr-model-filters" role="group" aria-label="Filter models by capability">
+      <button type="button" aria-pressed={selected().length === 0} onClick={() => setSelected([])}>All</button>
+      <For each={features}>{(feature) => <button type="button" aria-pressed={selected().includes(feature.id)} onClick={() => setSelected((old) => old.includes(feature.id) ? old.filter((id) => id !== feature.id) : [...old, feature.id])}>{feature.label}</button>}</For>
+    </div>
     <ReadState loading={report.loading} error={report.error} hasData={report.latest !== undefined} noun="models" />
-    <Show when={report.latest}><List><For each={rows()} fallback={<EmptyState icon="models" title={query() ? "No matching models" : "No models available"} description={query() ? "Try another model name or ID." : "Refresh the catalog after connecting an account."} />}>
-      {(model) => <Row title={model.name || model.id} description={<code class="exr-truncate" title={model.id}>{model.id}</code>}>
+    <Show when={report.latest}><List><For each={rows()} fallback={<EmptyState icon="models" title={query() || selected().length ? "No matching models" : "No models available"} description={query() || selected().length ? "Try another model name, ID or capability selection." : "Refresh the catalog after connecting an account."} />}>
+      {(model) => <Row title={model.name || model.id} description={<><code class="exr-truncate" title={model.id}>{model.id}</code><span class="exr-inline-start"><For each={features.filter((feature) => model.capabilities?.includes(feature.id))}>{(feature) => <Badge>{feature.label}</Badge>}</For><Show when={model.source === "platform"}><Badge>Platform API</Badge></Show></span></>}>
         <ui.Tooltip value={`${count(model.context)} token context window`}><span class="exr-model-context">{count(model.context)}<span class="exr-caption">context</span></span></ui.Tooltip><CopyButton value={model.id} label={`Copy ${model.id} ID`} />
       </Row>}
     </For></List></Show>
-  </Section></div>
+  </section></div>
 }
 
 export function SettingsView(props: { profile: { readonly latest: typeof Profile.Type | undefined; readonly loading: boolean; readonly error: unknown }; refreshProfile(): void }) {

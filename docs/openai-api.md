@@ -102,6 +102,13 @@ Responses Lite preserves its ordered `additional_tools` prefix and custom/namesp
 
 Compact appends `compaction_trigger` to one Responses SSE request and projects `response.compaction` with exactly one opaque checkpoint. Independent requests may select another eligible account; normal checkpoint/socket affinity takes precedence over cache preference.
 
+This single-checkpoint translation is Codex-specific. Configured
+[Platform routes](platform-api.md) call the public unary compact endpoint and
+preserve its complete output array, including a visible prefix. Their opaque
+values remain pinned to the issuing project; Codex/Platform state is not assumed
+portable. Platform-backed WS supports generating requests through HTTP SSE, but
+rejects `generate=false` locally without submission/accounting or closing the WS.
+
 ### Context ownership
 
 - `previous_response_id` is supported only for responses owned by the current WS. HTTP/new-socket previous IDs are unsupported. Bearer validity is checked on every `response.create`.

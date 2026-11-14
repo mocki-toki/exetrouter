@@ -101,6 +101,14 @@ the lockfile. Rebuilding only an unrelated `exr` executable does not replace
 the immutable plugin directory already registered with OpenCode. This client
 fix does not require changing an existing shared server or migrating its state.
 
+For Platform account balances and API metadata, the matching versions are
+plugin 0.5.0 and native client 0.10.0, with a schema-20 server. Pin the ExetRouter
+input to `v0.10.0` when that release is published and rebuild both packages.
+Check any explicit `exrBinary` override: a 0.9.2 executable drops newer Platform
+fields even when the plugin itself is current. Older-server/standalone upgrades
+need the reviewed [schema-15 migration](platform-api.md#release-upgrade-from-schema-15);
+updating a remote client never migrates its shared server.
+
 The Home Manager module extends `programs.opencode.exr`:
 
 ```nix

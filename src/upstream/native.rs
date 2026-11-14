@@ -71,7 +71,7 @@ impl Upstream {
         }
         if feature == Feature::Search {
             let excluded = blocked.iter().map(|(id, _, _)| *id).collect::<Vec<_>>();
-            return match self.select_excluding(model, hint, &excluded).await {
+            return match self.select_codex_excluding(model, hint, &excluded).await {
                 Err(SelectError::UpstreamUnavailable) if !blocked.is_empty() => {
                     let (_, at, quota) = blocked
                         .iter()

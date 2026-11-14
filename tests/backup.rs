@@ -121,6 +121,32 @@ fn request(address: &str, path: &str, bearer: Option<&str>) -> String {
 }
 
 #[test]
+fn platform_credentials_survive_verified_backup_and_restore_without_plaintext() {
+    let state = state();
+    let secret = concat!("sk-admin-", "synthetic-backup-only-invalid-key");
+    let vault = oauth::Vault::new([2; 32]);
+    exetrouter::platform::configure(&state.conn, &vault, 1, secret.as_bytes(), 10).unwrap();
+    let snapshot = state.directory.path().join("platform-snapshot");
+    backup::create(&state.paths, &snapshot).unwrap();
+    backup::verify(&snapshot).unwrap();
+    let restored = state.directory.path().join("platform-restored");
+    backup::restore(&snapshot, &restored).unwrap();
+    let paths = Paths::in_directory(&restored);
+    let conn = Connection::open(&paths.db).unwrap();
+    exetrouter::platform::verify_credentials(&conn, &vault).unwrap();
+    assert!(
+        !exetrouter::platform::snapshot(&conn, 1)
+            .unwrap()
+            .unwrap()
+            .inference_enabled
+    );
+    assert!(!fs::read(&paths.db)
+        .unwrap()
+        .windows(secret.len())
+        .any(|w| w == secret.as_bytes()));
+}
+
+#[test]
 fn cli_snapshot_includes_live_wal_keys_and_restores_a_restartable_state() {
     let state = state();
     assert!(

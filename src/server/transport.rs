@@ -287,6 +287,7 @@ struct RequestLog {
     created: bool,
     finalized: bool,
     account_id: i64,
+    observation_account_id: i64,
     account_generation: i64,
     rejection_until: Option<i64>,
     user_id: i64,
@@ -428,23 +429,27 @@ fn backend_event_error(event: &Value) -> Option<(StatusCode, Value)> {
 impl RequestLog {
     async fn begin(
         state: &AppState,
-        record: RequestRecord,
+        mut record: RequestRecord,
         transport: &'static str,
         account: &Account,
         routing: &[Value],
     ) -> Result<Self> {
         let id = record.request_id.clone();
         let user_id = record.user_id;
-        let health_order = state
+        let (health_order, observation_account_id) = state
             .db
             .call(move |conn| {
                 let tx = conn.transaction()?;
+                if record.account_id < 0 {
+                    record.account_id = crate::platform::routes::parent(&tx, record.account_id)?;
+                }
+                let observation_account_id = record.account_id;
                 usage::begin_request(&tx, &record)?;
                 // Quota and health observations share the same clock as live
                 // limits; usage row IDs are not comparable to that clock.
                 let health_order = crate::health::next(&tx)?;
                 tx.commit()?;
-                Ok(health_order)
+                Ok((health_order, observation_account_id))
             })
             .await?;
         Ok(Self {
@@ -457,6 +462,7 @@ impl RequestLog {
             created: false,
             finalized: false,
             account_id: account.info.id,
+            observation_account_id,
             account_generation: account.info.generation,
             rejection_until: None,
             user_id,
@@ -507,7 +513,10 @@ impl RequestLog {
         }
         result
     }
-    async fn sent(&self) -> Result<()> {
+    async fn sent(&mut self) -> Result<()> {
+        if self.account_id < 0 && self.transport != "platform_http_json" {
+            self.transport = "platform_http_sse";
+        }
         let id = self.id.clone();
         let transport = self.transport;
         self.db.call(move |conn| {
@@ -1021,7 +1030,15 @@ async fn select_context_account(
         let id = owner.ok_or(crate::upstream::SelectError::UpstreamUnavailable)?;
         upstream.select_pinned(model, id).await
     } else {
-        upstream.select_continuation(model, session, owner).await
+        let selected = upstream.select_continuation(model, session, owner).await?;
+        if let Some(id) =
+            owner.filter(|id| *id != selected.info.id && (*id < 0 || selected.info.id < 0))
+        {
+            if !crate::platform::transfer_safe(payload) {
+                return upstream.select_pinned(model, id).await;
+            }
+        }
+        Ok(selected)
     }
 }
 
@@ -1053,9 +1070,15 @@ async fn transfer_context(
     if !payload["conversation"].is_null() {
         return Err(ContextError::Conflict);
     }
+    if account.info.id < 0 && !crate::platform::transfer_safe(payload) {
+        return Err(ContextError::Conflict);
+    }
     let refs = affinity::references(&payload["input"], &state.key, identity.user_id)
         .map_err(|_| ContextError::Missing)?;
     let (user, id, generation) = (identity.user_id, account.info.id, account.info.generation);
+    if !affinity::can_transfer(&refs, id) {
+        return Err(ContextError::Conflict);
+    }
     let has_context = !refs.is_empty();
     let digests = state
         .db
@@ -1162,7 +1185,7 @@ fn ws_response_metadata(
             HeaderValue::from_str(&crate::account_preferences::observation_key(
                 &log.context_key,
                 log.user_id,
-                log.account_id,
+                log.observation_account_id,
             ))
             .expect("hex metadata"),
         );
@@ -1365,7 +1388,9 @@ pub(super) async fn http(
             surface,
             if streaming { "http_sse" } else { "http_json" },
         ),
-        if chat_request {
+        if compact && account.info.id < 0 {
+            "platform_http_json"
+        } else if chat_request {
             "websocket"
         } else {
             "http_sse"
@@ -1392,7 +1417,10 @@ pub(super) async fn http(
         Ok(value) => value,
         Err(_) => return ContextError::Missing.response(),
     };
-    let socket = if chat_request && !crate::upstream::prefer_http(&dispatch_payload) {
+    let socket = if chat_request
+        && account.info.id > 0
+        && !crate::upstream::prefer_http(&dispatch_payload)
+    {
         tokio::select! {
             _=wait_for_stop(stopped.clone())=> {
                 let _=log.finish("interrupted", Counters::default()).await;
@@ -1473,7 +1501,7 @@ pub(super) async fn http(
         Source::WebSocket(Box::new(socket))
     } else {
         let mut excluded = Vec::new();
-        let response = loop {
+        let response = 'http_attempt: loop {
             let dispatch_payload =
                 match affinity::upstream_payload(&payload, &state.key, identity.user_id) {
                     Ok(value) => value,
@@ -1486,7 +1514,7 @@ pub(super) async fn http(
                 .and_then(|v| HeaderValue::from_str(&v).ok());
             let response = tokio::select! {
                 _=wait_for_stop(stopped.clone())=>Err("service stopping".into()),
-                response=upstream.post(&account,path,&dispatch_payload,Some((&session,&thread)),log.health_order,crate::upstream::InferenceHeaders { turn_state:dispatch_turn.as_ref(), responses_lite })=>response,
+                response=upstream.post(&account,if compact && account.info.id<0 {"responses/compact"}else{path},&dispatch_payload,Some((&session,&thread)),log.health_order,crate::upstream::InferenceHeaders { turn_state:dispatch_turn.as_ref(), responses_lite })=>response,
             };
             let response = match response {
                 Ok(response) => response,
@@ -1531,58 +1559,69 @@ pub(super) async fn http(
                 if let Some(object) = refusal.as_object_mut() {
                     object.insert("type".into(), json!("error"));
                 }
-                if quota_saved.is_ok()
-                    && accounted.is_ok()
-                    && status.as_u16() == 429
-                    && payload["conversation"].is_null()
-                    && quota_refusal(&refusal)
-                    && upstream
-                        .account_enabled(account.info.id)
-                        .await
-                        .unwrap_or(false)
-                {
-                    excluded.push(account.info.id);
-                    if excluded.len() < 4 {
-                        if let Ok(alternate) =
-                            upstream.select_excluding(&model, None, &excluded).await
-                        {
-                            if let Err(err) = transfer_context(
-                                &state,
-                                &identity,
-                                &mut payload,
-                                &alternate,
-                                &mut pending_routing,
-                            )
+                'platform_refusal: {
+                    if quota_saved.is_ok()
+                        && accounted.is_ok()
+                        && status.as_u16() == 429
+                        && payload["conversation"].is_null()
+                        && quota_refusal(&refusal)
+                        && upstream
+                            .account_enabled(account.info.id)
                             .await
+                            .unwrap_or(false)
+                    {
+                        excluded.push(account.info.id);
+                        if excluded.len() < 4 {
+                            if let Ok(alternate) =
+                                upstream.select_excluding(&model, None, &excluded).await
                             {
-                                return err.response();
-                            }
-                            account = alternate;
-                            turn_state = None;
-                            log = match RequestLog::begin(
-                                &state,
-                                record(
+                                if (account.info.id < 0 || alternate.info.id < 0)
+                                    && !crate::platform::transfer_safe(&payload)
+                                {
+                                    break 'platform_refusal;
+                                }
+                                if let Err(err) = transfer_context(
+                                    &state,
                                     &identity,
-                                    &RequestId::new(),
+                                    &mut payload,
+                                    &alternate,
+                                    &mut pending_routing,
+                                )
+                                .await
+                                {
+                                    return err.response();
+                                }
+                                account = alternate;
+                                turn_state = None;
+                                log = match RequestLog::begin(
+                                    &state,
+                                    record(
+                                        &identity,
+                                        &RequestId::new(),
+                                        &account,
+                                        &model,
+                                        surface,
+                                        if streaming { "http_sse" } else { "http_json" },
+                                    ),
+                                    if compact && account.info.id < 0 {
+                                        "platform_http_json"
+                                    } else {
+                                        "http_sse"
+                                    },
                                     &account,
-                                    &model,
-                                    surface,
-                                    if streaming { "http_sse" } else { "http_json" },
-                                ),
-                                "http_sse",
-                                &account,
-                                routing_outputs(&payload, &pending_routing),
-                            )
-                            .await
-                            {
-                                Ok(log) => log,
-                                Err(_) => return ContextError::Storage.response(),
-                            };
-                            if log.sent().await.is_err() {
-                                let _ = log.finish("storage_error", Counters::default()).await;
-                                return ContextError::Storage.response();
+                                    routing_outputs(&payload, &pending_routing),
+                                )
+                                .await
+                                {
+                                    Ok(log) => log,
+                                    Err(_) => return ContextError::Storage.response(),
+                                };
+                                if log.sent().await.is_err() {
+                                    let _ = log.finish("storage_error", Counters::default()).await;
+                                    return ContextError::Storage.response();
+                                }
+                                continue 'http_attempt;
                             }
-                            continue;
                         }
                     }
                 }
@@ -1620,6 +1659,15 @@ pub(super) async fn http(
                 now,
             )
             .await;
+        if compact && account.info.id < 0 {
+            return platform_compact(
+                response,
+                &mut log,
+                stopped.clone(),
+                identity.observe_account,
+            )
+            .await;
+        }
         // The Codex backend can omit Content-Type. Its missing header must not
         // discard a possibly completed inference: the bounded SSE decoder and
         // response lifecycle below still validate the actual event stream.
@@ -1660,7 +1708,7 @@ pub(super) async fn http(
         HeaderValue::from_str(&crate::account_preferences::observation_key(
             &state.key,
             identity.user_id,
-            account.info.id,
+            log.observation_account_id,
         ))
         .expect("hex metadata")
     });
@@ -1864,6 +1912,88 @@ pub(super) async fn http(
     }
     if let Some(value) = response_turn_state {
         response.headers_mut().insert("x-codex-turn-state", value);
+    }
+    response
+}
+
+/// Public Platform compaction is unary and may retain visible messages beside
+/// its checkpoint. Do not project it through Codex's single-checkpoint adapter.
+async fn platform_compact(
+    response: reqwest::Response,
+    log: &mut RequestLog,
+    stopped: watch::Receiver<bool>,
+    observe_account: bool,
+) -> Response {
+    let read = tokio::select! {
+        _=wait_for_stop(stopped)=>Err("service stopping".into()),
+        value=crate::oauth::read_json(response,crate::payload::PROJECTED_OUTPUT_BYTES)=>value,
+    };
+    let mut value = match read {
+        Ok(value) => value,
+        Err(_) => {
+            let _ = log.finish("interrupted", Counters::default()).await;
+            return error(
+                StatusCode::BAD_GATEWAY,
+                "upstream_protocol_error",
+                "compaction response unavailable",
+            );
+        }
+    };
+    let counters = Counters::from_json(value.get("usage"));
+    let valid = value["object"] == "response.compaction"
+        && value["id"].as_str().is_some_and(|id| {
+            !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
+        })
+        && value["output"].as_array().is_some_and(|items| {
+            items.len() <= 16384
+                && items
+                    .iter()
+                    .filter(|item| {
+                        item["type"] == "compaction"
+                            && item["encrypted_content"]
+                                .as_str()
+                                .is_some_and(|s| !s.is_empty())
+                    })
+                    .count()
+                    == 1
+        });
+    if !valid || counters.is_err() {
+        let _ = log
+            .finish("invalid_response", counters.unwrap_or_default())
+            .await;
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_protocol_error",
+            "invalid compaction response",
+        );
+    }
+    log.response_id = value["id"].as_str().map(str::to_owned);
+    if log
+        .finish("completed", counters.expect("validated counters"))
+        .await
+        .is_err()
+    {
+        return ContextError::Storage.response();
+    }
+    let _ = log.health(None, "success").await;
+    if log.remember(&mut value["output"]).is_err() {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_protocol_error",
+            "invalid compaction context",
+        );
+    }
+    let mut response = Json(value).into_response();
+    if observe_account {
+        response.headers_mut().insert(
+            "x-exetrouter-account",
+            HeaderValue::from_str(&crate::account_preferences::observation_key(
+                &log.context_key,
+                log.user_id,
+                log.observation_account_id,
+            ))
+            .expect("hex metadata"),
+        );
     }
     response
 }
@@ -2892,6 +3022,11 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                     let _ = send_client(&mut client, ws_error(code, "account unavailable; full current context required before switching accounts")).await;
                                     continue 'frames;
                                 }
+                                if (id < 0 || account.info.id < 0)
+                                    && !crate::platform::transfer_safe(&payload)
+                                {
+                                    break 'migration;
+                                }
                                 // Keep only bounded routing metadata to restore a soft
                                 // transfer whose handshake fails, never clone full history.
                                 let old_turn = payload
@@ -3054,6 +3189,17 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         break 'frames;
                     }
                 };
+                if account.info.id < 0 && payload["generate"] == false {
+                    let _ = send_client(
+                        &mut client,
+                        ws_error(
+                            "unsupported_parameter",
+                            "Platform HTTP does not support non-generating warmup",
+                        ),
+                    )
+                    .await;
+                    continue 'frames;
+                }
                 let initial_id = context.unwrap_or(account.info.id);
                 if initial_id != account.info.id {
                     if let Some(metadata) = payload
@@ -3229,6 +3375,17 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     .await;
                     break 'frames;
                 }
+            }
+            if account.info.id < 0 && payload["generate"] == false {
+                let _ = send_client(
+                    &mut client,
+                    ws_error(
+                        "unsupported_parameter",
+                        "Platform HTTP does not support non-generating warmup",
+                    ),
+                )
+                .await;
+                continue 'frames;
             }
             // HTTP cannot use a WS response ID, even on the same account. Ask
             // the client for full input before submission if bounded recovery
