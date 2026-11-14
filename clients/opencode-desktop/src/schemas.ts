@@ -22,9 +22,17 @@ export const Window = Schema.Struct({
 })
 export type Window = typeof Window.Type
 
+export const PlatformHistory = Schema.Struct({ from: Schema.Number, to: Schema.Number, points: Schema.Array(Schema.Struct({ from: Schema.Number, to: Schema.Number, observedAt: Schema.Number, usd: Schema.Number })) })
+export type PlatformHistory = typeof PlatformHistory.Type
+export const PlatformCosts = Schema.Struct({ from: Schema.Number, to: Schema.Number, observedAt: Schema.NullOr(Schema.Number), spentUSD: Schema.NullOr(Schema.Number), budgetUSD: Schema.NullOr(Schema.Number), complete: Schema.Boolean, basis: Schema.String })
+export const BalanceEstimate = Schema.Struct({ remainingUSD: Schema.NullOr(Schema.Number), spentUSD: Schema.NullOr(Schema.Number), through: Schema.Number, observedAt: Schema.NullOr(Schema.Number), unpriced: Schema.Number, status: Schema.String })
+export const PlatformBalance = Schema.Struct({ enteredAt: Schema.Number, initialUSD: Schema.Number, exetrouter: BalanceEstimate, organization: BalanceEstimate })
 export const QuotaHistory = Schema.Struct({
   from: Schema.Number, to: Schema.Number, intervalSeconds: Schema.optionalKey(Schema.Number),
+  // Pre-release Platform IPC used this name; accept it during GUI reloads.
+  interval: Schema.optionalKey(Schema.Number),
   points: Schema.Array(Schema.Struct({ kind: Schema.String, hour: Schema.Number, observedAt: Schema.Number, used: Schema.Number, minutes: Schema.NullOr(Schema.Number), resetAt: Schema.NullOr(Schema.Number) })),
+  platform: Schema.optionalKey(Schema.NullOr(PlatformHistory)),
 })
 export type QuotaHistory = typeof QuotaHistory.Type
 
@@ -33,15 +41,14 @@ export const ClientActivity = Schema.Struct({
   rows: Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, running: Schema.Number, lastRequestAt: Schema.NullOr(Schema.Number) })),
 })
 
-export const CapacityDemand = Schema.Struct({ lastHour: Schema.Number, previousHour: Schema.Number, inFlight: Schema.Number, complete: Schema.Boolean })
-export const CapacityProfile = Schema.Struct({
-  state: Schema.String, shortWindow: Schema.NullOr(Schema.Boolean), models: Schema.Array(Schema.String),
-  costs: Schema.Array(Schema.Struct({kind:Schema.String,perRequest:Schema.NullOr(Schema.Number),from:Schema.NullOr(Schema.Number),to:Schema.Number,requests:Schema.Number})),
-  resetEligibleUntil: Schema.NullOr(Schema.Number),
-})
-
 export const Account = Schema.Struct({
-  capacity: Schema.optionalKey(Schema.NullOr(CapacityProfile)),
+  platform: Schema.optionalKey(Schema.NullOr(Schema.Struct({ configuredAt: Schema.Number, inferenceEnabled: Schema.Boolean, creditStatus: Schema.String, codexFallbackAllowed:Schema.optionalKey(Schema.Boolean),
+    costs: Schema.optionalKey(Schema.NullOr(PlatformCosts)),
+    balance: Schema.optionalKey(Schema.NullOr(PlatformBalance)),
+    key: Schema.optionalKey(Schema.NullOr(Schema.Struct({ state:Schema.String, createdAt:Schema.NullOr(Schema.Number), expiresAt:Schema.NullOr(Schema.Number), lastUsedAt:Schema.NullOr(Schema.Number), checkedAt:Schema.NullOr(Schema.Number) }))),
+    refreshError: Schema.optionalKey(Schema.Boolean),
+  }))),
+  subscription: Schema.optionalKey(Schema.NullOr(Schema.Struct({ billingDay: Schema.NullOr(Schema.Number), planUSD: Schema.NullOr(Schema.Number), apiBudgetCents: Schema.NullOr(Schema.Number) }))),
   observationKey: Schema.NullOr(Schema.String),
   id: Schema.Number, label: Schema.String, enabled: Schema.NullOr(Schema.Boolean), locked: Schema.Boolean,
   windows: Schema.Array(Window), quotaStatus: Schema.String, cooldownSource: Schema.String, cooldownUntil: Schema.NullOr(Schema.Number),
@@ -54,7 +61,6 @@ export const Account = Schema.Struct({
 export type Account = typeof Account.Type
 
 export const Snapshot = Schema.Struct({
-  capacity: Schema.optionalKey(Schema.NullOr(CapacityDemand)),
   version: Schema.String,
   checkedAt: Schema.Number,
   configured: Schema.Boolean,
@@ -107,7 +113,7 @@ export const Tokens = Schema.Array(Schema.Struct({
   fastMode: Schema.NullOr(Schema.Boolean),
   createdAt: Schema.NullOr(Schema.Number), expiresAt: Schema.NullOr(Schema.Number), lastUsedAt: Schema.NullOr(Schema.Number),
 }))
-export const Models = Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, context: Schema.NullOr(Schema.Number) }))
+export const Models = Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, context: Schema.NullOr(Schema.Number), source: Schema.optionalKey(Schema.String), capabilities: Schema.optionalKey(Schema.Array(Schema.String)) }))
 export const Connection = Schema.Struct({
   mode: Schema.Literals(["remote", "standalone"]), host: Schema.String, port: Schema.Number, ssh_user: Schema.String,
   identity: Schema.String, api_url: Schema.NullOr(Schema.String), state_dir: Schema.String, listen: Schema.String,

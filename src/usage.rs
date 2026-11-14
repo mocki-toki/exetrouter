@@ -1,7 +1,7 @@
 use crate::Result;
 use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
 use chrono_tz::{Europe::Moscow, Tz};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -121,11 +121,32 @@ pub struct RequestOutcome {
 }
 
 pub fn finish_request(conn: &Connection, request_id: &str, outcome: &RequestOutcome) -> Result<()> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let counters = &outcome.counters;
-    let changed=conn.execute("UPDATE usage_events SET status=?1,input_tokens=?2,output_tokens=?3,cached_input_tokens=?4,reasoning_output_tokens=?5,upstream_transport=?6,upstream_request_id=?7,upstream_response_id=?8,duration_ms=?9 WHERE request_id=?10 AND status IN ('accepted','sent')",params![outcome.status,counters.input,counters.output,counters.cached_input,counters.reasoning_output,outcome.upstream_transport,outcome.upstream_request_id,outcome.upstream_response_id,outcome.duration_ms,request_id])?;
+    let model: Option<String> = tx
+        .query_row(
+            "SELECT model FROM usage_events WHERE request_id=?1",
+            [request_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let cost = model
+        .as_deref()
+        .filter(|_| {
+            matches!(
+                outcome.upstream_transport,
+                "platform_http_sse" | "platform_http_json"
+            )
+        })
+        .and_then(|model| token_cost_nanos(model, counters));
+    let changed=tx.execute("UPDATE usage_events SET status=?1,input_tokens=?2,output_tokens=?3,cached_input_tokens=?4,reasoning_output_tokens=?5,upstream_transport=?6,upstream_request_id=?7,upstream_response_id=?8,duration_ms=?9 WHERE request_id=?10 AND status IN ('accepted','sent')",params![outcome.status,counters.input,counters.output,counters.cached_input,counters.reasoning_output,outcome.upstream_transport,outcome.upstream_request_id,outcome.upstream_response_id,outcome.duration_ms,request_id])?;
     if changed != 1 {
         return Err("request missing or already finalized".into());
     }
+    if let Some(cost) = cost {
+        tx.execute("INSERT INTO platform_request_costs(usage_id,usd_nanos) SELECT id,?2 FROM usage_events WHERE request_id=?1",params![request_id,cost])?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -421,6 +442,33 @@ pub fn usage_range_for_user(
     })
 }
 
+// Standard token prices, nanodollars per token. Shared with the frozen Platform
+// estimate; these are not invoices and exclude tool fees and tier adjustments.
+const TOKEN_PRICES: &[(&str, [i64; 6])] = &[
+    ("gpt-6-astra", [10000, 50000, 1000, 20000, 75000, 2000]),
+    ("gpt-6.1-sol", [2000, 10000, 100, 4000, 15000, 200]),
+    ("gpt-6.1-terra", [1000, 5000, 50, 2000, 7500, 100]),
+    ("gpt-6-luna", [100, 500, 10, 200, 750, 20]),
+    ("gpt-6-sol", [2000, 10000, 200, 4000, 15000, 400]),
+    ("gpt-5.6-sol", [4000, 20000, 400, 8000, 30000, 800]),
+    ("gpt-5.6-terra", [2000, 12000, 200, 4000, 18000, 400]),
+    ("gpt-5.6-luna", [200, 1200, 20, 400, 1800, 40]),
+    ("gpt-5.5", [5000, 30000, 500, 10000, 45000, 1000]),
+];
+
+pub(crate) fn token_cost_nanos(model: &str, counters: &Counters) -> Option<i64> {
+    let (_, rates) = TOKEN_PRICES.iter().find(|(id, _)| *id == model)?;
+    let (input, output, cached) = (counters.input?, counters.output?, counters.cached_input?);
+    if input < 0 || output < 0 || cached < 0 || cached > input {
+        return None;
+    }
+    let tier = if input > 272000 { 3 } else { 0 };
+    (input - cached)
+        .checked_mul(rates[tier])?
+        .checked_add(output.checked_mul(rates[tier + 1])?)?
+        .checked_add(cached.checked_mul(rates[tier + 2])?)
+}
+
 fn aggregate(
     conn: &Connection,
     group: &str,
@@ -442,22 +490,23 @@ fn aggregate(
     // Rates are standard API USD per million tokens (not subscription charges).
     // Keep pricing at the request level: aggregating Astra and Sol tokens first
     // would erase both the model rate and the >272K long-context tier.
-    let prices = "VALUES
-        ('gpt-6-astra',10.0,50.0,1.0,20.0,75.0,2.0),
-        ('gpt-6.1-sol',2.0,10.0,0.1,4.0,15.0,0.2),
-        ('gpt-6.1-terra',1.0,5.0,0.05,2.0,7.5,0.1),
-        ('gpt-6-luna',0.1,0.5,0.01,0.2,0.75,0.02),
-        ('gpt-6-sol',2.0,10.0,0.2,4.0,15.0,0.4),
-        ('gpt-5.6-sol',4.0,20.0,0.4,8.0,30.0,0.8),
-        ('gpt-5.6-terra',2.0,12.0,0.2,4.0,18.0,0.4),
-        ('gpt-5.6-luna',0.2,1.2,0.02,0.4,1.8,0.04),
-        ('gpt-5.5',5.0,30.0,0.5,10.0,45.0,1.0)";
+    let prices = format!(
+        "VALUES {}",
+        TOKEN_PRICES
+            .iter()
+            .map(|(id, r)| format!(
+                "('{id}',{},{},{},{},{},{})",
+                r[0], r[1], r[2], r[3], r[4], r[5]
+            ))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     let price = "CASE WHEN p.model IS NOT NULL AND e.input_tokens IS NOT NULL AND e.output_tokens IS NOT NULL
         AND e.cached_input_tokens IS NOT NULL AND e.cached_input_tokens BETWEEN 0 AND e.input_tokens
         THEN ((e.input_tokens-e.cached_input_tokens)*
           CASE WHEN e.input_tokens>272000 THEN p.long_input ELSE p.short_input END
           + e.cached_input_tokens*CASE WHEN e.input_tokens>272000 THEN p.long_cached ELSE p.short_cached END
-          + e.output_tokens*CASE WHEN e.input_tokens>272000 THEN p.long_output ELSE p.short_output END)/1000000.0 END";
+          + e.output_tokens*CASE WHEN e.input_tokens>272000 THEN p.long_output ELSE p.short_output END)/1000000000.0 END";
     let sql = format!("WITH p(model,short_input,short_output,short_cached,long_input,long_output,long_cached) AS ({prices}) SELECT {group},COUNT(*),
         SUM(CASE WHEN e.input_tokens IS NULL OR e.output_tokens IS NULL THEN 1 ELSE 0 END),
         SUM(e.input_tokens),SUM(e.output_tokens),SUM(e.cached_input_tokens),SUM(e.reasoning_output_tokens),

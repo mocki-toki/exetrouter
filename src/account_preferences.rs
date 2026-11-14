@@ -115,12 +115,19 @@ fn annotate_at(
     value["capabilities"]["automatic_reset_credits"] = serde_json::json!(1);
     value["capabilities"]["global_account_clients"] = serde_json::json!(1);
     value["capabilities"]["hourly_quota_history"] = serde_json::json!(1);
+    value["capabilities"]["ten_minute_quota_history"] = serde_json::json!(1);
     if let Some(rows) = value["quota_accounts"].as_array_mut() {
         let mut candidates = Vec::new();
         // Scan activity once per snapshot, not once per account.
         let mut clients = crate::usage::clients_by_account(conn, key, user, now)?;
         for row in rows.iter_mut() {
             if let Some(id) = row["id"].as_i64() {
+                if let Some(platform) = crate::platform::snapshot(conn, id)? {
+                    row["platform"] = serde_json::to_value(platform)?;
+                }
+                if let Some(subscription) = crate::subscription::snapshot(conn, id)? {
+                    row["subscription"] = serde_json::to_value(subscription)?;
+                }
                 row["observation_key"] = observation_key(key, user, id).into();
                 let preference = effective(conn, id)?;
                 let quota = crate::quota::summary(conn, id, now)?;
@@ -128,7 +135,7 @@ fn annotate_at(
                 let routing = crate::routing::decision(conn, id, now)?;
                 let reached = routing.reached(&quota);
                 let available = preference.enabled && !reached && quota.cooldown_until.is_none()
-                    && conn.query_row("SELECT a.state='active' AND a.expires_at>?2+60 AND a.catalog_updated_at IS NOT NULL AND a.catalog_updated_at<=?2 AND a.catalog_updated_at>?2-60 AND EXISTS(SELECT 1 FROM oauth_models m WHERE m.account_id=a.id) AND NOT EXISTS(SELECT 1 FROM oauth_health h WHERE h.account_id=a.id AND h.generation=a.generation AND h.retry_at>?2) FROM oauth_accounts a WHERE a.id=?1",params![id,now],|r|r.get::<_,bool>(0))?;
+                    && conn.query_row("SELECT a.state='active' AND a.expires_at>?2+60 AND a.catalog_updated_at IS NOT NULL AND a.catalog_updated_at<=?2 AND a.catalog_updated_at>?2-?3 AND EXISTS(SELECT 1 FROM oauth_models m WHERE m.account_id=a.id) AND NOT EXISTS(SELECT 1 FROM oauth_health h WHERE h.account_id=a.id AND h.generation=a.generation AND h.retry_at>?2) FROM oauth_accounts a WHERE a.id=?1",params![id,now,crate::catalog::CACHE_TTL_SECONDS],|r|r.get::<_,bool>(0))?;
                 if available {
                     candidates.push(crate::pool::Candidate {
                         id,
@@ -178,7 +185,6 @@ fn annotate_at(
             }
         }
     }
-    crate::capacity::annotate(conn, value, now)?;
     Ok(())
 }
 
@@ -246,7 +252,10 @@ mod tests {
             "state='reauth_required'".into(),
             format!("expires_at={now}"),
             "catalog_updated_at=NULL".into(),
-            format!("catalog_updated_at={}", now - 60),
+            format!(
+                "catalog_updated_at={}",
+                now - crate::catalog::CACHE_TTL_SECONDS
+            ),
         ] {
             conn.execute(
                 &format!("UPDATE oauth_accounts SET {restriction} WHERE id=2"),

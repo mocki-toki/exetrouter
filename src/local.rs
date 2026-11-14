@@ -254,7 +254,14 @@ impl Local {
             let mut values = Vec::new();
             for info in oauth::list(conn)? {
                 let account = oauth::load(conn,&vault,info.id)?;
-                values.push(json!({"id":info.id,"email":oauth::token_email(&account.credentials.access_token).unwrap_or_else(||"Email unavailable".into()),"state":info.state}));
+                let mut row = json!({"id":info.id,"email":oauth::token_email(&account.credentials.access_token).unwrap_or_else(||"Email unavailable".into()),"state":info.state});
+                if let Some(subscription) = crate::subscription::snapshot(conn, info.id)? {
+                    row["subscription"] = serde_json::to_value(subscription)?;
+                }
+                if let Some(platform) = crate::platform::snapshot(conn, info.id)? {
+                    row["platform"] = serde_json::to_value(platform)?;
+                }
+                values.push(row);
             }
             Ok(json!(values))
         }).await
@@ -328,6 +335,83 @@ impl Drop for Local {
 mod tests {
     use super::mock;
     use super::*;
+    #[tokio::test]
+    async fn standalone_recovers_abandoned_requests_only_when_starting_the_runtime_owner() {
+        async fn pending(local: &Local) -> i64 {
+            local
+                .db
+                .call(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT COUNT(*) FROM usage_events WHERE status IN ('accepted','sent')",
+                        [],
+                        |r| r.get(0),
+                    )?)
+                })
+                .await
+                .unwrap()
+        }
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        // No accounts or real upstream: this tests durable bookkeeping only.
+        let config = upstream::Config::new(
+            "http://127.0.0.1:1".into(),
+            "http://127.0.0.1:1".into(),
+            true,
+        )
+        .unwrap();
+        let address = "127.0.0.1:0".parse().unwrap();
+        let offline = Local::open_with(root.path(), address, false, config.clone())
+            .await
+            .unwrap();
+        offline
+            .request(ControlRequest::TokenCreate {
+                name: "Synthetic client".into(),
+                expires_days: Some(1),
+            })
+            .await
+            .unwrap();
+        offline.db.call(|conn| {
+            for (id, status) in [("abandoned-accepted", "accepted"), ("abandoned-sent", "sent")] {
+                conn.execute("INSERT INTO usage_events(at_utc,user_id,token_id,api_surface,model,status,request_id) SELECT strftime('%s','now')-86400,user_id,id,'responses','synthetic',?1,?2 FROM access_tokens", rusqlite::params![status,id])?;
+            }
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(pending(&offline).await, 2);
+        offline.stop().await.unwrap();
+        drop(offline);
+
+        let owner = Local::open_with(root.path(), address, true, config.clone())
+            .await
+            .unwrap();
+        assert_eq!(pending(&owner).await, 0);
+        owner.db.call(|conn| {
+            let unknown: i64 = conn.query_row("SELECT COUNT(*) FROM usage_events WHERE status='aborted_unknown' AND input_tokens IS NULL AND output_tokens IS NULL", [], |r| r.get(0))?;
+            assert_eq!(unknown, 2, "recovery must not invent zero usage");
+            conn.execute("INSERT INTO usage_events(at_utc,user_id,token_id,api_surface,model,status,request_id) SELECT strftime('%s','now')-86400,user_id,id,'responses','synthetic','accepted','still-owned' FROM access_tokens", [])?;
+            Ok(())
+        }).await.unwrap();
+        // A second dashboard or a passive doctor must not recover the owner's
+        // durable admissions, even if their start time is old.
+        for serve in [false, true] {
+            let reader = Local::open_with(root.path(), address, serve, config.clone())
+                .await
+                .unwrap();
+            reader.request(ControlRequest::Doctor).await.unwrap();
+            assert_eq!(pending(&reader).await, 1);
+            assert_eq!(reader.attached, serve);
+            reader.stop().await.unwrap();
+        }
+        assert_eq!(pending(&owner).await, 1);
+        owner.stop().await.unwrap();
+        drop(owner);
+
+        let restarted = Local::open_with(root.path(), address, true, config)
+            .await
+            .unwrap();
+        assert_eq!(pending(&restarted).await, 0);
+        restarted.stop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn embedded_api_routes_without_ssh_and_preserves_accounts_and_usage() {
         let root = tempfile::tempdir().unwrap();

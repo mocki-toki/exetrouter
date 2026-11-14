@@ -54,7 +54,9 @@ pub struct ServeConfig {
 }
 
 const CONTROL_LIMIT: u64 = 32_768;
-const CONTROL_REPLY_LIMIT: usize = 1_048_576;
+/// A full 90-day ten-minute history must fit equally over SSH and standalone.
+/// Requests, queues and concurrent management operations retain their own bounds.
+pub const CONTROL_REPLY_LIMIT: usize = 8_388_608;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -210,7 +212,7 @@ pub async fn serve(
     {
         let worker_stop = stopped.clone();
         tasks.spawn(async move {
-            upstream.automatic_accounts(worker_stop).await;
+            upstream.maintain_accounts(worker_stop).await;
             Ok(())
         });
     }
@@ -305,8 +307,7 @@ pub(crate) async fn local_api(
     let (shutdown, signal) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
         let worker_stop = stopped.clone();
-        let mut worker =
-            tokio::spawn(async move { upstream.automatic_accounts(worker_stop).await });
+        let mut worker = tokio::spawn(async move { upstream.maintain_accounts(worker_stop).await });
         let app = router(state);
         let serving = std::future::IntoFuture::into_future(
             axum::serve(listener, app).with_graceful_shutdown(wait_for_stop(stopped)),

@@ -41,10 +41,18 @@ pub(super) struct Dashboard {
     pub group: usize,
     #[serde(default)]
     pub request_metric: bool,
+    #[serde(default)]
+    pub usd_metric: bool,
+    #[serde(default)]
+    pub rolling_period: Option<usize>,
 }
 impl Dashboard {
     fn validate(&self) -> Result<()> {
-        if self.tab >= 5 || self.period >= 4 || self.group >= 4 {
+        if self.tab >= 5
+            || self.period >= 4
+            || self.group >= 4
+            || self.rolling_period.is_some_and(|p| p >= 4)
+        {
             return Err("invalid dashboard preferences".into());
         }
         Ok(())
@@ -708,6 +716,7 @@ mod tests {
                 period: 1,
                 group: 3,
                 request_metric: true,
+                ..Default::default()
             },
         )
         .await

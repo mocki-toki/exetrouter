@@ -36,6 +36,17 @@ pub(crate) fn failure(
     retry: Option<i64>,
     now: i64,
 ) -> Result<()> {
+    if account.0 < 0 {
+        return crate::platform::routes::health(
+            conn,
+            account.0,
+            account.1,
+            order,
+            Some(Rejection::Temporary),
+            retry,
+            now,
+        );
+    }
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     failure_in_transaction(&tx, account, scope, order, reason, retry, now)?;
     tx.commit()?;
@@ -76,6 +87,21 @@ pub(crate) fn success(
     scope: Scope,
     order: i64,
 ) -> Result<()> {
+    if id < 0 {
+        return if matches!(scope, Scope::Responses) {
+            crate::platform::routes::health(
+                conn,
+                id,
+                generation,
+                order,
+                None,
+                None,
+                chrono::Utc::now().timestamp(),
+            )
+        } else {
+            Ok(())
+        };
+    }
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     if !valid(&tx, id, generation)? {
         return Ok(());
@@ -100,6 +126,17 @@ pub(crate) fn unauthorized(
     order: i64,
     now: i64,
 ) -> Result<()> {
+    if id < 0 {
+        return crate::platform::routes::health(
+            conn,
+            id,
+            generation,
+            order,
+            Some(Rejection::Authentication),
+            None,
+            now,
+        );
+    }
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     if !valid(&tx, id, generation)? {
         return Ok(());
@@ -152,7 +189,7 @@ pub(crate) fn rejection(event: &Value) -> Option<Rejection> {
     if status == Some(401)
         || matches!(
             code,
-            Some("authentication_error" | "invalid_token" | "token_expired")
+            Some("authentication_error" | "invalid_token" | "token_expired" | "invalid_api_key")
         )
     {
         return Some(Rejection::Authentication);

@@ -4,7 +4,7 @@ import { constants } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import type { Options } from "./options"
-import type { Snapshot, Usage, UsageInput, HistoryInput, Profile, Tokens, Models, Update, QuotaHistory, CapacityProfile } from "./schemas"
+import type { Snapshot, Usage, UsageInput, HistoryInput, Profile, Tokens, Models, Update, QuotaHistory, PlatformHistory } from "./schemas"
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid exr report.")
@@ -39,7 +39,7 @@ export function quotaHistory(value: unknown): QuotaHistory | null {
     seen.add(key)
     return { kind, hour, observedAt, used: number(p.used_percent), minutes: nullable(p.window_minutes), resetAt: nullable(p.reset_at) }
   }).sort((a, b) => a.hour - b.hour)
-  return { from, to, intervalSeconds: interval, points }
+  return { from, to, intervalSeconds: interval, points, ...(h.platform == null ? {} : { platform: platformHistory(h.platform) }) }
 }
 
 /** Optional history must not hide otherwise usable current account metadata. */
@@ -47,15 +47,17 @@ function optionalQuotaHistory(value: unknown): QuotaHistory | null {
   try { return quotaHistory(value) } catch { return null }
 }
 
-function capacityProfile(value: unknown): typeof CapacityProfile.Type | null {
-  if (value == null) return null
-  const p=record(value)
-  const state=text(p.state,32)
-  if (!["available","disabled","reauth_required","unconfigured","backoff","refresh_due","catalog_unavailable","cooldown"].includes(state)) throw new Error("Invalid capacity metadata.")
-  return {state,shortWindow: typeof p.short_window === "boolean" ? p.short_window : null,
-    models:list(p.models,256).map((m)=>text(m,256)), resetEligibleUntil:nullable(p.reset_eligible_until),
-    costs:list(p.costs,2).map((entry)=>{ const c=record(entry), perRequest=nullable(c.per_request); if(perRequest!==null&&perRequest<=0) throw new Error("Invalid capacity metadata."); return {kind:text(c.kind,16),perRequest,from:nullable(c.from_utc),to:number(c.to_utc),requests:number(c.requests)} }),
-  }
+export function platformHistory(value: unknown): PlatformHistory {
+  const h=record(value), from=number(h.from_utc), to=number(h.to_utc)
+  if (to<=from || to-from>90*86400 || h.interval_seconds!==86400) throw new Error("Invalid Platform history.")
+  const seen=new Set<number>()
+  const points=list(h.points,92).map((value)=>{
+    const p=record(value), start=number(p.from_utc), end=number(p.to_utc), observedAt=number(p.observed_at), nanos=number(p.usd_nanos)
+    if (start%86400 || start<from || end>to || end<=start || end>start+86400 || observedAt<end || seen.has(start) || !Number.isInteger(nanos) || nanos>1e18) throw new Error("Invalid Platform history.")
+    seen.add(start)
+    return {from:start,to:end,observedAt,usd:nanos/1e9}
+  }).sort((a,b)=>a.from-b.from)
+  return {from,to,points}
 }
 
 export function snapshot(value: unknown): Snapshot {
@@ -70,7 +72,6 @@ export function snapshot(value: unknown): Snapshot {
     return { active: nullable(row.active_for_user), limit: nullable(row.per_user_limit) }
   }
   return {
-    capacity: report.capacity == null ? null : {lastHour:number(record(report.capacity).last_hour),previousHour:number(record(report.capacity).previous_hour),inFlight:number(record(report.capacity).in_flight),complete:record(report.capacity).complete===true},
     version: text(report.version, 128),
     checkedAt: number(report.checked_at),
     configured: report.configuration_status === "configured",
@@ -86,7 +87,41 @@ export function snapshot(value: unknown): Snapshot {
       const preference = account.preference ? record(account.preference) : undefined
       const routing = object(account.routing), credits = object(account.reset_credits), clients = object(account.clients)
       return {
-        capacity: capacityProfile(account.capacity),
+        platform: account.platform == null ? null : (() => {
+          const p = record(account.platform)
+          if (!["unknown", "unverified"].includes(p.credit_status as string) || typeof p.inference_enabled !== "boolean") throw new Error("Unsupported Platform status.")
+          const costs=p.costs == null ? undefined : (()=>{
+            const c=record(p.costs), from=number(c.from_utc), to=number(c.to_utc), nanos=nullable(c.spent_usd_nanos), cents=nullable(c.budget_cents)
+            if (to<from || to-from>32*86400 || !["billing_day_utc","calendar_month_utc"].includes(String(c.basis)) || nanos!==null && (!Number.isInteger(nanos)||nanos>1e18) || cents!==null && (!Number.isSafeInteger(cents)||cents>1e9) || c.complete!==true && nanos!==null) throw new Error("Invalid Platform costs.")
+            return {from,to,observedAt:nullable(c.observed_at),spentUSD:nanos===null?null:nanos/1e9,budgetUSD:cents===null?null:cents/100,complete:c.complete===true,basis:String(c.basis)}
+          })()
+          const key=p.key == null ? undefined : (()=>{
+            const k=record(p.key), state=text(k.state,32)
+            if (!["active","expired","inactive","missing","operation_uncertain"].includes(state)) throw new Error("Invalid Platform key status.")
+            return {state,createdAt:nullable(k.created_at),expiresAt:nullable(k.expires_at),lastUsedAt:nullable(k.last_used_at),checkedAt:nullable(k.checked_at)}
+          })()
+          const balance=p.balance == null ? undefined : (()=>{
+            const b=record(p.balance), enteredAt=number(b.entered_at), initial=number(b.initial_usd_nanos)
+            if(!Number.isInteger(initial)||initial>1e16) throw new Error("Invalid manual balance.")
+            const estimate=(value:unknown)=>{
+              const e=record(value), status=text(e.status,32), spent=nullable(e.spent_usd_nanos), through=number(e.through_utc), unpriced=number(e.unpriced_requests)
+              const raw=e.remaining_usd_nanos
+              if(raw!=null && (typeof raw!=="number" || !Number.isFinite(raw) || !Number.isInteger(raw) || Math.abs(raw)>1e18)) throw new Error("Invalid balance estimate.")
+              if(!["estimated","unpriced_requests","configuration_changed","awaiting_report","reported","delayed_report"].includes(status)||!Number.isSafeInteger(unpriced)||spent!==null&&(!Number.isInteger(spent)||spent>1e18)||through<enteredAt) throw new Error("Invalid balance estimate.")
+              if(raw!=null&&(spent===null||Math.abs((raw as number)-(initial-spent))>Math.max(1,initial*Number.EPSILON,spent*Number.EPSILON)||unpriced!==0||["configuration_changed","awaiting_report"].includes(status))) throw new Error("Invalid balance estimate.")
+              return {remainingUSD:raw==null?null:(raw as number)/1e9,spentUSD:spent===null?null:spent/1e9,through,observedAt:nullable(e.observed_at),unpriced,status}
+            }
+            return {enteredAt,initialUSD:initial/1e9,exetrouter:estimate(b.exetrouter),organization:estimate(b.organization)}
+          })()
+          return { configuredAt: number(p.configured_at), inferenceEnabled: p.inference_enabled, creditStatus: "unknown", ...(typeof p.codex_fallback_allowed === "boolean"?{codexFallbackAllowed:p.codex_fallback_allowed}:{}), ...(costs?{costs}:{}), ...(balance?{balance}:{}), ...(key?{key}:{}), ...(p.refresh_error?{refreshError:true}:{}) }
+        })(),
+        subscription: account.subscription == null ? null : (() => {
+          const s = record(account.subscription), day = nullable(s.billing_day), plan = nullable(s.plan_usd), budget = nullable(s.effective_api_budget_cents)
+          if (day !== null && (!Number.isInteger(day) || day < 1 || day > 31)) throw new Error("Invalid subscription metadata.")
+          if (plan !== null && (!Number.isInteger(plan) || plan < 1 || plan > 100_000)) throw new Error("Invalid subscription metadata.")
+          if (budget !== null && (!Number.isSafeInteger(budget) || budget > 1_000_000_000)) throw new Error("Invalid subscription metadata.")
+          return { billingDay: day, planUSD: plan, apiBudgetCents: budget }
+        })(),
         id: number(account.id ?? 0),
         observationKey: typeof account.observation_key === "string" && /^[a-f0-9]{64}$/.test(account.observation_key) ? account.observation_key : null,
         label: text(account.label),
@@ -102,7 +137,11 @@ export function snapshot(value: unknown): Snapshot {
         // Do not forward arbitrary native error text across IPC.
         refreshError: typeof account.refresh_error === "string",
         clients: { count: nullable(clients.count), scope: string(clients.scope, "user"), observedAt: nullable(clients.observed_at), truncated: clients.truncated === true,
-          rows: list(clients.rows ?? [], 128).map((entry) => { const row = record(entry); return { id: string(row.id), name: string(row.name, "Label unavailable"), running: number(row.in_flight ?? 0), lastRequestAt: nullable(row.last_request_at) } }) },
+          rows: list(clients.rows ?? [], 128).map((entry) => {
+            const row = record(entry), name = string(row.name, "Label unavailable")
+            // Older standalone doctor reports may still contain encrypted labels.
+            return { id: string(row.id), name: name.startsWith("exrp1:") ? "Label unavailable" : name, running: number(row.in_flight ?? 0), lastRequestAt: nullable(row.last_request_at) }
+          }) },
         windows: list(quota.windows, 16).map((entry) => {
           const window = record(entry)
           const remaining = nullable(window.remaining_percent)
@@ -153,12 +192,17 @@ export function tokens(value: unknown): typeof Tokens.Type {
 }
 
 export function models(value: unknown): typeof Models.Type {
-  return list(record(value).data, 16384).map((entry) => { const row = record(entry); return { id: text(row.id), name: string(row.display_name, ""), context: nullable(object(row.exetrouter).context_window) } }).reverse()
+  const rows = list(record(value).data, 16384).map((entry) => {
+    const row = record(entry)
+    const allowed = ["reasoning", "tools", "image_input", "image_generation", "image_editing"]
+    return { id: text(row.id), name: string(row.display_name, "").replaceAll("-", " "), context: nullable(object(row.exetrouter).context_window), source: row.source === "platform" ? "platform" : "codex", capabilities: list(row.capabilities ?? [], 16).map((c) => text(c, 32)).filter((c) => allowed.includes(c)) }
+  })
+  return [...rows.filter((row) => row.source === "codex").reverse(), ...rows.filter((row) => row.source === "platform")]
 }
 
 /** Read-only subprocess boundary: no shell, stdin, stderr forwarding, secret output or unbounded buffering. */
 export function execJSON(binary: string, args: readonly string[], signal: AbortSignal, allowNonzero = false,
-  timeout = 50_000, maxBytes = 1_048_576): Promise<unknown> {
+  timeout = 50_000, maxBytes = 8_388_608): Promise<unknown> {
   if (signal.aborted) return Promise.reject(new Error("ExetRouter read cancelled."))
   return new Promise((resolve, reject) => {
     const env: NodeJS.ProcessEnv = { ...process.env, EXR_NO_UPDATE_CHECK: "1" }

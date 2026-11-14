@@ -19,6 +19,11 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/013_native_tools.sql"),
     include_str!("migrations/014_quota_history.sql"),
     include_str!("migrations/015_fast_mode.sql"),
+    include_str!("migrations/016_ten_minute_quota_history.sql"),
+    include_str!("migrations/017_subscription_metadata.sql"),
+    include_str!("migrations/018_platform_observations.sql"),
+    include_str!("migrations/019_platform_routes.sql"),
+    include_str!("migrations/020_platform_manual_balance.sql"),
 ];
 pub const SCHEMA_VERSION: usize = MIGRATIONS.len();
 const QUEUE_CAPACITY: usize = 32;
@@ -39,6 +44,7 @@ pub fn init(conn: &Connection) -> Result<()> {
     tx.execute("UPDATE quota_activation_attempts SET status='unknown' WHERE status='pending' AND attempted_at<=?1", [chrono::Utc::now().timestamp()-60])?;
     tx.execute("UPDATE automatic_reset_attempts SET status='unknown' WHERE status='submitted' AND attempted_at<=?1", [chrono::Utc::now().timestamp()-120])?;
     crate::quota_history::prune(&tx, chrono::Utc::now().timestamp())?;
+    crate::platform::prune(&tx, chrono::Utc::now().timestamp())?;
     tx.commit()?;
     Ok(())
 }
@@ -159,6 +165,105 @@ mod tests {
                 .unwrap(),
             "ok"
         );
+    }
+
+    #[test]
+    fn platform_release_upgrades_real_schema_15_without_fabricating_platform_state() {
+        let conn = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..15] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 15).unwrap();
+        let user = create_user(&conn, "synthetic").unwrap();
+        let token = create_token(&conn, &[1; 32], user, "fixture", 1).unwrap();
+        conn.execute("INSERT INTO oauth_accounts(account_id,state,encrypted_credentials,expires_at,created_at,generation) VALUES('synthetic','active',X'1234',9999999999,0,7)", []).unwrap();
+        conn.execute(
+            "INSERT INTO account_policy(account_id,enabled,priority,locked) VALUES(1,0,10,1)",
+            [],
+        )
+        .unwrap();
+        let hour = chrono::Utc::now().timestamp() / 3600 * 3600;
+        conn.execute(
+            "INSERT INTO oauth_quota_history VALUES(1,'primary',?1,?1+3599,42,480,?1+28800,1)",
+            [hour],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO automatic_reset_attempts(cycle_digest,credit_digest,account_id,attempted_at,quota_snapshot,status) VALUES(zeroblob(32),zeroblob(32),1,0,'[]','unknown')", []).unwrap();
+
+        for _ in 0..2 {
+            init(&conn).unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |r| r.get::<_, usize>(0))
+                    .unwrap(),
+                SCHEMA_VERSION
+            );
+            assert!(authenticate(&conn, &[1; 32], &token.secret)
+                .unwrap()
+                .is_some());
+            assert_eq!(
+                conn.query_row(
+                    "SELECT hex(encrypted_credentials),generation FROM oauth_accounts",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                )
+                .unwrap(),
+                ("1234".into(), 7)
+            );
+            assert_eq!(
+                conn.query_row("SELECT enabled,locked FROM account_policy", [], |r| Ok((
+                    r.get::<_, bool>(0)?,
+                    r.get::<_, bool>(1)?
+                )))
+                .unwrap(),
+                (false, true)
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT hour,observed_at,used_percent FROM oauth_quota_history",
+                    [],
+                    |r| Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, f64>(2)?
+                    ))
+                )
+                .unwrap(),
+                (hour + 3000, hour + 3599, 42.0)
+            );
+            assert_eq!(
+                conn.query_row("SELECT status FROM automatic_reset_attempts", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+                "unknown"
+            );
+            for table in [
+                "account_subscriptions",
+                "account_platform_credentials",
+                "platform_working_keys",
+                "platform_routes",
+                "platform_balance_anchors",
+                "platform_request_costs",
+            ] {
+                assert_eq!(
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0,
+                    "migration must not create configured accounts, credentials or balances"
+                );
+            }
+            assert_eq!(
+                conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "ok"
+            );
+            assert!(!conn
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap());
+        }
     }
 
     #[test]

@@ -13,7 +13,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     symbols::Marker,
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{
         Axis, Block, Borders, Chart, Clear, Dataset, GraphType, Padding, Paragraph, Row, Table,
         TableState, Tabs, Wrap,
@@ -27,10 +27,10 @@ use std::{
 };
 
 const USAGE_PERIODS: [(&str, &str); 4] = [
-    ("day", "Today"),
     ("24h", "Last 24 hours"),
-    ("week", "This week"),
-    ("month", "This month"),
+    ("7d", "Last 7 days"),
+    ("30d", "Last 30 days"),
+    ("90d", "Last 90 days"),
 ];
 const LIMIT_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const OVERVIEW: usize = 0;
@@ -40,6 +40,24 @@ const MODELS: usize = 3;
 const SETTINGS: usize = 4;
 const TABS: [&str; 5] = ["Overview", "Usage", "Tokens", "Models", "Settings"];
 const HEADER_HEIGHT: u16 = 3;
+mod palette {
+    use ratatui::style::Color;
+
+    pub const BASE: Color = Color::Rgb(24, 24, 24);
+    pub const SURFACE: Color = Color::Rgb(30, 30, 30);
+    pub const RAISED: Color = Color::Rgb(37, 37, 37);
+    pub const BORDER: Color = Color::Rgb(52, 52, 52);
+    pub const TEXT: Color = Color::Rgb(237, 237, 235);
+    pub const MUTED: Color = Color::Rgb(160, 159, 155);
+    pub const ACCENT: Color = Color::Rgb(136, 186, 198);
+    pub const SELECTION: Color = Color::Rgb(41, 52, 56);
+}
+const HISTORY_PERIODS: [(&str, i64); 4] = [
+    ("7d", 7 * 86400),
+    ("24h", 86400),
+    ("30d", 30 * 86400),
+    ("90d", 90 * 86400),
+];
 
 // Terminals normally report characters, not physical keys. Keep text input untouched;
 // translate Russian ЙЦУКЕН characters only while interpreting command shortcuts.
@@ -68,7 +86,7 @@ fn shortcut_key(mut key: KeyEvent) -> KeyEvent {
 fn command_input(state: &State) -> bool {
     !matches!(
         state.modal,
-        Some(Modal::Name(_) | Modal::Rename { .. } | Modal::Days { .. })
+        Some(Modal::Name(_) | Modal::Rename { .. } | Modal::Search { .. } | Modal::Days { .. })
     )
 }
 
@@ -103,22 +121,48 @@ fn dashboard_buttons(state: &State) -> Vec<(&'static str, KeyCode)> {
                 KeyCode::Char('b'),
             ),
             (
-                if state.request_metric {
+                if state.usd_metric {
+                    "USD estimate"
+                } else if state.request_metric {
                     "Requests"
                 } else {
                     "Tokens"
                 },
                 KeyCode::Char('m'),
             ),
+            ("Breakdown", KeyCode::Enter),
         ],
-        MODELS => vec![("Copy ID", KeyCode::Enter)],
+        MODELS => vec![
+            ("Copy ID", KeyCode::Enter),
+            ("Search", KeyCode::Char('s')),
+            ("Capabilities", KeyCode::Char('f')),
+            ("Clear filters", KeyCode::Char('0')),
+        ],
         TOKENS => vec![
             ("Actions", KeyCode::Enter),
             ("Create token", KeyCode::Char('n')),
+            ("Search", KeyCode::Char('s')),
+            ("Clear search", KeyCode::Char('0')),
         ],
         SETTINGS => vec![],
         _ => vec![("Details", KeyCode::Enter)],
     };
+    if state.tab == USAGE {
+        if all_usage_series_available(state) {
+            entries.push((
+                if state.usage_all {
+                    "Selected series"
+                } else {
+                    "All series"
+                },
+                KeyCode::Char('a'),
+            ));
+        }
+        entries.extend([
+            ("Previous", KeyCode::Char('[')),
+            ("Next", KeyCode::Char(']')),
+        ]);
+    }
     entries.extend([
         ("Refresh", KeyCode::Char('r')),
         ("Help", KeyCode::Char('?')),
@@ -144,7 +188,7 @@ fn button_rows(entries: &[(&str, KeyCode)], width: u16) -> u16 {
 fn controls_height(state: &State, busy: bool, width: u16) -> u16 {
     status_lines(state, busy, width).len() as u16
         + button_rows(&dashboard_buttons(state), width.saturating_sub(4))
-        + 1
+        + 2
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MouseAction {
@@ -195,6 +239,7 @@ fn mouse_key(mouse: MouseEvent, hits: &[Hit], state: &mut State) -> Option<KeyEv
                             state.selected = index;
                             state.settings_selected = 4 + index;
                         }
+                        TOKENS => state.token_selected = index,
                         _ => state.selected = index,
                     }
                     if matches!(state.tab, OVERVIEW | SETTINGS | TOKENS | MODELS) {
@@ -210,7 +255,9 @@ fn mouse_key(mouse: MouseEvent, hits: &[Hit], state: &mut State) -> Option<KeyEv
                     KeyCode::Enter
                 }
                 MouseAction::Cursor => {
-                    if let Some(Modal::Rename { input, .. }) = &mut state.modal {
+                    if let Some(Modal::Rename { input, .. } | Modal::Search { input, .. }) =
+                        &mut state.modal
+                    {
                         input.place_cursor(mouse.column.saturating_sub(hit.area.x) as usize);
                     }
                     return None;
@@ -237,12 +284,12 @@ fn buttons(frame: &mut Frame<'_>, area: Rect, entries: &[(&str, KeyCode)], hits:
         }
         let rect = Rect::new(x, y, width, 1);
         frame.render_widget(
-            Paragraph::new(text).style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Paragraph::new(Line::from(vec![
+                Span::raw(format!(" {label} ")),
+                Span::styled(shortcut_label(*key), Style::default().fg(palette::ACCENT)),
+                Span::raw(" "),
+            ]))
+            .style(Style::default().fg(palette::TEXT).bg(palette::RAISED)),
             rect,
         );
         hits.push(Hit {
@@ -258,15 +305,25 @@ struct State {
     tab: usize,
     values: [Option<Value>; 5],
     selected: usize,
+    token_selected: usize,
     account_selected: usize,
     account_hour: Option<i64>,
+    history_period: usize,
+    history_before: Option<i64>,
+    history_account: Option<i64>,
     model_selected: usize,
+    model_query: String,
+    model_features: Vec<String>,
+    token_query: String,
     scroll: u16,
     period: usize,
     group: usize,
     usage_selected: usize,
+    usage_all: bool,
     usage_cursor: Option<i64>,
     request_metric: bool,
+    usd_metric: bool,
+    usage_before: Option<i64>,
     statuses: [String; 5],
     notices: [Option<String>; 5],
     forecasts: super::quota_forecast::Forecasts,
@@ -275,7 +332,24 @@ struct State {
     update: Option<crate::update::Report>,
     update_checked: bool,
 }
+#[derive(Clone, Copy)]
+enum SearchKind {
+    Models,
+    Tokens,
+}
 enum Modal {
+    Usage {
+        scroll: u16,
+    },
+    TokenPolicy {
+        id: String,
+        enabled: Option<bool>,
+        fast: Option<Option<bool>>,
+    },
+    Search {
+        kind: SearchKind,
+        input: TextInput,
+    },
     Account {
         id: i64,
         scroll: u16,
@@ -367,6 +441,7 @@ struct Pending {
     task: tokio::task::JoinHandle<Result<Value>>,
     tab: usize,
     mutation: bool,
+    history_account: Option<i64>,
 }
 impl Drop for Pending {
     fn drop(&mut self) {
@@ -377,10 +452,11 @@ fn request(state: &State) -> ControlRequest {
     match state.tab {
         TOKENS => ControlRequest::TokenList,
         MODELS => ControlRequest::Models,
-        USAGE => ControlRequest::Usage {
+        USAGE => ControlRequest::UsageRange {
             period: USAGE_PERIODS[state.period].0.into(),
             by: [None, Some("user"), Some("model"), Some("token")][state.group].map(str::to_owned),
             timezone: Some(render::system_timezone()),
+            before: state.usage_before,
         },
         _ => ControlRequest::Limits,
     }
@@ -405,42 +481,46 @@ fn start(connection: &Connection, req: ControlRequest, tab: usize, mutation: boo
         }),
         tab,
         mutation,
+        history_account: None,
     }
+}
+fn start_history(connection: &Connection, state: &State, account: i64) -> Pending {
+    let mut pending = start(
+        connection,
+        ControlRequest::QuotaHistory {
+            account,
+            period: HISTORY_PERIODS[state.history_period].0.into(),
+            before: state.history_before,
+        },
+        OVERVIEW,
+        false,
+    );
+    pending.history_account = Some(account);
+    pending
+}
+fn replace_history(state: &mut State, account: i64, history: Value) -> Result<()> {
+    let wrapper = serde_json::json!({"quota_history":history});
+    if super::account_details::range(&wrapper).is_none() {
+        return Err("invalid subscription history report".into());
+    }
+    if let Some(row) = state.values[OVERVIEW]
+        .as_mut()
+        .and_then(|value| value["quota_accounts"].as_array_mut())
+        .and_then(|rows| {
+            rows.iter_mut()
+                .find(|row| row["id"].as_i64() == Some(account))
+        })
+    {
+        row["quota_history"] = wrapper["quota_history"].clone();
+    }
+    Ok(())
 }
 fn body(state: &State) -> String {
     let Some(value) = &state.values[state.tab] else {
         return "No data yet. Press r to load this view.".into();
     };
     match state.tab {
-        TOKENS => {
-            let rows = value.as_array().cloned().unwrap_or_default();
-            let mut text = String::new();
-            let first = state.selected / 8 * 8;
-            for (i, row) in rows.iter().enumerate().skip(first).take(8) {
-                text.push_str(if i == state.selected { "▶ " } else { "  " });
-                text.push_str(&format!(
-                    "{}  {}\n",
-                    render::safe(row["name"].as_str().unwrap_or("Unnamed")),
-                    render::safe(row["id"].as_str().unwrap_or("Unknown"))
-                ));
-            }
-            if rows.len() > 8 {
-                text.push_str(&format!(
-                    "\nShowing {}–{} of {}\n",
-                    first + 1,
-                    (first + 8).min(rows.len()),
-                    rows.len()
-                ));
-            }
-            if rows.is_empty() {
-                text.push_str("No API tokens yet.\n");
-            }
-            if let Some(token) = rows.get(state.selected) {
-                text.push_str("\nTOKEN INFORMATION\n");
-                text.push_str(&render::response("token", token));
-            }
-            text
-        }
+        TOKENS => render::response("tokens", value),
         MODELS => render::response("models", value),
         USAGE => render::response("usage", value),
         _ => render::response("doctor", value),
@@ -450,14 +530,14 @@ fn mode_badge(connection: &Connection) -> Span<'static> {
     let (label, background, foreground) = if connection.mode == super::config::Mode::Standalone {
         (
             " Standalone ",
-            Color::Rgb(245, 165, 75),
-            Color::Rgb(75, 35, 0),
+            Color::Rgb(59, 48, 32),
+            Color::Rgb(217, 181, 114),
         )
     } else {
         (
             " Remote Server ",
-            Color::Rgb(177, 130, 230),
-            Color::Rgb(40, 15, 65),
+            Color::Rgb(43, 40, 55),
+            Color::Rgb(170, 163, 230),
         )
     };
     Span::styled(
@@ -506,14 +586,14 @@ fn header(frame: &mut Frame<'_>, area: Rect, state: &State, connection: &Connect
     frame.render_widget(
         Paragraph::new(brand).style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(palette::TEXT)
                 .add_modifier(Modifier::BOLD),
         ),
         columns[0],
     );
     frame.render_widget(
         Paragraph::new(destination)
-            .style(Style::default().fg(Color::Gray))
+            .style(Style::default().fg(palette::MUTED))
             .alignment(Alignment::Right),
         columns[1],
     );
@@ -533,11 +613,11 @@ fn header(frame: &mut Frame<'_>, area: Rect, state: &State, connection: &Connect
         .select(state.tab)
         .padding("", "")
         .divider("  ")
-        .style(Style::default().fg(Color::Gray))
+        .style(Style::default().fg(palette::MUTED))
         .highlight_style(
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(palette::BASE)
+                .bg(palette::TEXT)
                 .add_modifier(Modifier::BOLD),
         ),
         Rect::new(area.x + 1, area.y + 2, area.width.saturating_sub(2), 1),
@@ -576,16 +656,10 @@ fn overview_viewport(height: u16, width: u16, state: &State, busy: bool) -> u16 
     height.saturating_sub(HEADER_HEIGHT + controls_height(state, busy, width) + 1)
 }
 fn selection_style() -> Style {
-    Style::default()
-        .fg(Color::White)
-        .bg(Color::DarkGray)
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(palette::TEXT).bg(palette::SELECTION)
 }
 fn section_style() -> Style {
-    Style::default()
-        .bg(Color::Rgb(30, 42, 57))
-        .fg(Color::Rgb(116, 190, 240))
-        .add_modifier(Modifier::BOLD)
+    Style::default().bg(palette::SURFACE).fg(palette::MUTED)
 }
 fn section_heading(text: &str, width: u16) -> Line<'static> {
     Line::styled(
@@ -596,25 +670,177 @@ fn section_heading(text: &str, width: u16) -> Line<'static> {
         section_style(),
     )
 }
-fn token_lines(state: &State, width: u16) -> Vec<Line<'static>> {
-    body(state)
-        .lines()
-        .flat_map(|line| {
-            if line == "TOKEN INFORMATION" {
-                vec![section_heading(line, width)]
-            } else if line.starts_with("▶ ") {
-                vec![Line::styled(line.to_owned(), selection_style())]
-            } else {
-                // Token list rows already reserve two columns for the selection marker.
-                let line = if line.starts_with("  ") {
-                    line.to_owned()
-                } else {
-                    format!("  {line}")
-                };
-                styled_text(&line)
-            }
+fn filtered_token_rows<'a>(state: &State, value: &'a Value) -> Vec<&'a Value> {
+    let query = state.token_query.trim().to_lowercase();
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|token| {
+            format!(
+                "{} {}",
+                token["name"].as_str().unwrap_or(""),
+                token["id"].as_str().unwrap_or("")
+            )
+            .to_lowercase()
+            .contains(&query)
         })
         .collect()
+}
+fn selected_token(state: &State) -> Option<&Value> {
+    filtered_token_rows(state, state.values[TOKENS].as_ref()?)
+        .get(state.token_selected)
+        .copied()
+}
+fn apply_search(state: &mut State, kind: SearchKind, query: &str) {
+    match kind {
+        SearchKind::Models => {
+            state.model_query = query.trim().into();
+            state.model_selected = 0;
+        }
+        SearchKind::Tokens => {
+            state.token_query = query.trim().into();
+            state.token_selected = 0;
+        }
+    }
+    state.scroll = 0;
+}
+fn token_filter_height(state: &State) -> u16 {
+    u16::from(!state.token_query.is_empty())
+}
+fn token_scroll(state: &State, viewport: u16) -> u16 {
+    let start = (state.token_selected % 4 * 4) as u16 + token_filter_height(state);
+    state
+        .scroll
+        .min(start)
+        .max(start.saturating_add(3).saturating_sub(viewport))
+}
+fn navigate_tokens(state: &mut State, key: KeyCode, viewport: u16) -> bool {
+    if state.tab != TOKENS
+        || !matches!(
+            key,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        )
+    {
+        return false;
+    }
+    let count = state.values[TOKENS]
+        .as_ref()
+        .map_or(0, |value| filtered_token_rows(state, value).len());
+    state.token_selected = match key {
+        KeyCode::Home => 0,
+        KeyCode::End => count.saturating_sub(1),
+        KeyCode::Up => state.token_selected.saturating_sub(1),
+        KeyCode::PageUp => state.token_selected.saturating_sub(4),
+        KeyCode::PageDown => state.token_selected.saturating_add(4),
+        _ => state.token_selected.saturating_add(1),
+    }
+    .min(count.saturating_sub(1));
+    state.scroll = token_scroll(state, viewport);
+    true
+}
+fn token_lines(state: &State, _width: u16) -> Vec<Line<'static>> {
+    let Some(value) = state.values[TOKENS].as_ref() else {
+        return vec![Line::from("  No data yet. Press r to load this view.")];
+    };
+    let rows = filtered_token_rows(state, value);
+    let mut lines = Vec::new();
+    if !state.token_query.is_empty() {
+        lines.push(Line::styled(
+            format!(
+                "  Search: {} · {} {}",
+                render::safe(&state.token_query),
+                rows.len(),
+                if rows.len() == 1 { "match" } else { "matches" }
+            ),
+            Style::default().fg(Color::Gray),
+        ));
+    }
+    if rows.is_empty() {
+        lines.push(Line::from(if state.token_query.is_empty() {
+            "  No API tokens yet."
+        } else {
+            "  No matching tokens. Clear search with 0 or try another name or ID."
+        }));
+        return lines;
+    }
+    let first = state.token_selected / 4 * 4;
+    for (i, token) in rows.iter().enumerate().skip(first).take(4) {
+        let row_style = if i == state.token_selected {
+            selection_style()
+        } else {
+            Style::default().fg(palette::TEXT).bg(palette::SURFACE)
+        };
+        let status = match render::token_status(token).as_str() {
+            "active" => "Active",
+            "disabled" => "Disabled",
+            "revoked" => "Revoked",
+            "expired" => "Expired",
+            _ => "Unknown",
+        };
+        let (fg, bg) = match status {
+            "Active" => (Color::Rgb(145, 188, 145), Color::Rgb(34, 46, 36)),
+            "Disabled" | "Revoked" | "Expired" => {
+                (Color::Rgb(223, 150, 144), Color::Rgb(54, 37, 35))
+            }
+            _ => (Color::Gray, Color::Rgb(35, 35, 35)),
+        };
+        let mut header = vec![
+            Span::raw(format!(
+                "{}{}  ",
+                if i == state.token_selected {
+                    "▶ "
+                } else {
+                    "  "
+                },
+                render::safe(token["name"].as_str().unwrap_or("Unnamed"))
+            )),
+            Span::styled(format!(" {status} "), Style::default().fg(fg).bg(bg)),
+        ];
+        if let Some(allow) = token["fast_mode"].as_bool() {
+            header.push(Span::raw(" "));
+            header.push(Span::styled(
+                if allow {
+                    " Fast: Allow "
+                } else {
+                    " Fast: Block "
+                },
+                Style::default()
+                    .fg(Color::Rgb(217, 181, 114))
+                    .bg(Color::Rgb(51, 44, 32)),
+            ));
+        }
+        lines.push(Line::from(header).style(row_style));
+        lines.push(Line::styled(
+            format!(
+                "  {}",
+                render::safe(token["id"].as_str().unwrap_or("Unknown"))
+            ),
+            row_style.fg(palette::MUTED),
+        ));
+        lines.push(Line::styled(
+            format!("  {}", render::token_dates(token)),
+            row_style.fg(palette::MUTED),
+        ));
+        lines.push(Line::from(""));
+    }
+    if rows.len() > 4 {
+        lines.push(Line::styled(
+            format!(
+                "  Showing {}–{} of {}",
+                first + 1,
+                (first + 4).min(rows.len()),
+                rows.len()
+            ),
+            Style::default().fg(Color::Gray),
+        ));
+    }
+    lines
 }
 fn settings_actions(state: &State, connection: &Connection) -> Vec<(&'static str, KeyCode)> {
     let mut actions = vec![
@@ -728,18 +954,66 @@ fn settings_lines(connection: &Connection, state: &State, width: u16) -> Vec<Lin
     }
     lines
 }
+fn account_actions(state: &State) -> Option<Modal> {
+    let row = state.values[SETTINGS]
+        .as_ref()?
+        .as_array()?
+        .get(state.selected)?;
+    let mut entries = vec![("Reauthorize account".into(), KeyCode::Char('u'))];
+    if row["state"] != "disabled" {
+        entries.push(("Disable account".into(), KeyCode::Char('d')));
+    }
+    Some(Modal::Actions {
+        title: render::safe(row["email"].as_str().unwrap_or("Account actions")),
+        entries,
+        selected: 0,
+    })
+}
+fn keep_settings_selection_visible(
+    state: &mut State,
+    connection: &Connection,
+    viewport: u16,
+    width: u16,
+) {
+    let mut start = 0_u16;
+    for line in settings_lines(connection, state, width) {
+        let selected = line.to_string().starts_with("▶ ");
+        let height = Paragraph::new(line)
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            .min(usize::from(u16::MAX)) as u16;
+        let end = start.saturating_add(height);
+        if selected {
+            if start < state.scroll {
+                state.scroll = start;
+            } else if end > state.scroll.saturating_add(viewport) {
+                state.scroll = end.saturating_sub(viewport);
+            }
+            break;
+        }
+        start = end;
+    }
+}
 fn model_rows(value: &Value) -> Vec<&Value> {
-    value["data"]
-        .as_array()
+    render::model_rows(value)
+}
+fn filtered_model_rows<'a>(state: &State, value: &'a Value) -> Vec<&'a Value> {
+    model_rows(value)
         .into_iter()
-        .flatten()
-        .rev()
+        .filter(|row| render::model_matches(row, &state.model_query, &state.model_features))
         .collect()
+}
+fn model_filter_height(state: &State) -> u16 {
+    u16::from(!state.model_query.is_empty() || !state.model_features.is_empty())
 }
 fn selected_model_id(state: &State) -> Option<&str> {
     state.values[MODELS]
         .as_ref()
-        .and_then(|value| model_rows(value).get(state.model_selected).copied())
+        .and_then(|value| {
+            filtered_model_rows(state, value)
+                .get(state.model_selected)
+                .copied()
+        })
         .and_then(|row| row["id"].as_str())
         .filter(|id| !id.is_empty() && !id.chars().any(char::is_control))
 }
@@ -765,14 +1039,26 @@ fn action_menu(state: &State, _connection: &Connection) -> (String, Vec<(String,
     let entries = match state.tab {
         TOKENS => {
             let mut entries = vec![("Create token".into(), KeyCode::Char('n'))];
-            if state.values[TOKENS]
-                .as_ref()
-                .and_then(Value::as_array)
-                .is_some_and(|rows| !rows.is_empty())
-            {
+            if let Some(token) = selected_token(state) {
                 entries.insert(0, ("Rename token".into(), KeyCode::Char('l')));
                 entries.insert(1, ("Rotate token".into(), KeyCode::Char('o')));
                 entries.insert(2, ("Revoke token".into(), KeyCode::Char('x')));
+                entries.insert(3, ("Copy token ID".into(), KeyCode::Char('c')));
+                if token_policy_available(token) {
+                    entries.insert(
+                        3,
+                        (
+                            if token["disabled"] == true {
+                                "Enable token"
+                            } else {
+                                "Disable token"
+                            }
+                            .into(),
+                            KeyCode::Char('d'),
+                        ),
+                    );
+                    entries.insert(4, ("Fast mode".into(), KeyCode::Char('f')));
+                }
             }
             entries
         }
@@ -789,15 +1075,16 @@ fn action_menu(state: &State, _connection: &Connection) -> (String, Vec<(String,
     )
 }
 fn token_rename_modal(state: &State) -> Option<Modal> {
-    let row = state.values[TOKENS]
-        .as_ref()?
-        .as_array()?
-        .get(state.selected)?;
+    let row = selected_token(state)?;
     Some(Modal::Rename {
         id: row["id"].as_str()?.into(),
         input: TextInput::new(row["name"].as_str()?.into()),
         error: String::new(),
     })
+}
+
+fn token_policy_available(token: &Value) -> bool {
+    matches!(render::token_status(token).as_str(), "active" | "disabled")
 }
 
 fn token_rename_request(id: &str, input: &TextInput) -> Result<ControlRequest> {
@@ -822,10 +1109,17 @@ fn preserve_selection(state: &mut State, tab: usize, value: &Value) {
             .min(rows.map_or(0, |rows| rows.len().saturating_sub(1)));
     } else if tab == MODELS {
         let old_id = selected_model_id(state);
-        let rows = model_rows(value);
+        let rows = filtered_model_rows(state, value);
         state.model_selected = old_id
             .and_then(|id| rows.iter().position(|row| row["id"].as_str() == Some(id)))
             .unwrap_or(state.model_selected)
+            .min(rows.len().saturating_sub(1));
+    } else if tab == TOKENS {
+        let old_id = selected_token(state).and_then(|row| row["id"].as_str());
+        let rows = filtered_token_rows(state, value);
+        state.token_selected = old_id
+            .and_then(|id| rows.iter().position(|row| row["id"].as_str() == Some(id)))
+            .unwrap_or(state.token_selected)
             .min(rows.len().saturating_sub(1));
     }
 }
@@ -883,7 +1177,7 @@ fn quota_columns(width: u16) -> usize {
     }
 }
 fn account_ranges(value: &Value, width: u16) -> Vec<(u16, u16)> {
-    let mut start = render::response("doctor", value).lines().count() as u16 + 3;
+    let mut start = render::overview_summary(value).lines().count() as u16 + 1;
     value["quota_accounts"]
         .as_array()
         .into_iter()
@@ -891,15 +1185,20 @@ fn account_ranges(value: &Value, width: u16) -> Vec<(u16, u16)> {
         .map(|account| {
             let windows = render::visible_windows(&account["quota"]);
             let height =
-                2 + u16::from(credit_expiring_soon(
+                3 + u16::from(credit_expiring_soon(
                     account,
                     chrono::Utc::now().timestamp(),
                 )) + u16::from(account["refresh_error"].is_string())
                     + u16::from(render::weekly_activation(account).is_some())
+                    + if account["platform"].is_object() {
+                        3
+                    } else {
+                        0
+                    }
                     + if windows.is_empty() {
                         1
                     } else {
-                        windows.len().div_ceil(quota_columns(width)) as u16 * 2
+                        windows.len().div_ceil(quota_columns(width)) as u16 * 3
                     }
                     + u16::from(!account["quota"]["cooldown_until"].is_null());
             let range = (start, start.saturating_add(height));
@@ -912,7 +1211,7 @@ fn select_item(state: &mut State, down: bool, viewport: u16, width: u16) {
     if state.tab == MODELS {
         let count = state.values[MODELS]
             .as_ref()
-            .map_or(0, |value| model_rows(value).len());
+            .map_or(0, |value| filtered_model_rows(state, value).len());
         state.model_selected = if down {
             (state.model_selected + 1).min(count.saturating_sub(1))
         } else {
@@ -951,43 +1250,101 @@ fn keep_selected_account_visible(state: &mut State, viewport: u16, width: u16) {
     }
 }
 fn models(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) -> usize {
-    let rows = model_rows(value);
+    let rows = filtered_model_rows(state, value);
+    let filter_height = model_filter_height(state);
+    if filter_height > 0 {
+        let features = state
+            .model_features
+            .iter()
+            .filter_map(|id| render::capability_label(id))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        frame.render_widget(
+            Paragraph::new(format!("Search: {} · {features}", state.model_query))
+                .style(Style::default().fg(Color::Gray)),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+    }
+    let area = Rect::new(
+        area.x,
+        area.y + filter_height,
+        area.width,
+        area.height.saturating_sub(filter_height),
+    );
     if rows.is_empty() {
         frame.render_widget(
-            Paragraph::new("No models available. Press r to refresh.").block(content_panel()),
+            Paragraph::new("No matching models. Clear filters with 0 or press r to refresh.")
+                .block(content_panel()),
             area,
         );
         return 0;
     }
     let rows = rows.into_iter().enumerate().map(|(index, row)| {
-        Row::new(vec![
-            format!(
-                "{}{}",
-                if index == state.model_selected {
-                    "▶ "
-                } else {
-                    "  "
-                },
-                render::safe(row["id"].as_str().unwrap_or("Unknown"))
+        let id = row["id"].as_str().unwrap_or("Unknown");
+        let name = crate::catalog::display_name(
+            row["display_name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(id),
+        );
+        let context = row["exetrouter"]["context_window"]
+            .as_u64()
+            .map(|n| format!(" · {n} context"))
+            .unwrap_or_default();
+        let mut capabilities = vec![Span::raw("  ")];
+        for id in row["capabilities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if let Some(label) = render::capability_label(id) {
+                capabilities.push(Span::styled(
+                    format!(" {label} "),
+                    Style::default().fg(palette::MUTED).bg(palette::RAISED),
+                ));
+                capabilities.push(Span::raw(" "));
+            }
+        }
+        if row["source"] == "platform" {
+            capabilities.push(Span::styled(
+                " Platform API ",
+                Style::default()
+                    .fg(Color::Rgb(227, 169, 117))
+                    .bg(Color::Rgb(59, 48, 32)),
+            ));
+        }
+        Row::new(vec![Text::from(vec![
+            Line::from(vec![
+                Span::styled(
+                    format!(
+                        "{}{}",
+                        if index == state.model_selected {
+                            "▶ "
+                        } else {
+                            "  "
+                        },
+                        render::safe(&name)
+                    ),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(context, Style::default().fg(palette::MUTED)),
+            ]),
+            Line::styled(
+                format!("  {}", render::safe(id)),
+                Style::default().fg(palette::MUTED),
             ),
-            render::safe(row["display_name"].as_str().unwrap_or("")),
-            row["exetrouter"]["context_window"]
-                .as_u64()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "—".into()),
-        ])
+            Line::from(capabilities),
+        ])])
+        .height(3)
+        .bottom_margin(1)
+        .style(if index == state.model_selected {
+            selection_style()
+        } else {
+            Style::default().fg(palette::TEXT).bg(palette::SURFACE)
+        })
     });
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Percentage(45),
-            Constraint::Percentage(35),
-            Constraint::Percentage(20),
-        ],
-    )
-    .header(Row::new(["  MODEL ID", "NAME", "CONTEXT"]).style(section_style()))
-    .row_highlight_style(selection_style())
-    .block(content_panel());
+    let table = Table::new(rows, [Constraint::Min(0)]).block(content_panel());
     let mut selection = TableState::default().with_selected(Some(state.model_selected));
     frame.render_stateful_widget(table, area, &mut selection);
     selection.offset()
@@ -1004,6 +1361,10 @@ fn render_hits(
     busy: bool,
 ) -> Vec<Hit> {
     let mut hits = Vec::new();
+    frame.render_widget(
+        Block::default().style(Style::default().fg(palette::TEXT).bg(palette::BASE)),
+        frame.area(),
+    );
     if frame.area().width < 72 || frame.area().height < 20 {
         frame.render_widget(
             Paragraph::new(
@@ -1049,8 +1410,10 @@ fn render_hits(
         ),
         (TOKENS, _) => frame.render_widget(
             Paragraph::new(token_lines(state, content.width.saturating_sub(2)))
-                .wrap(Wrap { trim: false })
-                .scroll((state.scroll, 0))
+                .scroll((
+                    token_scroll(state, content_panel().inner(content).height),
+                    0,
+                ))
                 .block(content_panel()),
             content,
         ),
@@ -1059,12 +1422,21 @@ fn render_hits(
         (MODELS, Some(value)) => {
             let offset = models(frame, content, state, value);
             let inner = content_panel().inner(content);
-            for (row, index) in (offset..model_rows(value).len())
-                .take(inner.height.saturating_sub(1) as usize)
+            let filter_height = model_filter_height(state);
+            for (row, index) in (offset..filtered_model_rows(state, value).len())
+                .take(inner.height.saturating_sub(filter_height).div_ceil(4) as usize)
                 .enumerate()
             {
                 hits.push(Hit {
-                    area: Rect::new(inner.x, inner.y + 1 + row as u16, inner.width, 1),
+                    area: Rect::new(
+                        inner.x,
+                        inner.y + filter_height + row as u16 * 4,
+                        inner.width,
+                        inner
+                            .bottom()
+                            .saturating_sub(inner.y + filter_height + row as u16 * 4)
+                            .min(3),
+                    ),
                     action: MouseAction::Select(index),
                 });
             }
@@ -1088,6 +1460,10 @@ fn render_hits(
         .collect();
     let entries = dashboard_buttons(state);
     let toolbar_rows = button_rows(&entries, chunks[2].width.saturating_sub(4));
+    footer.push(Line::styled(
+        "Controls",
+        Style::default().fg(palette::MUTED),
+    ));
     for _ in 0..toolbar_rows {
         footer.push(Line::default());
     }
@@ -1129,8 +1505,14 @@ fn render_hits(
                 ("↑ / ↓", "scroll"),
                 ("Home / End", "first / latest"),
             ]),
+            Modal::Usage { .. } => keys(&[
+                ("↑ / ↓", "scroll"),
+                ("PgUp / PgDn", "page"),
+                ("Home / End", "first / last"),
+            ]),
             Modal::Actions { .. } => keys(&[("↑ / ↓", "select")]),
             Modal::Rename { .. } => keys(&[("← / →", "cursor"), ("Ctrl-U", "clear")]),
+            Modal::Search { .. } => keys(&[("← / →", "cursor"), ("Ctrl-U", "clear")]),
             _ => Line::default(),
         }];
     }
@@ -1168,26 +1550,26 @@ fn render_hits(
     }
     if state.tab == TOKENS {
         let inner = content_panel().inner(content);
-        let first = state.selected / 8 * 8;
+        let first = state.token_selected / 4 * 4;
         let count = state.values[TOKENS]
             .as_ref()
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        let mut y = inner.y as i32 - state.scroll as i32;
+            .map_or(0, |value| filtered_token_rows(state, value).len());
+        let filter_height = token_filter_height(state);
+        let mut y = inner.y as i32 + i32::from(filter_height)
+            - i32::from(token_scroll(state, inner.height));
         for line in token_lines(state, inner.width)
             .into_iter()
-            .take(count.saturating_sub(first).min(8))
+            .skip(usize::from(filter_height))
+            .take(count.saturating_sub(first).min(4) * 4)
             .enumerate()
         {
-            let height = Paragraph::new(line.1)
-                .wrap(Wrap { trim: false })
-                .line_count(inner.width) as i32;
+            let height = 1;
             let top = y.max(inner.y as i32);
             let bottom = (y + height).min(inner.bottom() as i32);
             if bottom > top {
                 hits.push(Hit {
                     area: Rect::new(inner.x, top as u16, inner.width, (bottom - top) as u16),
-                    action: MouseAction::Select(first + line.0),
+                    action: MouseAction::Select(first + line.0 / 4),
                 });
             }
             y += height;
@@ -1244,6 +1626,12 @@ fn render_hits(
     if let Some(modal) = &state.modal {
         hits.clear();
         let (title,text) = match modal {
+            Modal::Usage { .. } => ("Usage breakdown", usage_breakdown(state)),
+            Modal::TokenPolicy { id, enabled, fast } => ("Change token policy", format!("Token: {id}\n{}\nThe existing secret is unchanged. Confirm this change?", if let Some(enabled)=enabled { if *enabled {"Enable token"} else {"Disable token"} } else { match fast {Some(Some(true))=>"Fast: Allow",Some(Some(false))=>"Fast: Block",_=>"Fast: inherit server default"} })),
+            Modal::Search { kind, input } => match kind {
+                SearchKind::Models => ("Search models", format!("{}\n\nNames, IDs and capabilities", input.value)),
+                SearchKind::Tokens => ("Search tokens", format!("{}\n\nNames and token IDs", input.value)),
+            },
             Modal::Account { id, .. } => ("Account details", account_detail_text(state,*id)),
             Modal::Actions { title, entries, selected } => (title.as_str(), entries.iter().enumerate().map(|(i,(name,key))|format!("{}{} {}",if i==*selected {"▶ "}else{"  "},name,shortcut_label(*key))).collect::<Vec<_>>().join("\n")),
             Modal::UpdateConfirm => ("Update exr", "Install the latest published release in the existing installation?\nThe installation method is preserved; config, accounts and tokens stay in place.\nSource builds may take several minutes. Restart exr after completion.".into()),
@@ -1254,7 +1642,7 @@ fn render_hits(
             Modal::ClipboardRetry { .. } => ("Clipboard unavailable", "The token was issued, but copying failed.\nThe secret stays hidden. No token request will be repeated.\nDiscarding it requires rotating the token later.".into()),
             Modal::Help => ("Keyboard help", keyboard_help(state, connection)),
         };
-        let mut area = if matches!(modal, Modal::Account { .. }) {
+        let mut area = if matches!(modal, Modal::Account { .. } | Modal::Usage { .. }) {
             account_popup(frame.area())
         } else {
             popup(frame.area())
@@ -1270,7 +1658,14 @@ fn render_hits(
         } else {
             Paragraph::new(styled_text(&text))
                 .wrap(Wrap { trim: false })
-                .line_count(area.width.saturating_sub(2))
+                .line_count(
+                    area.width
+                        .saturating_sub(if matches!(modal, Modal::Usage { .. }) {
+                            4
+                        } else {
+                            2
+                        }),
+                )
         };
         let needed = lines.saturating_add(4).clamp(6, usize::from(area.height));
         area.height = needed as u16;
@@ -1280,7 +1675,8 @@ fn render_hits(
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .border_style(Style::default().fg(Color::Cyan));
+            .style(Style::default().fg(palette::TEXT).bg(palette::BASE))
+            .border_style(Style::default().fg(palette::BORDER));
         if let Modal::Account { id, scroll } = modal {
             frame.render_widget(block, area);
             let content = Rect::new(
@@ -1304,6 +1700,22 @@ fn render_hits(
             } else {
                 frame.render_widget(Paragraph::new(text), content);
             }
+        } else if let Modal::Usage { scroll } = modal {
+            frame.render_widget(block, area);
+            let max = lines
+                .saturating_sub(usize::from(area.height.saturating_sub(4)))
+                .min(usize::from(u16::MAX)) as u16;
+            frame.render_widget(
+                Paragraph::new(styled_text(&text))
+                    .wrap(Wrap { trim: false })
+                    .scroll(((*scroll).min(max), 0)),
+                Rect::new(
+                    area.x + 2,
+                    area.y + 1,
+                    area.width.saturating_sub(4),
+                    area.height.saturating_sub(4),
+                ),
+            );
         } else {
             frame.render_widget(
                 Paragraph::new(styled_text(&text))
@@ -1329,7 +1741,7 @@ fn render_hits(
                     y += height;
                 }
             }
-            Modal::Rename { input, .. }
+            Modal::Rename { input, .. } | Modal::Search { input, .. }
                 if Line::from(input.value.as_str()).width()
                     <= area.width.saturating_sub(2) as usize =>
             {
@@ -1341,11 +1753,18 @@ fn render_hits(
             _ => {}
         }
         let controls: &[(&str, KeyCode)] = match modal {
-            Modal::Account { .. } => &[("Refresh", KeyCode::Char('r')), ("Close", KeyCode::Esc)],
+            Modal::Account { .. } => &[
+                ("Period", KeyCode::Char('h')),
+                ("Previous", KeyCode::Char('[')),
+                ("Next", KeyCode::Char(']')),
+                ("Refresh", KeyCode::Char('r')),
+                ("Close", KeyCode::Esc),
+            ],
             Modal::Confirm { rotate: true, .. } => &[
                 ("Rotate token", KeyCode::Char('y')),
                 ("Cancel", KeyCode::Esc),
             ],
+            Modal::TokenPolicy { .. } => &[("Save", KeyCode::Char('y')), ("Cancel", KeyCode::Esc)],
             Modal::Confirm { rotate: false, .. } => &[
                 ("Revoke token", KeyCode::Char('y')),
                 ("Cancel", KeyCode::Esc),
@@ -1354,10 +1773,11 @@ fn render_hits(
                 ("Retry copy", KeyCode::Char('c')),
                 ("Discard", KeyCode::Esc),
             ],
-            Modal::Help => &[("Close", KeyCode::Esc)],
+            Modal::Help | Modal::Usage { .. } => &[("Close", KeyCode::Esc)],
             Modal::Actions { .. } => &[("Close", KeyCode::Esc)],
             Modal::UpdateConfirm => &[("Update", KeyCode::Enter), ("Cancel", KeyCode::Esc)],
             Modal::Rename { .. } => &[("Save", KeyCode::Enter), ("Cancel", KeyCode::Esc)],
+            Modal::Search { .. } => &[("Search", KeyCode::Enter), ("Cancel", KeyCode::Esc)],
             Modal::Days { .. } => &[("Create token", KeyCode::Enter), ("Cancel", KeyCode::Esc)],
             _ => &[("Continue", KeyCode::Enter), ("Cancel", KeyCode::Esc)],
         };
@@ -1372,7 +1792,7 @@ fn render_hits(
             controls,
             &mut hits,
         );
-        if let Modal::Rename { input, .. } = modal {
+        if let Modal::Rename { input, .. } | Modal::Search { input, .. } = modal {
             if Line::from(input.value.as_str()).width() <= area.width.saturating_sub(2) as usize {
                 frame.set_cursor_position((
                     area.x + 1 + Line::from(&input.value[..input.cursor]).width() as u16,
@@ -1387,17 +1807,16 @@ fn render_hits(
 fn panel(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(palette::BORDER))
         .title(title_line(title))
 }
 fn title_line(title: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled("─ ", Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
         Span::styled(
             title.to_owned(),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(palette::TEXT)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
@@ -1412,7 +1831,7 @@ fn keys(items: &[(&str, &str)]) -> Line<'static> {
         spans.push(Span::styled(
             format!("{key}: "),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(palette::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
@@ -1470,12 +1889,8 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
     let block = content_panel().padding(Padding::new(2, 2, 1, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let summary = render::response("doctor", value);
-    let mut summary_lines = vec![section_heading("ROUTER STATUS", inner.width + 2)];
-    summary_lines.extend(styled_text(&summary).into_iter().map(|mut line| {
-        line.spans.insert(0, Span::raw("  "));
-        line
-    }));
+    let summary = render::overview_summary(value);
+    let summary_lines = styled_text(&summary);
     let summary_height = summary_lines.len() as u16 + 1;
     let visible = summary_height
         .saturating_sub(state.scroll)
@@ -1483,18 +1898,11 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
     if visible > 0 {
         frame.render_widget(
             Paragraph::new(summary_lines).scroll((state.scroll, 0)),
-            Rect::new(inner.x.saturating_sub(2), inner.y, inner.width + 2, visible),
+            Rect::new(inner.x, inner.y, inner.width, visible),
         );
     }
     let mut y = inner.y as i32 + summary_height as i32 - state.scroll as i32;
     let end = (inner.y + inner.height) as i32;
-    if y >= inner.y as i32 && y < end {
-        frame.render_widget(
-            Paragraph::new(section_heading("ACCOUNTS", inner.width + 2)),
-            Rect::new(inner.x.saturating_sub(2), y as u16, inner.width + 2, 1),
-        );
-    }
-    y += 1;
     let accounts = value["quota_accounts"]
         .as_array()
         .cloned()
@@ -1511,16 +1919,27 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
         );
         return;
     }
+    let ranges = account_ranges(value, inner.width);
     for (index, account) in accounts.into_iter().enumerate() {
-        let label = format!(
-            "{}{}",
-            render::safe(account["label"].as_str().unwrap_or("Account")),
-            if account["preference"]["enabled"].as_bool() == Some(false) {
-                " · Deactivated"
-            } else {
-                ""
-            }
-        );
+        let style = if index == state.account_selected {
+            selection_style()
+        } else {
+            Style::default().fg(palette::TEXT).bg(palette::SURFACE)
+        };
+        let top = y.max(i32::from(inner.y));
+        let bottom = (y + i32::from(ranges[index].1 - ranges[index].0 - 1)).min(end);
+        if bottom > top {
+            frame.render_widget(
+                Block::default().style(style),
+                Rect::new(
+                    inner.x.saturating_sub(2),
+                    top as u16,
+                    inner.width + 2,
+                    (bottom - top) as u16,
+                ),
+            );
+        }
+        let label = render::safe(account["label"].as_str().unwrap_or("Account"));
         let mut label = vec![Span::raw(format!(
             "{}{}",
             if index == state.account_selected {
@@ -1530,13 +1949,32 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
             },
             label
         ))];
+        let mut metadata = Vec::new();
         let routing = render::account_routing(&account);
+        if let Some(plan) = render::subscription_plan(&account) {
+            label.push(Span::styled(
+                format!(" · {plan}"),
+                Style::default()
+                    .fg(palette::MUTED)
+                    .remove_modifier(Modifier::BOLD),
+            ));
+        }
+        if account["preference"]["enabled"] == false {
+            label.push(Span::raw(" "));
+            label.push(Span::styled(
+                " Deactivated ",
+                Style::default()
+                    .fg(Color::Rgb(223, 150, 144))
+                    .bg(Color::Rgb(54, 37, 35)),
+            ));
+        }
         if render::best_account(&account, chrono::Utc::now().timestamp()) {
             label.push(Span::raw(" · "));
             label.push(Span::styled(
-                "Best",
+                " Best ",
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(Color::Rgb(145, 188, 145))
+                    .bg(Color::Rgb(34, 46, 36))
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -1544,38 +1982,48 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
             let stale = account["clients"]["observed_at"]
                 .as_i64()
                 .is_some_and(|at| !crate::routing::fresh(at, chrono::Utc::now().timestamp()));
-            label.push(Span::raw(format!(
-                " · Clients: {count}{}",
+            metadata.push(Span::raw(format!(
+                "Clients: {count}{} · ",
                 if stale { " (historical)" } else { "" }
             )));
         }
         if let Some(reason) = routing.strip_prefix("Priority") {
             label.push(Span::raw(" · "));
             label.push(Span::styled(
-                "Priority",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                " Priority ",
+                Style::default()
+                    .fg(Color::Rgb(223, 150, 144))
+                    .bg(Color::Rgb(54, 37, 35))
+                    .add_modifier(Modifier::BOLD),
             ));
-            label.push(Span::raw(reason.to_owned()));
+            metadata.push(Span::raw(reason.trim_start_matches(" · ").to_owned()));
         } else if !routing.is_empty() {
-            label.push(Span::raw(format!(" · {routing}")));
+            metadata.push(Span::raw(routing));
         }
         if account["preference"]["locked"].as_bool() == Some(true) {
-            label.push(Span::raw(" · Locked"));
+            label.push(Span::raw(" "));
+            label.push(Span::styled(
+                " Locked ",
+                Style::default()
+                    .fg(Color::Rgb(217, 181, 114))
+                    .bg(Color::Rgb(51, 44, 32)),
+            ));
         }
         let expiring = credit_expiring_soon(&account, chrono::Utc::now().timestamp());
         if !expiring {
-            label.push(Span::raw(format!(" · {}", credit_summary(&account))));
+            metadata.push(Span::raw(format!(" · {}", credit_summary(&account))));
         }
         if y >= inner.y as i32 && y < end {
             frame.render_widget(
-                Paragraph::new(Line::from(label)).style(if index == state.account_selected {
-                    selection_style()
-                } else {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                }),
+                Paragraph::new(Line::from(label)).style(style.add_modifier(Modifier::BOLD)),
                 Rect::new(inner.x.saturating_sub(2), y as u16, inner.width + 2, 1),
+            );
+        }
+        y += 1;
+        if y >= inner.y as i32 && y < end {
+            frame.render_widget(
+                Paragraph::new(Line::from(metadata)).style(style.fg(palette::MUTED)),
+                Rect::new(inner.x, y as u16, inner.width, 1),
             );
         }
         y += 1;
@@ -1644,9 +2092,23 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
                             .unwrap_or_default(),
                         if stale { "  ·  historical" } else { "" }
                     );
-                    quota_bar(frame, Rect::new(x, y as u16, width, 1), remaining, &label);
+                    frame.render_widget(
+                        Paragraph::new(label).style(Style::default().fg(if stale {
+                            Color::Gray
+                        } else {
+                            Color::White
+                        })),
+                        Rect::new(x, y as u16, width, 1),
+                    );
                 }
-                let reset_y = y + 1;
+                if y + 1 >= inner.y as i32 && y + 1 < end {
+                    super::account_details::meter(
+                        frame.buffer_mut(),
+                        Rect::new(x, (y + 1) as u16, width, 1),
+                        if stale { None } else { remaining },
+                    );
+                }
+                let reset_y = y + 2;
                 if reset_y >= inner.y as i32 && reset_y < end {
                     let date = render::date(&window["reset_at"]);
                     let date = if date.chars().count() + 7 > usize::from(width) {
@@ -1657,13 +2119,50 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
                     };
                     frame.render_widget(
                         Paragraph::new(format!("Resets {date}"))
-                            .alignment(Alignment::Center)
                             .style(Style::default().fg(Color::Gray)),
                         Rect::new(x, reset_y as u16, width, 1),
                     );
                 }
             }
-            y += 2;
+            y += 3;
+        }
+        if account["platform"].is_object() {
+            let p = &account["platform"]["balance"];
+            let remaining = p["exetrouter"]["remaining_usd_nanos"]
+                .as_i64()
+                .map(|n| n as f64 / 1e9);
+            let budget = p["initial_usd_nanos"].as_i64().map(|n| n as f64 / 1e9);
+            if y >= inner.y as i32 && y < end {
+                frame.render_widget(
+                    Paragraph::new(crate::platform::balance::headline(&account["platform"])),
+                    Rect::new(inner.x, y as u16, inner.width, 1),
+                );
+            }
+            if y + 1 >= inner.y as i32 && y + 1 < end {
+                super::account_details::cost_meter(
+                    frame.buffer_mut(),
+                    Rect::new(inner.x, (y + 1) as u16, inner.width, 1),
+                    remaining
+                        .zip(budget)
+                        .filter(|(_, b)| *b > 0.)
+                        .map(|(s, b)| s / b * 100.),
+                );
+            }
+            if y + 2 >= inner.y as i32 && y + 2 < end {
+                frame.render_widget(
+                    Paragraph::new(if p.is_object() {
+                        format!(
+                            "ExetRouter only · {} unpriced requests",
+                            p["exetrouter"]["unpriced_requests"].as_i64().unwrap_or(0)
+                        )
+                    } else {
+                        "Manual balance not set".into()
+                    })
+                    .style(Style::default().fg(Color::Gray)),
+                    Rect::new(inner.x, (y + 2) as u16, inner.width, 1),
+                );
+            }
+            y += 3;
         }
         if !account["quota"]["cooldown_until"].is_null() {
             if y >= inner.y as i32 && y < end {
@@ -1681,39 +2180,6 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
         y += 1;
     }
 }
-fn quota_palette(remaining: Option<f64>) -> (Color, Color) {
-    match remaining {
-        Some(p) if p <= 20. => (Color::Rgb(223, 104, 112), Color::Rgb(80, 15, 24)),
-        Some(p) if p <= 50. => (Color::Rgb(232, 191, 82), Color::Rgb(90, 62, 0)),
-        Some(_) => (Color::Rgb(93, 195, 143), Color::Rgb(14, 66, 40)),
-        None => (Color::Rgb(52, 59, 70), Color::Rgb(174, 184, 200)),
-    }
-}
-fn quota_bar(frame: &mut Frame<'_>, area: Rect, remaining: Option<f64>, label: &str) {
-    let filled =
-        (area.width as f64 * remaining.unwrap_or(0.).clamp(0., 100.) / 100.).round() as u16;
-    let (background, foreground) = quota_palette(remaining);
-    let empty_bg = Color::Rgb(52, 59, 70);
-    let empty_fg = Color::Rgb(174, 184, 200);
-    let chars = label.chars().take(area.width as usize).collect::<Vec<_>>();
-    let start = (area.width as usize - chars.len()) / 2;
-    let buffer = frame.buffer_mut();
-    for x in 0..area.width {
-        let style = if x < filled {
-            Style::default().bg(background).fg(foreground)
-        } else {
-            Style::default().bg(empty_bg).fg(empty_fg)
-        };
-        let character = (x as usize)
-            .checked_sub(start)
-            .and_then(|i| chars.get(i))
-            .copied()
-            .unwrap_or(' ');
-        buffer[(area.x + x, area.y)]
-            .set_char(character)
-            .set_style(style);
-    }
-}
 fn usage_axis_max(value: f64) -> f64 {
     let magnitude = 10_f64.powf(value.max(1.).log10().floor());
     let normalized = value / magnitude;
@@ -1722,6 +2188,34 @@ fn usage_axis_max(value: f64) -> f64 {
         .find(|step| *step >= normalized)
         .unwrap_or(10.);
     rounded * magnitude
+}
+
+fn all_usage_series_available(state: &State) -> bool {
+    state.group != 0
+        && state.values[USAGE]
+            .as_ref()
+            .and_then(|value| value["rows"].as_array())
+            .is_some_and(|rows| (2..=8).contains(&rows.len()))
+}
+fn usage_rows(state: &State, value: &Value) -> Vec<Value> {
+    let rows = value["rows"].as_array().cloned().unwrap_or_default();
+    if state.group != 0
+        && !(state.usage_all && all_usage_series_available(state))
+        && !rows.is_empty()
+    {
+        vec![rows[state.usage_selected % rows.len()].clone()]
+    } else {
+        rows
+    }
+}
+fn usage_breakdown(state: &State) -> String {
+    let Some(value) = &state.values[USAGE] else {
+        return "No data yet. Close and refresh Usage.".into();
+    };
+    let report = serde_json::json!({"period":value["period"],"from_utc":value["from_utc"],"to_utc":value["to_utc"],"rows":usage_rows(state,value)});
+    let text = render::response("usage", &report);
+    text.split_once('\n')
+        .map_or(text.clone(), |(_, body)| body.to_owned())
 }
 
 fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
@@ -1734,12 +2228,7 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
         Constraint::Length(3),
     ])
     .split(inner);
-    let rows = value["rows"].as_array().cloned().unwrap_or_default();
-    let rows = if state.group != 0 && !rows.is_empty() {
-        vec![rows[state.usage_selected % rows.len()].clone()]
-    } else {
-        rows
-    };
+    let rows = usage_rows(state, value);
     let requests: i64 = rows.iter().filter_map(|r| r["requests"].as_i64()).sum();
     let tokens: i64 = rows
         .iter()
@@ -1777,6 +2266,30 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
                 Span::styled(
                     format!("{tokens} reported tokens"),
                     Style::default().fg(Color::Magenta),
+                ),
+                Span::raw("   ·   "),
+                Span::styled(
+                    match rows
+                        .iter()
+                        .filter_map(|r| r["estimated_usd"].as_f64())
+                        .reduce(|a, b| a + b)
+                    {
+                        Some(usd) => format!(
+                            "{} API equivalent{}",
+                            crate::money::usd(usd),
+                            if rows
+                                .iter()
+                                .any(|r| r["unpriced_requests"].as_u64().unwrap_or(1) > 0)
+                            {
+                                " (partial)"
+                            } else {
+                                ""
+                            }
+                        ),
+                        None if rows.is_empty() => "$0 API equivalent".into(),
+                        None => "API equivalent unknown".into(),
+                    },
+                    Style::default().fg(Color::Gray),
                 ),
             ]),
             Line::styled(
@@ -1832,7 +2345,7 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
             timeline
                 .iter()
                 .enumerate()
-                .map(|(i, b)| usage_value(b, name, state.request_metric).map(|v| (i as f64, v)))
+                .map(|(i, b)| usage_metric(b, name, state).map(|v| (i as f64, v)))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
@@ -1913,8 +2426,7 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
                 .map(|d| {
                     d.with_timezone(&chrono::Local)
                         .format(match state.period {
-                            0 => "%H:%M",
-                            1 => "%b %-d %H:%M",
+                            0 => "%b %-d %H:%M",
                             _ => "%b %-d",
                         })
                         .to_string()
@@ -1923,7 +2435,9 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
             Line::from(label)
         })
         .collect::<Vec<_>>();
-    let metric = if !state.request_metric {
+    let metric = if state.usd_metric {
+        "Standard API equivalent (USD)"
+    } else if !state.request_metric {
         "Reported tokens"
     } else {
         "Requests"
@@ -1943,24 +2457,26 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
             .y_axis(
                 Axis::default()
                     .bounds([0., max])
-                    .labels([
-                        Line::from("0"),
-                        Line::from(format!("{}", max / 4.)),
-                        Line::from(format!("{}", max / 2.)),
-                        Line::from(format!("{}", max * 3. / 4.)),
-                        Line::from(format!("{max:.0}")),
-                    ])
+                    .labels([0., 0.25, 0.5, 0.75, 1.].map(|ratio| {
+                        Line::from(if state.usd_metric {
+                            crate::money::usd(max * ratio)
+                        } else {
+                            format!("{}", max * ratio)
+                        })
+                    }))
                     .style(Style::default().fg(Color::Gray)),
             ),
         chunks[1],
     );
-    let note = if unknown > 0 {
+    let note = if state.usd_metric {
+        "Published standard API price estimate, not subscription spending. Unpriced requests are excluded, not $0.".into()
+    } else if unknown > 0 {
         format!("{unknown} requests have incomplete counts. The token graph shows reported counts only.")
     } else {
         "Cached input and reasoning output are already included in token totals.".into()
     };
     let bucket = &timeline[selected];
-    let at = if state.period <= 1 {
+    let at = if state.period == 0 {
         bucket["to_utc"]
             .as_i64()
             .or_else(|| bucket["from_utc"].as_i64())
@@ -1971,7 +2487,7 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
         .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
         .map(|d| {
             d.with_timezone(&chrono::Local)
-                .format(if state.period <= 1 {
+                .format(if state.period == 0 {
                     "%b %-d, %I:%M %p"
                 } else {
                     "%b %-d"
@@ -1986,7 +2502,24 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
             .flatten()
             .filter(|r| r["name"].as_str() == Some(name))
             .collect();
-        let value = if state.request_metric {
+        let value = if state.usd_metric {
+            usage_metric(bucket, name, state)
+                .map(|v| {
+                    format!(
+                        "{}{}",
+                        crate::money::usd(v),
+                        if rows
+                            .iter()
+                            .any(|r| r["unpriced_requests"].as_u64().unwrap_or(1) > 0)
+                        {
+                            " (partial)"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .unwrap_or_else(|| "Unknown".into())
+        } else if state.request_metric {
             rows.iter()
                 .filter_map(|r| r["requests"].as_i64())
                 .sum::<i64>()
@@ -2007,7 +2540,9 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
         Span::styled(
             format!(
                 "  {value} {}",
-                if state.request_metric {
+                if state.usd_metric {
+                    "estimated"
+                } else if state.request_metric {
                     "requests"
                 } else {
                     "tokens"
@@ -2027,7 +2562,7 @@ fn usage_chart(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) 
             Line::from(format!(
                 "{} · {}",
                 render::system_timezone(),
-                if state.period <= 1 {
+                if state.period == 0 {
                     "Hourly activity"
                 } else {
                     "Daily activity"
@@ -2104,13 +2639,53 @@ fn usage_value(bucket: &Value, name: &str, requests: bool) -> Option<f64> {
             .sum::<i64>() as f64,
     )
 }
+fn usage_metric(bucket: &Value, name: &str, state: &State) -> Option<f64> {
+    if !state.usd_metric {
+        return usage_value(bucket, name, state.request_metric);
+    }
+    let rows: Vec<_> = bucket["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["name"].as_str() == Some(name))
+        .collect();
+    if rows.is_empty() {
+        return Some(0.);
+    }
+    let priced: Vec<_> = rows
+        .iter()
+        .filter_map(|r| r["estimated_usd"].as_f64())
+        .filter(|v| v.is_finite() && *v >= 0.)
+        .collect();
+    (!priced.is_empty()).then(|| priced.iter().sum())
+}
+
+fn page_usage(state: &mut State, older: bool) {
+    let seconds = [86400, 7 * 86400, 30 * 86400, 90 * 86400][state.period];
+    let now = chrono::Utc::now().timestamp();
+    let end = state
+        .usage_before
+        .or_else(|| {
+            state.values[USAGE]
+                .as_ref()
+                .and_then(|v| v["to_utc"].as_i64())
+        })
+        .unwrap_or(now);
+    state.usage_before = if older {
+        Some(end.saturating_sub(seconds).max(seconds))
+    } else {
+        end.checked_add(seconds).filter(|end| *end < now)
+    };
+    state.usage_cursor = None;
+    state.values[USAGE] = None;
+}
 fn keyboard_help(state: &State, connection: &Connection) -> String {
     let actions = match state.tab {
-        OVERVIEW => "↑/↓: select account\nPgUp/PgDn: page\nEnter: routing details and clients\nRouting and expiring reset credits are automatic. Account availability is managed by the operator.",
-        USAGE if state.group == 0 => "p: change period\nb: change grouping\nm: switch tokens / requests",
-        USAGE => "↑/↓: select user, model or token with recorded usage\np: change period\nb: change grouping\nm: switch tokens / requests",
-        TOKENS => "↑/↓: select token\nEnter: token actions\nn: create; l: rename; o: rotate; x: revoke\nRotation and revocation require confirmation.",
-        MODELS => "↑/↓: select model\nPgUp/PgDn: page\nEnter: copy selected model ID",
+        OVERVIEW => "↑/↓: select account\nPgUp/PgDn: page\nEnter: subscription history, billing and clients\nAccount availability is managed by the operator.",
+        USAGE if state.group == 0 => "p: rolling 24-hour / 7-day / 30-day / 90-day range\n[/]: previous / next range\nb: change grouping\nm: tokens / requests / USD estimate\nEnter: detailed counter breakdown",
+        USAGE => "↑/↓: select user, model or token with recorded usage\na: toggle all series (up to eight groups)\nEnter: detailed counter breakdown\np: change rolling period\n[/]: previous / next range\nb: change grouping\nm: tokens / requests / USD estimate",
+        TOKENS => "↑/↓: select token; PgUp/PgDn: page; Home/End: first/last\nEnter: token actions\ns: search names and IDs; 0: clear search; c: copy token ID\nn: create; l: rename; o: rotate; x: revoke\nRotation and revocation require confirmation.",
+        MODELS => "↑/↓: select model\nPgUp/PgDn: page\nEnter: copy selected model ID\ns: search names, IDs and capabilities\nf: require capabilities (match all)\n0: clear search and capability filters",
         SETTINGS if connection.local.is_some() => "↑/↓: select settings actions or account\nEnter: activate selected action; reauthorize selected account\ne: configure connection; v: check updates; U: update\na: add account; u: reauthorize; d: disable",
         _ => "↑/↓: select settings actions\nEnter: activate selected action\ne: configure connection; v: check updates; U: update",
     };
@@ -2153,7 +2728,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
     let mut state = State::default();
     let mut private_settings_available = true;
     match super::privacy::dashboard(&args).await {
-        Ok(Some(settings)) => { state.tab=settings.tab; state.period=settings.period; state.group=settings.group; state.request_metric=settings.request_metric; },
+        Ok(Some(settings)) => { state.tab=settings.tab; state.period=settings.rolling_period.unwrap_or([0,0,1,2][settings.period]); state.group=settings.group; state.request_metric=settings.request_metric; state.usd_metric=settings.usd_metric; },
         Ok(None) => {},
         Err(_) => {private_settings_available=false; state.statuses[SETTINGS]="Private settings unavailable; restore the original privacy key and check server compatibility.".into();},
     }
@@ -2186,6 +2761,11 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                 next_limits_refresh = Instant::now() + LIMIT_REFRESH_INTERVAL;
             }
             match result {
+                Ok(value) if job.history_account.is_some() => {
+                    if let Err(error) = replace_history(&mut state, job.history_account.unwrap(), value) {
+                        state.statuses[OVERVIEW] = error.to_string();
+                    }
+                }
                 Ok(mut value) if job.mutation => {
                     if job.tab == TOKENS {
                         // Usage labels are resolved when the report is loaded.
@@ -2203,32 +2783,48 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                             return Err("token issued without a clipboard destination; rotate it before use".into());
                         }
                     } else if value.get("updated").and_then(Value::as_bool) == Some(true) {
-                        state.notices[job.tab] = Some("Token label saved.".into());
+                        state.notices[job.tab] = Some("Token updated.".into());
                     } else {
                         state.notices[job.tab] = Some(render::response("revoke", &value));
                     }
                     let refresh_tab=job.tab;
-                    state.values[refresh_tab] = None;
                     if state.modal.is_none() {
                         let request=if matches!(value.get("updated").and_then(Value::as_bool),Some(true)){request(&state)}else{ControlRequest::TokenList};
                         pending = Some(start(&args.connection,request,refresh_tab,false));
                     }
                 }
-                Ok(value) => {
+                Ok(mut value) => {
+                    if job.tab == OVERVIEW && (state.history_period != 0 || state.history_before.is_some()) {
+                        if let Some(id) = state.history_account {
+                            if let Some(history) = account_row(&state,id).map(|row|row["quota_history"].clone()) {
+                                if let Some(row) = value["quota_accounts"].as_array_mut().and_then(|rows|rows.iter_mut().find(|row|row["id"].as_i64()==Some(id))) {
+                                    row["quota_history"] = history;
+                                }
+                            }
+                        }
+                    }
                     if job.tab == OVERVIEW {
                         state.forecasts.observe(&value, chrono::Utc::now().timestamp());
                     }
                     preserve_selection(&mut state, job.tab, &value);
-                    if job.tab == TOKENS || job.tab == SETTINGS {
+                    if job.tab == SETTINGS {
                         state.selected = state
                             .selected
                             .min(value.as_array().map_or(0, |v| v.len().saturating_sub(1)));
+                        let actions = settings_actions(&state, &args.connection).len();
+                        let count = value.as_array().map_or(0, Vec::len);
+                        state.settings_selected = state.settings_selected.min((actions + count).saturating_sub(1));
+                        if state.settings_selected >= actions { state.selected = state.settings_selected - actions; }
                     }
                     state.values[job.tab] = Some(value);
                     if job.tab == OVERVIEW && state.tab == OVERVIEW {
                         let size = terminal.size()?;
                         let viewport = overview_viewport(size.height, size.width, &state, false);
                         keep_selected_account_visible(&mut state, viewport, size.width.saturating_sub(4));
+                    } else if job.tab == SETTINGS && state.tab == SETTINGS {
+                        let size = terminal.size()?;
+                        let viewport = overview_viewport(size.height, size.width, &state, false);
+                        keep_settings_selection_visible(&mut state, &args.connection, viewport, size.width.saturating_sub(2));
                     }
                     state.statuses[job.tab] = format!(
                         "Updated {} · {}",
@@ -2274,6 +2870,12 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
         }
         let mut key = match event::read()? {
             Event::Key(key) => key,
+            Event::Resize(width,height) => {
+                let viewport = overview_viewport(height, width, &state, pending.as_ref().is_some_and(|job| job.tab == state.tab));
+                if state.tab == SETTINGS { keep_settings_selection_visible(&mut state, &args.connection, viewport, width.saturating_sub(2)); }
+                if state.tab == OVERVIEW { keep_selected_account_visible(&mut state, viewport, width.saturating_sub(4)); }
+                continue;
+            }
             Event::Mouse(mouse) if !pending.as_ref().is_some_and(|p| p.mutation) && !updater.as_ref().is_some_and(|job| job.installing) => {
                 let Some(key) = mouse_key(mouse, &hits, &mut state) else { continue; };
                 key
@@ -2289,7 +2891,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
             if pending.as_ref().is_some_and(|p| p.mutation) {
                 return Err("Mutation interrupted; it may have completed. Inspect tokens or limits before any further action".into());
             }
-            if private_settings_available {super::privacy::save_dashboard(&args, &super::privacy::Dashboard {tab:state.tab,period:state.period,group:state.group,request_metric:state.request_metric}).await?;}
+            if private_settings_available {super::privacy::save_dashboard(&args, &super::privacy::Dashboard {tab:state.tab,period:state.period,group:state.group,request_metric:state.request_metric,usd_metric:state.usd_metric,rolling_period:Some(state.period)}).await?;}
             return Ok(());
         }
         let size = terminal.size()?;
@@ -2324,8 +2926,9 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
             if let Some((_, action)) = actions.get(state.settings_selected) {
                 key.code = *action;
                 menu_action = true;
-            } else {
-                key.code = KeyCode::Char('u');
+            } else if args.connection.local.is_some() {
+                state.modal = account_actions(&state);
+                continue;
             }
         }
         if let Some(Modal::Actions { entries, selected, .. }) = &mut state.modal {
@@ -2341,6 +2944,36 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
         let mut mutation = None;
         if let Some(modal) = &mut state.modal {
             match modal {
+                Modal::Usage { scroll } => match key.code {
+                    KeyCode::Esc => state.modal = None,
+                    KeyCode::Up | KeyCode::PageUp => *scroll = scroll.saturating_sub(if key.code == KeyCode::PageUp {10} else {1}),
+                    KeyCode::Down | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+                        let current = *scroll;
+                        let area = account_popup(Rect::new(0,0,size.width,size.height));
+                        let max = Paragraph::new(usage_breakdown(&state)).wrap(Wrap {trim:false}).line_count(area.width.saturating_sub(4)).saturating_sub(usize::from(area.height.saturating_sub(4))).min(usize::from(u16::MAX)) as u16;
+                        let next = match key.code {KeyCode::Home=>0,KeyCode::End=>max,KeyCode::PageDown=>current.saturating_add(10).min(max),_=>current.saturating_add(1).min(max)};
+                        state.modal = Some(Modal::Usage {scroll:next});
+                    }
+                    _ => {}
+                },
+                Modal::TokenPolicy { id, enabled, fast } => match key.code {
+                    KeyCode::Esc => state.modal=None,
+                    KeyCode::Char('y') => {
+                        mutation=Some(if let Some(enabled)=enabled {ControlRequest::TokenSetEnabled{id:id.clone(),enabled:*enabled}} else {ControlRequest::TokenFastMode{id:id.clone(),enabled:fast.unwrap_or(None)}});
+                        state.modal=None;
+                    }
+                    _=>{}
+                },
+                Modal::Search { kind, input } => match key.code {
+                    KeyCode::Esc => state.modal = None,
+                    KeyCode::Enter => {
+                        let kind = *kind;
+                        let query = input.value.clone();
+                        apply_search(&mut state, kind, &query);
+                        state.modal = None;
+                    }
+                    _ => { if input.value.len() < 512 || !matches!(key.code, KeyCode::Char(_)) { input.edit(key); } }
+                },
                 Modal::Account { id, scroll } => match key.code {
                     KeyCode::Esc => state.modal = None,
                     KeyCode::Down | KeyCode::PageDown => {
@@ -2355,13 +2988,28 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     KeyCode::Up | KeyCode::PageUp => *scroll=scroll.saturating_sub(if key.code==KeyCode::PageUp {10} else {1}),
                     KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => {
                         let id=*id;
-                        if let Some((from,to))=account_row(&state,id).and_then(super::account_details::range) {
-                            let last=to-3600;
+                        if let Some((from,to,interval))=account_row(&state,id).and_then(super::account_details::range) {
+                            let last=to-interval;
                             let current=state.account_hour.unwrap_or(last);
-                            state.account_hour=Some(match key.code {KeyCode::Home=>from,KeyCode::End=>last,KeyCode::Left=>(current-3600).clamp(from,last),_=>(current+3600).clamp(from,last)});
+                            state.account_hour=Some(match key.code {KeyCode::Home=>from,KeyCode::End=>last,KeyCode::Left=>(current-interval).clamp(from,last),_=>(current+interval).clamp(from,last)});
                         }
                     }
                     KeyCode::Char('r') if pending.is_none() => pending=Some(start(&args.connection,ControlRequest::Limits,OVERVIEW,false)),
+                    KeyCode::Char('h' | '[' | ']') if pending.is_none() => {
+                        let account = *id;
+                        let end = account_row(&state,account).and_then(super::account_details::range).map(|(_,to,_)|to);
+                        let latest = chrono::Utc::now().timestamp().div_euclid(600)*600+600;
+                        if key.code == KeyCode::Char('h') {
+                            state.history_period=(state.history_period+1)%HISTORY_PERIODS.len();
+                            state.history_before=None;
+                        } else {
+                            let to=state.history_before.or(end).unwrap_or(latest);
+                            let span=HISTORY_PERIODS[state.history_period].1;
+                            state.history_before=if key.code==KeyCode::Char('[') { Some(to-span) } else if to+span>=latest {None} else {Some(to+span)};
+                        }
+                        state.history_account=Some(account);
+                        pending=Some(start_history(&args.connection,&state,account));
+                    }
                     _ => {}
                 },
                 Modal::Actions { .. } => unreachable!("action menus handled above"),
@@ -2471,16 +3119,19 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
             }
         } else {
             if seek_usage(&mut state,key) {continue}
+            if navigate_tokens(&mut state, key.code, viewport) {continue}
             let old_tab = state.tab;
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => {
-                    if private_settings_available {super::privacy::save_dashboard(&args, &super::privacy::Dashboard {tab:state.tab,period:state.period,group:state.group,request_metric:state.request_metric}).await?;}
+                    if private_settings_available {super::privacy::save_dashboard(&args, &super::privacy::Dashboard {tab:state.tab,period:state.period,group:state.group,request_metric:state.request_metric,usd_metric:state.usd_metric,rolling_period:Some(state.period)}).await?;}
                     if let Some(local) = &args.connection.local {
                         local.stop().await?;
                     }
                     return Ok(());
                 }
                 KeyCode::Char('?') => state.modal = Some(Modal::Help),
+                KeyCode::Enter if state.tab == USAGE => state.modal = Some(Modal::Usage { scroll:0 }),
+                KeyCode::Char('a') if state.tab == USAGE && all_usage_series_available(&state) => state.usage_all = !state.usage_all,
                 KeyCode::Right => state.tab = (state.tab + 1) % TABS.len(),
                 KeyCode::Left => state.tab = (state.tab + TABS.len() - 1) % TABS.len(),
                 KeyCode::Char(c @ '1'..='5') => state.tab = (c as u8 - b'1') as usize,
@@ -2599,6 +3250,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     if state.settings_selected >= actions {
                         state.selected = state.settings_selected - actions;
                     }
+                    keep_settings_selection_visible(&mut state, &args.connection, viewport, size.width.saturating_sub(2));
                 }
                 KeyCode::Up if state.tab == SETTINGS => {
                     state.settings_selected = state.settings_selected.saturating_sub(1);
@@ -2606,14 +3258,34 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     if state.settings_selected >= actions {
                         state.selected = state.settings_selected - actions;
                     }
+                    keep_settings_selection_visible(&mut state, &args.connection, viewport, size.width.saturating_sub(2));
                 }
                 KeyCode::Char('r') => {
                     pending = Some(start(&args.connection, request(&state), state.tab, false))
                 }
+                KeyCode::Char('s') if matches!(state.tab, MODELS | TOKENS) => {
+                    let (kind, query) = if state.tab == MODELS {(SearchKind::Models, &state.model_query)} else {(SearchKind::Tokens, &state.token_query)};
+                    state.modal = Some(Modal::Search { kind, input: TextInput::new(query.clone()) });
+                }
+                KeyCode::Char('f') if state.tab == MODELS => {
+                    let entries = [("reasoning",'R'),("tools",'T'),("image_input",'V'),("image_generation",'G'),("image_editing",'E')].into_iter().map(|(id,key)| (format!("{}{}",render::capability_label(id).unwrap(),if state.model_features.iter().any(|v| v==id) {" ✓"}else{""}),KeyCode::Char(key))).collect();
+                    state.modal = Some(Modal::Actions { title:"Capabilities · match all".into(), entries, selected:0 });
+                }
+                KeyCode::Char(c @ ('R'|'T'|'V'|'G'|'E')) if state.tab == MODELS => {
+                    let id = match c { 'R'=>"reasoning",'T'=>"tools",'V'=>"image_input",'G'=>"image_generation",_=>"image_editing" };
+                    if state.model_features.iter().any(|v| v==id) { state.model_features.retain(|v| v!=id); } else { state.model_features.push(id.into()); }
+                    state.model_selected=0;
+                }
+                KeyCode::Char('0') if state.tab == MODELS => {
+                    state.model_query.clear(); state.model_features.clear(); state.model_selected=0;
+                }
                 KeyCode::Enter if matches!(state.tab,OVERVIEW|TOKENS) => {
                     if state.tab==OVERVIEW {
                         if let Some(id)=state.values[OVERVIEW].as_ref().and_then(|v|v["quota_accounts"].as_array()).and_then(|rows|rows.get(state.account_selected)).and_then(|row|row["id"].as_i64()) {
-                            state.account_hour=None; state.modal=Some(Modal::Account{id,scroll:0});
+                            state.account_hour=None;
+                            if state.history_account != Some(id) { state.history_period=0;state.history_before=None; }
+                            state.history_account=Some(id);state.modal=Some(Modal::Account{id,scroll:0});
+                            pending=Some(start_history(&args.connection,&state,id));
                         }
                     } else {
                         let (title,entries)=action_menu(&state,&args.connection);
@@ -2623,14 +3295,38 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                 KeyCode::Char('n') if state.tab == TOKENS => {
                     state.modal = Some(Modal::Name(String::new()))
                 }
+                KeyCode::Char('0') if state.tab == TOKENS => apply_search(&mut state, SearchKind::Tokens, ""),
+                KeyCode::Char('c') if state.tab == TOKENS => {
+                    if let Some(id) = selected_token(&state).and_then(|row| row["id"].as_str()).map(str::to_owned) {
+                        state.notices[TOKENS] = Some(match Clipboard::detect() {
+                            Ok(clipboard) => match clipboard.copy(&id).await {
+                                Ok(()) => format!("Copied {id} to clipboard."),
+                                Err(error) => format!("Could not copy token ID: {error}"),
+                            },
+                            Err(error) => format!("Could not copy token ID: {error}"),
+                        });
+                    }
+                }
+                KeyCode::Char('d') if state.tab == TOKENS => {
+                    if let Some(row)=selected_token(&state).filter(|row|token_policy_available(row)) {
+                        if let Some(id)=row["id"].as_str() { state.modal=Some(Modal::TokenPolicy{id:id.into(),enabled:Some(row["disabled"]==true),fast:None}); }
+                    }
+                }
+                KeyCode::Char('f') if state.tab == TOKENS => {
+                    if selected_token(&state).is_some_and(token_policy_available) {
+                        state.modal=Some(Modal::Actions{title:"Fast mode".into(),entries:vec![("Default".into(),KeyCode::Char('D')),("Allow".into(),KeyCode::Char('A')),("Block".into(),KeyCode::Char('B'))],selected:0});
+                    }
+                }
+                KeyCode::Char(c @ ('D'|'A'|'B')) if state.tab == TOKENS => {
+                    if let Some(id)=selected_token(&state).filter(|row|token_policy_available(row)).and_then(|row|row["id"].as_str()) {
+                        state.modal=Some(Modal::TokenPolicy{id:id.into(),enabled:None,fast:Some(match c {'A'=>Some(true),'B'=>Some(false),_=>None})});
+                    }
+                }
                 KeyCode::Char('l') if state.tab == TOKENS => {
                     state.modal = token_rename_modal(&state);
                 }
                 KeyCode::Char(c @ ('o' | 'x')) if state.tab == TOKENS => {
-                    if let Some(id) = state.values[TOKENS]
-                        .as_ref()
-                        .and_then(Value::as_array)
-                        .and_then(|rows| rows.get(state.selected))
+                    if let Some(id) = selected_token(&state)
                         .and_then(|row| row["id"].as_str())
                     {
                         state.modal = Some(Modal::Confirm {
@@ -2638,18 +3334,6 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                             rotate: c == 'o',
                         });
                     }
-                }
-                KeyCode::Down if state.tab == TOKENS => {
-                    let count = state.values[TOKENS]
-                        .as_ref()
-                        .and_then(Value::as_array)
-                        .map_or(0, Vec::len);
-                    state.selected = (state.selected + 1).min(count.saturating_sub(1));
-                    state.scroll = 0;
-                }
-                KeyCode::Up if state.tab == TOKENS => {
-                    state.selected = state.selected.saturating_sub(1);
-                    state.scroll = 0;
                 }
                 KeyCode::Down | KeyCode::Up if matches!(state.tab, OVERVIEW | MODELS) => {
                     select_item(&mut state, key.code == KeyCode::Down, viewport, size.width.saturating_sub(4));
@@ -2666,6 +3350,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     }
                 }
                 KeyCode::Down | KeyCode::Up if state.tab == USAGE && state.group != 0 => {
+                    state.usage_all = false;
                     let count = state.values[USAGE].as_ref().and_then(|v| v["rows"].as_array()).map_or(0, Vec::len);
                     if count > 0 {
                         state.usage_selected = if key.code == KeyCode::Down {
@@ -2678,7 +3363,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                 KeyCode::Down => state.scroll = state.scroll.saturating_add(1),
                 KeyCode::Up => state.scroll = state.scroll.saturating_sub(1),
                 KeyCode::PageDown | KeyCode::PageUp if state.tab == MODELS => {
-                    for _ in 0..viewport.saturating_sub(1).max(1) {
+                    for _ in 0..viewport.saturating_sub(model_filter_height(&state)).checked_div(4).unwrap_or(0).max(1) {
                         select_item(&mut state, key.code == KeyCode::PageDown, viewport, size.width.saturating_sub(4));
                     }
                 }
@@ -2689,12 +3374,26 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                 KeyCode::PageDown => state.scroll = state.scroll.saturating_add(10),
                 KeyCode::PageUp => state.scroll = state.scroll.saturating_sub(10),
                 KeyCode::Char('m') if state.tab == USAGE => {
-                    state.request_metric = !state.request_metric
+                    if state.usd_metric {
+                        state.usd_metric = false;
+                        state.request_metric = false;
+                    } else if state.request_metric {
+                        state.request_metric = false;
+                        state.usd_metric = true;
+                    } else {
+                        state.request_metric = true;
+                    }
                 }
                 KeyCode::Char('p') if state.tab == USAGE => {
                     state.period = (state.period + 1) % USAGE_PERIODS.len();
+                    state.usage_before = None;
+                    state.usage_cursor = None;
                     state.usage_selected = 0;
                     state.values[USAGE] = None;
+                    pending = Some(start(&args.connection, request(&state), state.tab, false));
+                }
+                KeyCode::Char('[' | ']') if state.tab == USAGE => {
+                    page_usage(&mut state, key.code == KeyCode::Char('['));
                     pending = Some(start(&args.connection, request(&state), state.tab, false));
                 }
                 KeyCode::Char('b') if state.tab == USAGE => {
@@ -2708,8 +3407,11 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
             if state.tab != old_tab {
                 pending = None;
                 state.scroll = 0;
+                let viewport = overview_viewport(size.height, size.width, &state, false);
                 if state.tab == OVERVIEW {
                     keep_selected_account_visible(&mut state, viewport, size.width.saturating_sub(4));
+                } else if state.tab == SETTINGS {
+                    keep_settings_selection_visible(&mut state, &args.connection, viewport, size.width.saturating_sub(2));
                 }
                 if state.tab == OVERVIEW || state.values[state.tab].is_none() {
                     pending = Some(start(&args.connection, request(&state), state.tab, false));
@@ -3151,6 +3853,42 @@ fn reset_screen(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn model_search_and_all_capability_filters_share_cli_semantics_and_copy_exact_ids() {
+        let mut state = State {
+            tab: MODELS,
+            model_query: "sol".into(),
+            model_features: vec!["reasoning".into(), "tools".into()],
+            ..Default::default()
+        };
+        let value = serde_json::json!({"data":[
+            {"id":"sol-base","display_name":"Sol Base","source":"codex","capabilities":["tools"]},
+            {"id":"gpt-sol","display_name":"GPT Sol","source":"codex","capabilities":["tools","reasoning"]},
+            {"id":"platform-sol","display_name":"Platform Sol","source":"platform","capabilities":["tools","reasoning"]}
+        ]});
+        state.values[MODELS] = Some(value.clone());
+        assert_eq!(filtered_model_rows(&state, &value).len(), 2);
+        assert_eq!(selected_model_id(&state), Some("gpt-sol"));
+        state.model_selected = 1;
+        assert_eq!(selected_model_id(&state), Some("platform-sol"));
+        state.model_query = "missing".into();
+        assert_eq!(selected_model_id(&state), None);
+    }
+    #[test]
+    fn account_history_accepts_ninety_days_and_retains_other_account_metadata() {
+        let mut state = State::default();
+        state.values[OVERVIEW] = Some(
+            serde_json::json!({"quota_accounts":[{"id":1,"label":"Synthetic","subscription":{"billing_day":8},"quota":{"windows":[]}}]}),
+        );
+        let from = 1_800_000_000;
+        let history = serde_json::json!({"from_utc":from,"to_utc":from+90*86400,"interval_seconds":600,"points":[]});
+        replace_history(&mut state, 1, history.clone()).unwrap();
+        let row = account_row(&state, 1).unwrap();
+        assert_eq!(row["subscription"]["billing_day"], 8);
+        assert_eq!(row["quota_history"], history);
+        assert!(replace_history(&mut state,1,serde_json::json!({"from_utc":from,"to_utc":from+91*86400,"interval_seconds":600,"points":[]})).is_err());
+        assert_eq!(account_row(&state, 1).unwrap()["quota_history"], history);
+    }
     use super::*;
     use ratatui::backend::TestBackend;
 
@@ -3185,6 +3923,14 @@ mod tests {
         }
         for modal in [
             Modal::Name(String::new()),
+            Modal::Search {
+                kind: SearchKind::Tokens,
+                input: TextInput::new(String::new()),
+            },
+            Modal::Search {
+                kind: SearchKind::Models,
+                input: TextInput::new(String::new()),
+            },
             Modal::Rename {
                 id: "tok_fixture".into(),
                 input: TextInput::new(String::new()),
@@ -3319,7 +4065,7 @@ mod tests {
             mouse_key(click(&hits[0]), &hits, &mut state).unwrap().code,
             KeyCode::Enter
         );
-        assert_eq!(state.selected, 2);
+        assert_eq!(state.token_selected, 2);
     }
 
     fn click(hit: &Hit) -> MouseEvent {
@@ -3335,12 +4081,12 @@ mod tests {
     fn mouse_token_rows_follow_wrapping_pagination_and_scroll() {
         let mut state = State {
             tab: TOKENS,
-            selected: 8,
+            token_selected: 8,
             scroll: 1,
             ..Default::default()
         };
         state.values[TOKENS] = Some(serde_json::json!((0..12).map(|index| serde_json::json!({"id": format!("tok-{index}"), "name": "Long token name ".repeat(8)})).collect::<Vec<_>>()));
-        let hits = dashboard_hits(&state, 72, 20);
+        let hits = dashboard_hits(&state, 72, 24);
         for index in 8..12 {
             let hit = hits
                 .iter()
@@ -3350,7 +4096,7 @@ mod tests {
                 mouse_key(click(hit), &hits, &mut state).unwrap().code,
                 KeyCode::Enter
             );
-            assert_eq!(state.selected, index);
+            assert_eq!(state.token_selected, index);
         }
         assert!(!hits.iter().any(|hit| hit.action == MouseAction::Select(0)));
     }
@@ -3550,7 +4296,7 @@ mod tests {
     fn keyboard_help_only_shows_current_tab_actions() {
         let connection = Connection::default();
         for (tab, action) in [
-            (OVERVIEW, "routing details and clients"),
+            (OVERVIEW, "subscription history, billing and clients"),
             (USAGE, "change grouping"),
             (TOKENS, "token actions"),
             (MODELS, "copy selected model ID"),
@@ -3564,7 +4310,7 @@ mod tests {
             assert!(text.contains(action));
             assert!(text.starts_with(TABS[tab]));
             for other in [
-                "routing details and clients",
+                "subscription history, billing and clients",
                 "change grouping",
                 "token actions",
                 "copy selected model ID",
@@ -3593,7 +4339,7 @@ mod tests {
             {"id":"tok_first","name":"First label"},
             {"id":"tok_second","name":"Второй лейбл"}
         ]));
-        state.selected = 1;
+        state.token_selected = 1;
         assert!(action_menu(&state, &connection)
             .1
             .iter()
@@ -3629,6 +4375,227 @@ mod tests {
     }
 
     #[test]
+    fn token_search_maps_all_actions_and_mouse_rows_to_filtered_ids_and_preserves_refresh_selection(
+    ) {
+        let mut state = State {
+            tab: TOKENS,
+            ..Default::default()
+        };
+        state.values[TOKENS] = Some(serde_json::json!((0..12).map(|i| serde_json::json!({
+            "id":format!("tok_{i:02}"),"name":if i % 2 == 0 {"Work"} else {"CI runner"},"expires_at":9999999999_i64,
+            "disabled":false,"fast_mode":null
+        })).collect::<Vec<_>>()));
+        apply_search(&mut state, SearchKind::Tokens, "  cI  ");
+        assert_eq!(
+            filtered_token_rows(&state, state.values[TOKENS].as_ref().unwrap()).len(),
+            6
+        );
+        state.token_selected = 4;
+        let hits = dashboard_hits(&state, 72, 20);
+        let hit = hits
+            .iter()
+            .find(|hit| hit.action == MouseAction::Select(5))
+            .unwrap();
+        assert_eq!(
+            mouse_key(click(hit), &hits, &mut state).unwrap().code,
+            KeyCode::Enter
+        );
+        assert_eq!(selected_token(&state).unwrap()["id"], "tok_11");
+        let Some(Modal::Rename { id, .. }) = token_rename_modal(&state) else {
+            panic!("rename expected")
+        };
+        assert_eq!(id, "tok_11");
+        assert!(action_menu(&state, &Connection::default())
+            .1
+            .iter()
+            .any(|(_, key)| *key == KeyCode::Char('d')));
+        assert!(action_menu(&state, &Connection::default())
+            .1
+            .iter()
+            .any(|(_, key)| *key == KeyCode::Char('c')));
+        let mut refreshed = state.values[TOKENS].clone().unwrap();
+        refreshed.as_array_mut().unwrap().reverse();
+        preserve_selection(&mut state, TOKENS, &refreshed);
+        state.values[TOKENS] = Some(refreshed);
+        assert_eq!(state.token_selected, 0);
+        assert_eq!(selected_token(&state).unwrap()["id"], "tok_11");
+        apply_search(&mut state, SearchKind::Tokens, "TOK_01");
+        assert_eq!(selected_token(&state).unwrap()["id"], "tok_01");
+        apply_search(&mut state, SearchKind::Tokens, "nothing matches");
+        assert!(selected_token(&state).is_none());
+        assert!(token_rename_modal(&state).is_none());
+        assert_eq!(
+            action_menu(&state, &Connection::default()).1,
+            vec![("Create token".into(), KeyCode::Char('n'))]
+        );
+        assert!(!dashboard_hits(&state, 72, 20)
+            .iter()
+            .any(|hit| matches!(hit.action, MouseAction::Select(_))));
+        assert!(token_lines(&state, 70)
+            .iter()
+            .any(|line| line.to_string().contains("No matching tokens")));
+        apply_search(&mut state, SearchKind::Tokens, "");
+        assert_eq!(state.scroll, 0);
+        assert_eq!(state.token_selected, 0);
+    }
+
+    #[test]
+    fn model_cards_keep_names_ids_capabilities_and_click_targets_separate() {
+        let mut state = State {
+            tab: MODELS,
+            ..Default::default()
+        };
+        state.values[MODELS] = Some(serde_json::json!({"data":[{
+            "id":"gpt-synthetic-mini","display_name":"gpt-synthetic-mini","source":"platform", "capabilities":["reasoning","tools"],
+            "exetrouter":{"context_window":400000}
+        }]}));
+        for width in [72, 120] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 25)).unwrap();
+            let mut hits = Vec::new();
+            terminal
+                .draw(|frame| {
+                    hits = render_hits(frame, &state, &Connection::default(), false);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text = buffer
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            for label in [
+                "GPT synthetic Mini",
+                "gpt-synthetic-mini",
+                "400000 context",
+                "Reasoning",
+                "Tools",
+                "Platform API",
+                "Controls",
+            ] {
+                assert!(text.contains(label), "missing {label} at width {width}");
+            }
+            let hit = hits
+                .iter()
+                .find(|hit| hit.action == MouseAction::Select(0))
+                .unwrap();
+            assert_eq!(hit.area.height, 3);
+            for y in hit.area.y..hit.area.bottom() {
+                let event = MouseEvent {
+                    row: y,
+                    ..click(hit)
+                };
+                assert_eq!(
+                    mouse_key(event, &hits, &mut state).unwrap().code,
+                    KeyCode::Enter
+                );
+                assert_eq!(selected_model_id(&state), Some("gpt-synthetic-mini"));
+            }
+            assert_eq!(buffer[(width - 1, 0)].bg, palette::BASE);
+            for (label, background) in [
+                ("Reasoning", palette::RAISED),
+                ("Platform API", Color::Rgb(59, 48, 32)),
+            ] {
+                let cells = buffer
+                    .content
+                    .windows(label.len())
+                    .find(|cells| {
+                        cells.iter().map(|cell| cell.symbol()).collect::<String>() == label
+                    })
+                    .unwrap();
+                assert!(cells.iter().all(|cell| cell.bg == background));
+            }
+        }
+    }
+
+    #[test]
+    fn filtered_token_navigation_pages_and_resizing_keep_the_selected_entry_visible() {
+        let mut state = State {
+            tab: TOKENS,
+            ..Default::default()
+        };
+        state.values[TOKENS] = Some(serde_json::json!((0..30).map(|i|serde_json::json!({"id":format!("tok_{i}"),"name":if i % 2 == 0 {"Selected group"}else{"Other"}})).collect::<Vec<_>>()));
+        apply_search(&mut state, SearchKind::Tokens, "Selected group");
+        assert!(navigate_tokens(&mut state, KeyCode::PageDown, 15));
+        assert_eq!(selected_token(&state).unwrap()["id"], "tok_8");
+        assert!(navigate_tokens(&mut state, KeyCode::End, 15));
+        assert_eq!(selected_token(&state).unwrap()["id"], "tok_28");
+        assert!(navigate_tokens(&mut state, KeyCode::Up, 15));
+        assert_eq!(selected_token(&state).unwrap()["id"], "tok_26");
+        assert!(navigate_tokens(&mut state, KeyCode::PageUp, 15));
+        assert_eq!(selected_token(&state).unwrap()["id"], "tok_18");
+        // Force the fourth card onto a shorter viewport without another input event.
+        state.token_selected = 11;
+        state.scroll = 0;
+        for height in [35, 20] {
+            let mut terminal = Terminal::new(TestBackend::new(72, height)).unwrap();
+            let mut hits = Vec::new();
+            terminal
+                .draw(|frame| {
+                    hits = render_hits(frame, &state, &Connection::default(), false);
+                })
+                .unwrap();
+            let hit = hits
+                .iter()
+                .find(|hit| hit.action == MouseAction::Select(11))
+                .unwrap();
+            assert_eq!(hit.area.height, 1);
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(text.contains("▶ Selected group"));
+            assert!(text.contains("tok_22"));
+        }
+        assert!(navigate_tokens(&mut state, KeyCode::Home, 10));
+        assert_eq!(state.token_selected, 0);
+        assert_eq!(state.scroll, 0);
+    }
+
+    #[test]
+    fn standalone_account_menu_retains_disable_and_selected_settings_scroll_into_view() {
+        let connection = Connection {
+            mode: super::super::config::Mode::Standalone,
+            ..Default::default()
+        };
+        let mut state = State {
+            tab: SETTINGS,
+            selected: 11,
+            settings_selected: 15,
+            ..Default::default()
+        };
+        state.values[SETTINGS] = Some(serde_json::json!((0..12).map(|i|serde_json::json!({"id":i,"email":format!("account-{i}@example.com"),"state":"active"})).collect::<Vec<_>>()));
+        let Some(Modal::Actions { title, entries, .. }) = account_actions(&state) else {
+            panic!("account menu expected")
+        };
+        assert_eq!(title, "account-11@example.com");
+        assert_eq!(
+            entries.iter().map(|(_, key)| *key).collect::<Vec<_>>(),
+            vec![KeyCode::Char('u'), KeyCode::Char('d')]
+        );
+        state.values[SETTINGS].as_mut().unwrap()[11]["state"] = "disabled".into();
+        let Some(Modal::Actions { entries, .. }) = account_actions(&state) else {
+            panic!("account menu expected")
+        };
+        assert_eq!(entries.len(), 1);
+        keep_settings_selection_visible(&mut state, &connection, 10, 70);
+        assert!(state.scroll > 0);
+        let visible = settings_lines(&connection, &state, 70)
+            .into_iter()
+            .skip(usize::from(state.scroll))
+            .take(10)
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(visible.contains("▶ account-11@example.com"));
+        state.settings_selected = 0;
+        keep_settings_selection_visible(&mut state, &connection, 10, 70);
+        assert_eq!(state.scroll, 0);
+    }
+
+    #[test]
     fn usage_view_selects_users_models_and_tokens() {
         let now = chrono::Utc::now().timestamp();
         let rows = serde_json::json!([
@@ -3647,7 +4614,7 @@ mod tests {
                 };
                 state.values[USAGE] = Some(value.clone());
                 assert!(
-                    matches!(request(&state), ControlRequest::Usage { by: requested_by, .. } if requested_by.as_deref() == Some(by))
+                    matches!(request(&state), ControlRequest::UsageRange { by: requested_by, .. } if requested_by.as_deref() == Some(by))
                 );
                 let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
                 terminal
@@ -3660,7 +4627,7 @@ mod tests {
                     .iter()
                     .map(|c| c.symbol())
                     .collect::<String>();
-                assert!(text.contains("Reported tokens · Today"));
+                assert!(text.contains("Reported tokens · Last 24 hours"));
                 assert!(!text.contains("Selected:"));
                 assert!(!text.contains("all"));
                 if selected == 0 {
@@ -3676,6 +4643,75 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn usage_all_series_and_read_only_breakdown_preserve_unknown_counters_and_prices() {
+        let mut state = State {
+            tab: USAGE,
+            group: 3,
+            usage_all: true,
+            ..Default::default()
+        };
+        state.values[USAGE] = Some(
+            serde_json::json!({"period":"7d","from_utc":1800000000,"to_utc":1800604800,"rows":[
+                {"name":"tok_work","display_name":"Workstation","requests":2,"input_tokens":100,"output_tokens":20,"cached_input_tokens":50,"estimated_usd":5000.,"unpriced_requests":1},
+                {"name":"tok_unknown","display_name":"Unknown counters","requests":1,"input_tokens":null,"output_tokens":null,"cached_input_tokens":null,"estimated_usd":null,"unknown_usage":1}
+            ]}),
+        );
+        assert!(all_usage_series_available(&state));
+        assert_eq!(
+            usage_rows(&state, state.values[USAGE].as_ref().unwrap()).len(),
+            2
+        );
+        let report = usage_breakdown(&state);
+        for label in [
+            "Workstation",
+            "Input 100",
+            "Output 20",
+            "Cached 50",
+            "$5k",
+            "partial",
+            "Unknown counters",
+            "Input —",
+            "API equivalent Unknown",
+        ] {
+            assert!(report.contains(label), "missing {label}");
+        }
+        assert!(!report.contains("tok_work"));
+        assert!(
+            matches!(request(&state), ControlRequest::UsageRange {by:Some(by),..} if by == "token")
+        );
+        state.usage_all = false;
+        state.usage_selected = 1;
+        assert!(!usage_breakdown(&state).contains("Workstation"));
+        state.modal = Some(Modal::Usage { scroll: u16::MAX });
+        let hits = dashboard_hits(&state, 72, 20);
+        assert!(hits
+            .iter()
+            .all(|hit| hit.action == MouseAction::Key(KeyCode::Esc)));
+        let mut terminal = Terminal::new(TestBackend::new(72, 20)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &state, &Connection::default(), false))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Usage breakdown"));
+        assert!(text.contains("API equivalent Unknown"));
+        state.modal = None;
+        state.usage_all = true;
+        let row = state.values[USAGE].as_ref().unwrap()["rows"][0].clone();
+        state.values[USAGE].as_mut().unwrap()["rows"] = serde_json::json!(vec![row; 9]);
+        assert!(!all_usage_series_available(&state));
+        assert_eq!(
+            usage_rows(&state, state.values[USAGE].as_ref().unwrap()).len(),
+            1
+        );
     }
 
     #[test]
@@ -3766,6 +4802,55 @@ mod tests {
     }
 
     #[test]
+    fn account_subscription_is_plain_text_independently_of_platform_access() {
+        for (price, expected) in [(20, "Plus $20"), (100, "Pro $100"), (200, "Pro $200")] {
+            for platform in [Value::Null, serde_json::json!({"inference_enabled":false})] {
+                let mut state = State::default();
+                state.values[OVERVIEW] = Some(serde_json::json!({"quota_accounts":[{
+                    "id":1,"label":"synthetic@example.com","subscription":{"plan_usd":price},
+                    "platform":platform,"quota":{"windows":[]}
+                }]}));
+                let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();
+                terminal
+                    .draw(|frame| render(frame, &state, &Connection::default(), false))
+                    .unwrap();
+                let lines = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .chunks(120)
+                    .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                    .collect::<Vec<_>>();
+                let header = lines
+                    .iter()
+                    .find(|line| line.contains("synthetic@example.com"))
+                    .unwrap();
+                assert!(header.contains(expected));
+                assert!(!header.contains("Platform API"));
+                let cells = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .windows(expected.len())
+                    .find(|cells| {
+                        cells.iter().map(|cell| cell.symbol()).collect::<String>() == expected
+                    })
+                    .unwrap();
+                assert!(cells
+                    .iter()
+                    .all(|cell| cell.bg == selection_style().bg.unwrap()
+                        && cell.fg == palette::MUTED
+                        && !cell.modifier.contains(Modifier::BOLD)));
+            }
+        }
+        assert_eq!(render::subscription_plan(&serde_json::json!({})), None);
+        assert_eq!(
+            render::subscription_plan(&serde_json::json!({"subscription":{"plan_usd":5000}})),
+            Some("$5k/month".into())
+        );
+    }
+
+    #[test]
     fn overview_pairs_windows_on_wide_screens_and_stacks_them_when_narrow() {
         let now = chrono::Utc::now().timestamp();
         let value = serde_json::json!({"quota_accounts":[{"id":1,"label":"alice@example.com","quota":{"windows":[
@@ -3800,7 +4885,7 @@ mod tests {
                 assert!(short < weekly);
             }
             let ranges = account_ranges(&value, width - 6);
-            assert_eq!(ranges[0].1 - ranges[0].0, if width == 120 { 4 } else { 6 });
+            assert_eq!(ranges[0].1 - ranges[0].0, if width == 120 { 6 } else { 9 });
         }
     }
     #[test]
@@ -3863,19 +4948,26 @@ mod tests {
         assert!(!text.contains("Updated"));
     }
     #[test]
-    fn usage_period_after_today_is_a_rolling_24_hour_report() {
+    fn usage_uses_the_same_rolling_ranges_as_desktop() {
         let state = State {
             tab: USAGE,
-            period: 1,
+            period: 0,
             ..Default::default()
         };
-        assert!(matches!(request(&state), ControlRequest::Usage { period, .. } if period == "24h"));
+        assert!(
+            matches!(request(&state), ControlRequest::UsageRange { period, .. } if period == "24h")
+        );
         assert_eq!(
             USAGE_PERIODS
                 .iter()
                 .map(|(_, title)| *title)
                 .collect::<Vec<_>>(),
-            ["Today", "Last 24 hours", "This week", "This month"]
+            [
+                "Last 24 hours",
+                "Last 7 days",
+                "Last 30 days",
+                "Last 90 days"
+            ]
         );
     }
     #[test]
@@ -3940,7 +5032,8 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect::<String>();
-        assert!(text.contains("▶ model-09"));
+        assert!(text.contains("▶ Model 9"));
+        assert!(text.contains("model-09"));
         assert!(text.contains("Copy ID Enter"));
         let mut refreshed = state.values[MODELS].clone().unwrap();
         refreshed["data"].as_array_mut().unwrap().reverse();
@@ -3977,7 +5070,7 @@ mod tests {
             .windows(4)
             .find(|cells| cells.iter().map(|c| c.symbol()).collect::<String>() == "Best")
             .unwrap();
-        assert!(badge.iter().all(|c| c.fg == Color::Green));
+        assert!(badge.iter().all(|c| c.bg == Color::Rgb(34, 46, 36)));
         let details = account_detail_text(&state, 1);
         assert!(details.contains("Laptop - Codex"));
         assert!(details.contains("12s ago"));
@@ -4006,17 +5099,17 @@ mod tests {
         ));
     }
     #[test]
-    fn mode_badges_use_the_requested_backgrounds_and_header_keeps_version() {
+    fn mode_badges_and_selected_tabs_use_the_approved_muted_palette() {
         for (mode, title, color) in [
             (
                 super::super::config::Mode::Remote,
                 "Remote Server",
-                Color::Rgb(177, 130, 230),
+                Color::Rgb(43, 40, 55),
             ),
             (
                 super::super::config::Mode::Standalone,
                 "Standalone",
-                Color::Rgb(245, 165, 75),
+                Color::Rgb(59, 48, 32),
             ),
         ] {
             let connection = Connection {
@@ -4050,7 +5143,8 @@ mod tests {
             );
             assert!(!second_row.contains('│'));
             for x in 1..11 {
-                assert_eq!(buffer[(x, 2)].bg, Color::Cyan);
+                assert_eq!(buffer[(x, 2)].bg, palette::TEXT);
+                assert_eq!(buffer[(x, 2)].fg, palette::BASE);
             }
             assert_eq!(buffer[(1, 2)].symbol(), " ");
             assert_eq!(buffer[(10, 2)].symbol(), " ");
@@ -4114,37 +5208,37 @@ mod tests {
             .windows("Priority".len())
             .find(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>() == "Priority")
             .unwrap();
-        assert!(priority.iter().all(|cell| cell.fg == Color::Red));
+        assert!(priority
+            .iter()
+            .all(|cell| cell.bg == Color::Rgb(54, 37, 35)));
         assert!(text.contains("auto reset: reset"));
         assert!(!text.contains("Use credit"));
     }
     #[test]
-    fn quota_backgrounds_follow_percentages_with_contrasting_text() {
+    fn quota_tracks_use_thin_full_width_lines_and_semantic_colors() {
         let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
-        for remaining in [18., 38., 98.] {
+        for (remaining, color) in [
+            (18., Color::Rgb(223, 104, 112)),
+            (38., Color::Rgb(232, 191, 82)),
+            (98., Color::Rgb(93, 195, 143)),
+        ] {
             terminal
                 .draw(|f| {
-                    quota_bar(
-                        f,
-                        f.area(),
-                        Some(remaining),
-                        "Weekly · 38% remaining · historical",
-                    )
+                    let area = f.area();
+                    super::super::account_details::meter(f.buffer_mut(), area, Some(remaining));
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer();
-            let (filled_bg, filled_fg) = quota_palette(Some(remaining));
-            assert_eq!(buffer[(0, 0)].bg, filled_bg);
-            assert_eq!(buffer[(0, 0)].symbol(), " ");
-            for cell in &buffer.content {
-                assert_ne!(cell.symbol(), "█");
-                assert_ne!(cell.fg, Color::White);
-                if cell.bg == filled_bg {
-                    assert_eq!(cell.fg, filled_fg);
-                } else {
-                    assert_eq!(cell.fg, Color::Rgb(174, 184, 200));
-                }
-            }
+            assert!(buffer
+                .content
+                .iter()
+                .all(|c| c.symbol() == "━" && c.bg == Color::Reset));
+            assert_eq!(buffer[(0, 0)].fg, color);
+            assert_eq!(buffer[(79, 0)].fg, Color::DarkGray);
+            assert_eq!(
+                buffer.content.iter().filter(|c| c.fg == color).count(),
+                (80.0_f64 * remaining / 100.).round() as usize
+            );
         }
     }
     #[test]
@@ -4155,7 +5249,7 @@ mod tests {
             serde_json::json!({"configuration_status":"configured","oauth":{"active_accounts":2},"catalog":{"status":"current"},"quota_accounts":[{"label":"Account 1","quota":{"windows":[{"window_minutes":10080,"remaining_percent":18,"status":"stale"}]}},{"label":"Account 2","quota":{"windows":[{"window_minutes":480,"remaining_percent":98,"status":"current"}]}}]}),
         );
         let connection = Connection::default();
-        state.scroll = 8;
+        state.scroll = account_ranges(state.values[OVERVIEW].as_ref().unwrap(), 68)[0].0;
         terminal
             .draw(|f| render(f, &state, &connection, false))
             .unwrap();
@@ -4190,12 +5284,17 @@ mod tests {
             .chunks(72)
             .map(|row| row.iter().map(|cell| cell.symbol()).collect())
             .collect();
-        assert!(rows[16].contains("connection was interrupted"));
-        assert!(rows[17].contains("refresh this view."));
-        assert!(rows[18].contains("Quit"));
-        assert!(rows[18].contains("Actions Enter"));
+        let start = 20 - usize::from(controls_height(&state, false, 72));
+        assert!(rows[start].contains("connection was interrupted"));
+        assert!(rows[start + 1].contains("refresh this view."));
+        assert!(rows[start + 2].contains("Controls"));
+        assert!(rows[start + 3..19].iter().any(|row| row.contains("Quit")));
+        assert!(rows[start + 3].contains("Actions Enter"));
         assert!(!rows[19].contains("Enter: actions"));
-        assert_eq!(overview_viewport(20, 72, &state, false), 12);
+        assert_eq!(
+            overview_viewport(20, 72, &state, false),
+            start as u16 - HEADER_HEIGHT - 1
+        );
     }
     #[test]
     fn contextual_controls_stay_in_footer_and_usage_has_a_plot() {
@@ -4235,8 +5334,8 @@ mod tests {
                 .iter()
                 .map(|c| c.symbol())
                 .collect::<String>();
-            assert!(text.contains("Reported tokens · Today"));
-            assert!(text.contains("Today p"));
+            assert!(text.contains("Reported tokens · Last 24 hours"));
+            assert!(text.contains("Last 24 hours p"));
             assert!(text.contains("Tokens m"));
             assert!(buffer.content.iter().any(|c| c
                 .symbol()
@@ -4245,6 +5344,66 @@ mod tests {
             assert!(buffer.content.iter().any(|c| c.fg == Color::Cyan));
         }
     }
+    #[test]
+    fn usd_chart_preserves_unknown_and_partial_prices_and_uses_passive_paging() {
+        let mut state = State {
+            tab: USAGE,
+            usd_metric: true,
+            ..Default::default()
+        };
+        let bucket = serde_json::json!({"rows":[{"name":"known","estimated_usd":0.25,"unpriced_requests":1},{"name":"unknown","estimated_usd":null}]});
+        assert_eq!(usage_metric(&bucket, "known", &state), Some(0.25));
+        assert_eq!(usage_metric(&bucket, "unknown", &state), None);
+        assert_eq!(usage_metric(&bucket, "absent", &state), Some(0.));
+        state.values[USAGE] = Some(serde_json::json!({"to_utc":1_800_000_000}));
+        page_usage(&mut state, true);
+        assert_eq!(state.usage_before, Some(1_800_000_000 - 86400));
+        assert!(matches!(
+            request(&state),
+            ControlRequest::UsageRange {
+                before: Some(1_799_913_600),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn token_dates_have_one_line_and_disabled_and_fast_overrides_have_background_badges() {
+        let mut state = State {
+            tab: TOKENS,
+            ..Default::default()
+        };
+        state.values[TOKENS] = Some(
+            serde_json::json!([{"id":"synthetic-token","name":"Synthetic","disabled":true,"fast_mode":null,"created_at":1800000000,"expires_at":9999999999_i64,"last_used_at":null}]),
+        );
+        let lines = token_lines(&state, 70);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.to_string().contains("Created"))
+                .count(),
+            1
+        );
+        assert!(lines[2].to_string().contains("Expires") && lines[2].to_string().contains("Used"));
+        assert!(lines[0]
+            .spans
+            .iter()
+            .any(|s| s.content.contains("Disabled") && s.style.bg == Some(Color::Rgb(54, 37, 35))));
+        assert!(!lines.iter().any(|l| l.to_string().contains("Fast:")));
+        state.values[TOKENS].as_mut().unwrap()[0]["fast_mode"] = serde_json::json!(false);
+        assert!(token_lines(&state, 70)[0]
+            .spans
+            .iter()
+            .any(|s| s.content.contains("Fast: Block") && s.style.bg.is_some()));
+        assert!(token_policy_available(
+            &state.values[TOKENS].as_ref().unwrap()[0]
+        ));
+        state.values[TOKENS].as_mut().unwrap()[0]["expires_at"] = serde_json::json!(1);
+        assert!(!token_policy_available(
+            &state.values[TOKENS].as_ref().unwrap()[0]
+        ));
+    }
+
     #[test]
     fn dashboard_has_english_navigation_and_dismissed_secrets_leave_no_history() {
         let mut terminal = Terminal::new(TestBackend::new(120, 35)).unwrap();

@@ -166,3 +166,25 @@ The same source was installed after a verified private backup and zero-pending c
 A final header fixture verified that an A refusal at 100%, followed by B acceptance at 20%, returns B's 20% observation for native HTTP `/status`. Unknown limits remain unknown; the synthetic switch matrix and standard checks passed afterward.
 
 Actual subscription exhaustion was not induced. Live WS encrypted-tool portability, multi-hour/concurrent failover, unavailable recovery windows and all upstream refusal variants still require evidence.
+## Platform provisioning and API-only smoke — November 13, 2026
+
+An explicitly authorized development deployment verified default-member service
+account creation on two operator-controlled Platform accounts. The initial key
+requested a one-second expiry and was never used for inference; named
+`exetrouter` working keys requested 30-day expiry with model-list/Responses
+permissions. Both working keys authenticated `GET /models`. Provider timestamps
+can give an already-expired bootstrap key equal creation and expiry seconds;
+the shared parser has a regression fixture for that case. Unknown outcomes were
+reconciled from fresh inventories, never blindly retried.
+
+The public router catalog contained eight Codex models followed by the distinct
+reviewed Platform model `gpt-5.5`. Exactly one API-only JSON Responses request
+completed through the router with `store=false`, reasoning `none` and a 32-token
+output cap. Durable accounting recorded the correct parent account,
+`platform_http_sse`, 10 input tokens, five output tokens and zero cached tokens.
+The temporary router bearer was revoked. No native quota was deliberately
+exhausted or account disabled to force fallback.
+
+This is a provisioning, authentication, catalog and single-request accounting
+check, not a renewal of native-client compatibility or proof of live quota
+failover, cross-backend opaque portability, long context or multi-turn transports.

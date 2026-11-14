@@ -68,7 +68,7 @@ export function UsageView(props: { now: number; revision?: string }) {
     return rows.length > 8 ? rows[0].key : ""
   }
   return <div class="exr-view">
-    <Section title="Usage">
+    <section class="exr-section">
       <RangeControls label="Usage" period={period()} before={before()} end={before() ?? report.latest?.to ?? props.now} now={props.now} loading={report.loading} onPeriod={setPeriod} onBefore={setBefore}>
         <MenuSelect label="Group" value={by()} options={groups} onChange={(value) => { setBy(value); setSelected("") }} />
       </RangeControls>
@@ -81,7 +81,7 @@ export function UsageView(props: { now: number; revision?: string }) {
         <Show when={metric() === "usd"}><p class="exr-caption">Estimated with published OpenAI standard API prices per model, input/output and cached tokens; long-context rates apply above 272K input tokens. Not actual ChatGPT subscription spending. Unpriced requests are excluded, not counted as $0.</p></Show>
         <p class="exr-caption">{date(data().from)} – {date(data().to)} · {data().timezone}</p>
       </>}</Show>
-    </Section>
+    </section>
     <Show when={report.latest}>{(data) => <Section title="Breakdown" description={data().group === "token" ? "Only your API tokens are included." : undefined}>
       <List><For each={data().rows} fallback={<EmptyState title="No requests in this period" description="Try a wider time period to see earlier activity." />}>
         {(row) => <article class="exr-usage-row">

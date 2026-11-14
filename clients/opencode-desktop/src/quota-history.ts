@@ -4,7 +4,7 @@ import { duration } from "./format"
 export const quotaColors = ["var(--exr-history-short)", "var(--exr-history-long)"]
 /** A running IPC bridge can retain the previous normalized shape during reload. */
 export function quotaInterval(history: QuotaHistory): number {
-  return history.intervalSeconds ?? ([history.from, history.to, ...history.points.map((p) => p.hour)].some((at) => at % 3600 !== 0) ? 600 : 3600)
+  return history.intervalSeconds ?? history.interval ?? ([history.from, history.to, ...history.points.map((p) => p.hour)].some((at) => at % 3600 !== 0) ? 600 : 3600)
 }
 export function quotaTimeline(account: Account) {
   const history = account.history

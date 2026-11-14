@@ -10,7 +10,7 @@ Token names and dashboard preferences are encrypted automatically by the native 
 
 Running `exr` with no connection opens a wizard: choose Standalone or Remote, edit fields (Ctrl-U clears one), review and confirm. Esc cancels without saving. Settings (`←/→`) changes connection/mode. Standalone uses an embedded loopback API, private local credentials and no SSH, remote daemon or user administration.
 
-Settings: Enter opens actions to configure the connection, check/install updates and, in standalone, add or reauthorize accounts. `↑/↓` selects an account. Use Tokens to create a local API key. Account operations are also available as `exr account list/add/reauth/disable`; `exr serve` keeps the embedded API running without TUI. The API stops when its owning dashboard or serve process exits. If exr serve already owns the profile, the dashboard attaches without starting a duplicate API. Ordinary command reports contain text/numbers; charts and character-art widgets appear only in TUI.
+Settings: Enter activates the selected connection/update action or opens a standalone account's Reauthorize/Disable menu. `↑/↓` selects an action or account and keeps it visible. Use Tokens to create a local API key. Account operations are also available as `exr account list/add/reauth/disable`; `exr serve` keeps the embedded API running without TUI. The API stops when its owning dashboard or serve process exits. If exr serve already owns the profile, the dashboard attaches without starting a duplicate API. Ordinary command reports contain text/numbers; charts and character-art widgets appear only in TUI.
 
 ## Configure once
 
@@ -38,6 +38,7 @@ exr doctor                  # Text diagnostics; nonzero exit for configuration i
 exr doctor --json           # Stable local/server diagnostic object
 exr models                  # Human-readable table
 exr models --json           # OpenAI-style catalog
+exr models --search sol --capability reasoning --capability tools
 exr models --json --format codex-json > /absolute/path/models.json
 exr models --json --format opencode-v1-json > /absolute/path/exetrouter-v1.json
 exr models --json --format opencode-v2-json > /absolute/path/exetrouter-v2.json
@@ -50,6 +51,8 @@ exr usage --period 90d --by model --json
 exr usage --period 7d --before 1731283200 --json # Earlier rolling interval
 exr quota-history 1 --period 30d --json         # Recorded metadata only
 exr account disable 1 --yes  # Standalone only; reauthorize to enable again
+exr account subscription 1 --billing-day 8 --plan-usd 100 # Standalone owner
+exr account platform set-balance 1 --usd 75.25 # Standalone owner; replaces starting point
 exr limits                  # Per-account upstream subscription windows
 exr limits --json            # Array of live account limits and reset credits, labeled by email
 exr tokens                  # List your tokens
@@ -67,9 +70,19 @@ exr token revoke tok_... --yes
 
 `tokens` aliases `token`; both list tokens when no subcommand is given. `quota` aliases `limits`. Token expiration is 1–365 days, default 90. Creation and rotation require terminal stdin/stdout and reject `--json`; rotation revokes the old token immediately.
 
-The OpenCode Desktop Usage tab also plots a [standard API USD equivalent](usage-pricing.md) beside tokens and requests. Each model is priced before aggregation, so Astra and Sol are not treated as equally expensive per token. Unknown and unpriced requests remain visible as incomplete estimates; this is not a ChatGPT subscription bill.
+The OpenCode Desktop and native TUI Usage tabs plot a [standard API USD equivalent](usage-pricing.md) beside tokens and requests. Each model is priced before aggregation, so Astra and Sol are not treated as equally expensive per token. Unknown and unpriced requests remain visible as incomplete estimates; this is not a ChatGPT subscription bill.
 
-Desktop Usage and Limit history offer **24 hours, 7 days, 30 days and 90 days**
+Configured Platform accounts can have a [manual balance reconciliation point](platform-api.md#manual-remaining-funds-estimates).
+Overview defaults to the entered amount minus ExetRouter Platform token-cost
+estimates; account details also show the independent, delayed all-organization
+Costs alternative. These are estimates, not a live provider balance or a routing
+cap. Each new entry replaces both starting points, without a monthly auto-refill.
+On a shared server only its local operator may enter the amount, using
+`exrd admin oauth platform set-balance ID --usd AMOUNT`; remote users read it in
+`exr limits`, account details or diagnostic JSON. No Admin Key or browser session
+is exposed to the clients.
+
+Desktop and TUI Usage and Limit history offer **24 hours, 7 days, 30 days and 90 days**
 with previous/next interval arrows. The CLI retains calendar periods for existing
 scripts and also accepts rolling `7d`, `30d`, `90d`; `--before` selects an exclusive
 Unix end for rolling windows only. Their buckets are fixed hours/days, not local
@@ -82,7 +95,7 @@ Model exports require `--json`. OpenCode exports use the standalone address or s
 
 Token metadata and mutations are scoped to the authenticated user. Usage is shared aggregate metadata, grouped by user or model. Token grouping (`--by token`) shows only the authenticated user’s tokens by their current labels, including revoked tokens with recorded usage. Grouping stays keyed by token ID, so identical labels never merge statistics. JSON retains each ID in `name` and adds the client-decrypted `display_name`. Unavailable labels (including reports from older servers without label metadata) display `Label unavailable`, never a token fragment. Users cannot list another user's tokens, obtain upstream credentials/account identifiers or read request contents. User creation, OAuth login and backups remain local `exrd admin` operations. Operator reports also default to readable text; add `--json` for scripts. OAuth login is interactive and rejects JSON. The SSH gateway wire protocol and raw authorized_keys export retain their dedicated machine formats.
 
-SSH exchanges have a 45-second deadline and a 1 MiB reply cap. Failed child processes are killed and reaped. Failure or timeout does not prove a mutation was cancelled: inspect the token list before retrying creation/rotation/revocation. The client never automatically retries these operations.
+SSH exchanges have a 45-second deadline and an 8 MiB reply cap shared by server, gateway and client, accommodating full 90-day ten-minute histories. The 32 KiB command bound is unchanged. Failed child processes are killed and reaped. Failure or timeout does not prove a mutation was cancelled: inspect the token list before retrying creation/rotation/revocation. The client never automatically retries these operations.
 
 ## Dashboard
 
@@ -91,18 +104,22 @@ Use an interactive terminal at least 72 columns × 20 rows. Press `?` for help o
 | View | What you can do |
 | --- | --- |
 | Overview | Inspect routing, limits and recently active clients. Enter opens read-only account details, including token labels and last-request times. |
-| Usage | View Today, Last 24 hours, This week or This month, grouped by total, user, model or your API tokens. |
-| Tokens | Create, rename, rotate or revoke tokens. Revoked tokens are hidden. Enter opens actions. |
-| Models | Browse account-visible models and reported limits. Enter copies the selected model ID. |
-| Settings | Change mode/connection, check/install client updates, and add or reauthorize standalone accounts. Enter opens actions. |
+| Usage | View rolling 24-hour, 7-day, 30-day or 90-day intervals, grouped by total, user, model or your API tokens; reported tokens, requests or standard API-equivalent USD. |
+| Tokens | Search names/IDs; copy IDs; create, rename, pause, re-enable, set Fast preference, rotate or revoke tokens. Revoked tokens are hidden. Enter opens actions for the selected search result. |
+| Models | Search names/IDs and filter by capabilities (match all). Enter copies the selected model ID. |
+| Settings | Change mode/connection, check/install client updates, and add, reauthorize or disable standalone accounts. Enter activates an action or opens the selected account menu. |
 
-←/→ changes tabs; ↑/↓ selects items; PageUp/PageDown scrolls; `r` refreshes; `q` or Ctrl-C exits. In Usage, `p` changes the period, `b` changes grouping and `m` switches between reported tokens and requests. Select a group with ↑/↓ to see its chart and totals. User groups combine all that user's tokens; token groups show only your own token labels.
+←/→ changes tabs; ↑/↓ selects items; PageUp/PageDown scrolls; `r` refreshes; `q` or Ctrl-C exits. In Usage, `p` changes the period, `b` changes grouping, `m` cycles reported tokens / requests / USD estimate, and `[` / `]` page older/newer intervals. Select a group with ↑/↓ to see its chart and totals. User groups combine all that user's tokens; token groups show only your own token labels. In Models, `s` opens search, `f` selects required capabilities and `0` clears both. In account details, `h` changes the history period, `[` / `]` page intervals and Left/Right/Home/End move the observation cursor.
+
+Usage also offers `a` to plot all series when there are two to eight groups; ↑/↓ returns to a selected series. Enter opens a read-only breakdown with requests, input, output, cached input, API-equivalent prices and incomplete-count notices for the displayed groups. Scroll with arrows/PageUp/PageDown or Home/End; Esc closes it. These view changes do not make another request or submit inference.
 
 Tokens: Enter → Rename token (or `l`) edits the selected label. Enter saves, Esc cancels, and Ctrl-U clears the field. Labels must be 1–80 bytes without control characters. Renaming encrypts the new label on the client and changes neither the bearer secret, token ID, expiry nor usage counters; past usage displays the new label on reload. CLI renaming also supports `--json` and requires no clipboard or interactive terminal.
 
+In Tokens, `s` searches names and IDs, `0` clears search and `c` copies only the selected token ID, never its secret. PageUp/PageDown moves four entries; Home/End selects the first/last match. Actions and mouse clicks use the filtered list, and refresh preserves the selected ID when it is still present. Token search stays in memory rather than dashboard preferences. The native dashboard uses subdued surfaces, background status badges and separate model name/ID/capability lines; exact model IDs remain unchanged for copying.
+
 Overview shows a red `Priority` label for enabled accounts with an urgent reset-expiry/weekly-refresh deadline, along with the latest reset outcome. Ordinary reserve accounts have no routing label. Account availability belongs to the server operator or standalone Settings; personal activation and custom account labels are not supported. After deactivation, recoverable continuations automatically move to an eligible active account. There are no manual priority, switching-rule or reset-redemption actions. Soft transfers preserve a healthy original account when complete context or an eligible replacement is unavailable. See [automatic selection](account-pool.md#ranking-and-switching).
 
-Green `Best` identifies the server-wide preferred general-pool candidate for a new dialog, not the account every request must use. Details explain the reason and approximate target share; model support, cache hints and existing affinity can change selection. `Clients: N` counts all users' unique API tokens with inference activity on that account in the past 15 minutes, plus tokens with running requests. It does not count connected applications or idle sockets. Details show your own locally decrypted token labels/IDs and stable anonymous aliases for other users' clients, with running-request counts and local last-request times. Other users' names, raw token IDs and user identities remain private. Older servers retain their explicitly user-scoped activity display. Use ↑/↓ or PageUp/PageDown to scroll, `r` to refresh and Esc to close.
+Green `Best` identifies the server-wide preferred general-pool candidate for a new dialog, not the account every request must use; model support, cache hints and existing affinity can change selection. `Clients: N` counts all users' unique API tokens with inference activity on that account in the past 15 minutes, plus tokens with running requests. It does not count connected applications or idle sockets. Details show subscription history, [operator-owned billing metadata](subscription-metadata.md), your own locally decrypted token labels/IDs and stable anonymous aliases for other users' clients, with running-request counts and local last-request times. Other users' names, raw token IDs and user identities remain private. Older servers retain their explicitly user-scoped activity display. Use ↑/↓ or PageUp/PageDown to scroll, `r` to refresh and Esc to close.
 
 Connection fields support Left/Right, Home/End (Ctrl-A/Ctrl-E), Backspace/Delete and Ctrl-U to clear. Up/Down selects a field. Esc cancels edits; Ctrl-C exits without saving. Remote settings are saved after a successful SSH check.
 

@@ -2,6 +2,13 @@
 
 ExetRouter uses `https://chatgpt.com/backend-api/codex` with ChatGPT Codex OAuth. OpenAI Platform keys and registered ChatGPT token-sharing grants are separate credentials. Backend compatibility does not guarantee stability or permission to share subscriptions.
 
+Configured [Platform routes](platform-api.md) additionally use the fixed public
+API with project working keys, independent context identities and health. Codex
+remains primary; the operator-controlled same-model API fallback is quota-only,
+never an authentication/backoff bypass. Platform compaction is unary public API
+compaction, not the Codex trigger described below. Non-generating native warmup
+is unsupported on HTTP-backed Platform routes and never becomes billed inference.
+
 Reviewed client revisions live in [protocol-sources.json](protocol-sources.json). The [October 2 audit](native-protocol-audit.md) covers Codex 0.160.0 and OpenCode V2 2.0.22; the earlier October 1 live matrix used 0.159.3/2.0.21. See [compatibility](compatibility.md#verified-versions-and-scope) for scope and [live testing](live-testing.md) for measured evidence. Inspect exact current release sources before changing adapters.
 
 ## Protocol
@@ -9,7 +16,7 @@ Reviewed client revisions live in [protocol-sources.json](protocol-sources.json)
 | Operation | Upstream behavior |
 | --- | --- |
 | OAuth | `https://auth.openai.com`, public client ID `app_EMoamEEZ73f0CkXaXp7hrann`; device usercode/token flow, PKCE `/oauth/token` exchange and refresh-token grant. Credentials use a separate AEAD key. |
-| Catalog | `/models?client_version=0.159.3`, selected bearer and `chatgpt-account-id`; 60-second cache and allowlisted metadata. |
+| Catalog | `/models?client_version=0.159.3`, selected bearer and `chatgpt-account-id`; 15-minute cache and allowlisted metadata. |
 | Responses | `/responses` over HTTP SSE or native WS. `store` defaults false; explicit options pass through for backend validation. |
 | Native WS | `OpenAI-Beta: responses_websockets=2026-02-06`; sequential `response.create`, including `generate=false` warmup; service ping/pong, bound pre-response peer silence to 90 seconds and retire recoverable idle sockets after 30 seconds/five minutes of age before a new submission on the same account. |
 | Compaction | One Responses SSE request ending with `compaction_trigger`; project exactly one opaque checkpoint as `response.compaction`. No separate upstream `/responses/compact`. |

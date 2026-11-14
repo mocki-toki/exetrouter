@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline fixtures for registry upgrades, validation and rollback."""
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -11,6 +12,15 @@ DIGEST = 'ghcr.io/mocki-toki/exetrouter@sha256:' + 'a' * 64
 
 
 class Upgrade(unittest.TestCase):
+    def test_image_schema_label_matches_compiled_migrations(self):
+        root = SCRIPT.parents[2]
+        source = (root / 'src/store.rs').read_text()
+        migrations = re.findall(r'include_str!\("migrations/\d+_[^"\n]+\.sql"\)', source)
+        dockerfile = (root / 'deploy/docker/Dockerfile').read_text()
+        label = re.search(r'io\.exetrouter\.schema-version="(\d+)"', dockerfile)
+        self.assertIsNotNone(label)
+        self.assertEqual(int(label.group(1)), len(migrations))
+
     def run_upgrade(self, fail=False, schema=7, version='0.2.0', pull_fail=False):
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary)

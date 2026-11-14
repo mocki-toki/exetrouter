@@ -1662,6 +1662,41 @@ fn chat_request(stream: bool) -> Value {
 }
 
 #[tokio::test]
+async fn model_catalog_cache_and_inference_routing_remain_fresh_for_fifteen_minutes() {
+    let fixture = Fixture::start(false).await;
+    fixture.upstream.models().await.unwrap();
+    assert_eq!(fixture.mock.catalog_requests.lock().unwrap().len(), 1);
+    fixture
+        .db
+        .call(|conn| {
+            conn.execute(
+                "UPDATE oauth_accounts SET catalog_updated_at=?1",
+                [chrono::Utc::now().timestamp() - 14 * 60],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    fixture.upstream.models().await.unwrap();
+    assert_eq!(fixture.post(request()).await.status(), 200);
+    assert_eq!(fixture.mock.catalog_requests.lock().unwrap().len(), 1);
+    fixture
+        .db
+        .call(|conn| {
+            conn.execute(
+                "UPDATE oauth_accounts SET catalog_updated_at=?1",
+                [chrono::Utc::now().timestamp() - 901],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(fixture.post(request()).await.status(), 200);
+    assert_eq!(fixture.mock.catalog_requests.lock().unwrap().len(), 2);
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn catalog_backoff_keeps_cached_healthy_inference_independent_of_slow_accounts() {
     let fixture = Fixture::start(false).await;
     fixture.first_profile(&["gpt-test"], "");
@@ -8025,7 +8060,7 @@ async fn expire_alternative_catalog(fixture: &Fixture) {
         .call(|conn| {
             conn.execute(
                 "UPDATE oauth_accounts SET catalog_updated_at=?1 WHERE id=2",
-                [chrono::Utc::now().timestamp() - 61],
+                [chrono::Utc::now().timestamp() - 901],
             )?;
             Ok(())
         })

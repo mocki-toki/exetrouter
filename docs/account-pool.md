@@ -2,9 +2,22 @@
 
 Each active ChatGPT OAuth account has independent encrypted credentials, generation, refresh lease, model catalog, quota observations and operation health. Adding the same upstream account updates its record instead of creating another pool entry.
 
+Operator-owned [subscription metadata](subscription-metadata.md) records an
+expected monthly billing day, subscription price and optional API allowance
+override. These values do not modify Codex quota, routing or reset eligibility,
+and never stand in for a verified Platform credit balance. Schema 17 is additive;
+follow the linked migration/rollback procedure.
+
 ## Selection
 
 The visible model list is a union of active account catalogs. An independent full-context request chooses an eligible account for its model, respecting current credentials/catalog, cooldown, operational pauses, quota observations and active load. Explicit cache/session hints provide a stable soft preference among eligible accounts. Stale quota is not treated as confirmed current capacity; percentages are not combined across subscriptions.
+
+Optional [Platform routing](platform-api.md) appends distinct reviewed API models
+and permits an operator-controlled same-model fallback after all eligible Codex
+quotas are exhausted. It uses separate project context identities and health;
+API failures never mutate OAuth state or Codex percentages. Cross-backend opaque
+state is not assumed portable, and operational/authentication failures are not
+quota exceptions. Accounting/client presence still identifies the parent account.
 
 HTTP text/tool requests can choose independently. Known user-scoped opaque context and a bound WebSocket retain account affinity during normal operation. Confirmed quota cooldown or a current 100% window with a future reset permits automatic account failover when another eligible account exists. Automatic ranking governs eligible alternatives; exhausted subscriptions are skipped when other capacity is available. If every subscription is at 100% without explicit cooldown, upstream credits may still permit a request on the original account. Stale observations never trigger transfer; fresh urgency may permit a safe soft transfer under the rules below.
 
@@ -24,11 +37,11 @@ Manual priorities and switching rules are removed from CLI/TUI and rejected by m
 
 A bounded runtime worker refreshes live usage and reset inventory independently of the dashboard. Metadata freshness is 60 seconds. Stale observations cannot create urgent mode, prove absence of a short window or authorize a reset. Unknown capacity is not zero. Diagnostics show availability, automatic reason/deadline/window class, threshold and the most recent reset outcome. The dashboard marks enabled urgent accounts with a red `Priority` label and omits the ordinary reserve label.
 
-Account details also show [hourly subscription history](quota-history.md): short
-and weekly windows share one seven-day chart with distinct colors and hourly
+Account details also show [ten-minute subscription history](quota-history.md): short
+and weekly windows share one seven-day chart with distinct colors and ten-minute
 values. Collection is bounded numeric metadata, independent of dashboards and
-token counts; missing observations remain gaps. Schema 14 requires the reviewed
-migration/rollback and history starts only after the server upgrade.
+token counts; missing observations remain gaps. Schema 16 requires the reviewed
+migration/rollback; finer history starts only after the server upgrade.
 
 The green `Best` marker is a server-wide recommendation, identical for every viewer at the same observation time. It uses shared account quotas, deadlines, health and operator availability, never personal preferences or the viewer's client count. It recommends the account with the greatest target share in the best eligible general-meter tier (stable ID breaks equal weights). During urgency it identifies the best unhinted candidate. It is not a global active-account switch: model support, cache hints and owned dialogs can choose differently. No marker is shown when the top tier's quota/window metadata is unknown or stale, or when every account is exhausted/unavailable. The recommendation does not submit inference. Target shares remain unknown for tied non-paced candidates, where cache affinity may choose any of them.
 

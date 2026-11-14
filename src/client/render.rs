@@ -1,5 +1,16 @@
 use serde_json::Value;
 
+pub(super) fn subscription_plan(account: &Value) -> Option<String> {
+    let price = account["subscription"]["plan_usd"]
+        .as_u64()
+        .filter(|n| *n > 0)?;
+    Some(match price {
+        20 => "Plus $20".into(),
+        100 | 200 => format!("Pro {}", crate::money::usd(price as f64)),
+        _ => format!("{}/month", crate::money::usd(price as f64)),
+    })
+}
+
 pub(super) fn safe(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -27,6 +38,51 @@ pub(super) fn date(v: &Value) -> String {
         })
         .unwrap_or_else(|| "—".into())
 }
+pub(super) fn short_date(v: &Value) -> String {
+    v.as_i64()
+        .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+        .map(|d| {
+            use chrono::Datelike;
+            let local = d.with_timezone(&chrono::Local);
+            local
+                .format(if local.year() == chrono::Local::now().year() {
+                    "%b %-d"
+                } else {
+                    "%b %-d, %Y"
+                })
+                .to_string()
+        })
+        .unwrap_or_else(|| "Unknown".into())
+}
+pub(super) fn token_dates(v: &Value) -> String {
+    let used = v["last_used_at"]
+        .as_i64()
+        .map(|at| {
+            let age = chrono::Utc::now().timestamp() - at;
+            match age {
+                0..=59 => "now".into(),
+                60..=3599 => format!("{}m ago", age / 60),
+                3600..=86399 => format!("{}h ago", age / 3600),
+                _ => short_date(&v["last_used_at"]),
+            }
+        })
+        .unwrap_or_else(|| "Never".into());
+    format!(
+        "Created {} · Expires {} · Used {used}",
+        short_date(&v["created_at"]),
+        short_date(&v["expires_at"])
+    )
+}
+pub(super) fn overview_summary(v: &Value) -> String {
+    format!(
+        "{}\nPer-user limit: Generations {} / {} • WebSockets {} / {}",
+        routing(v),
+        field(&v["limits"]["generations"], "active_for_user"),
+        field(&v["limits"]["generations"], "per_user_limit"),
+        field(&v["limits"]["websockets"], "active_for_user"),
+        field(&v["limits"]["websockets"], "per_user_limit")
+    )
+}
 pub(super) fn system_timezone() -> String {
     std::env::var("TZ")
         .ok()
@@ -42,6 +98,74 @@ pub(super) fn percent(v: &Value) -> String {
             format!("{}%", text.trim_end_matches('0').trim_end_matches('.'))
         })
         .unwrap_or_else(|| "—".into())
+}
+pub(super) fn subscription(v: &Value) -> String {
+    let mut lines = Vec::new();
+    if let Some(day) = v["billing_day"].as_u64() {
+        lines.push(format!("Billing day: {day} of every month"));
+    }
+    if let Some(price) = v["plan_usd"].as_u64() {
+        lines.push(format!(
+            "Subscription price: {}/month",
+            crate::money::usd(price as f64)
+        ));
+    }
+    if let Some(cents) = v["effective_api_budget_cents"].as_u64() {
+        lines.push(format!(
+            "Configured API allowance: {} (not a credit balance)",
+            crate::money::usd(cents as f64 / 100.)
+        ));
+    }
+    lines.join("\n")
+}
+pub(super) fn capability_label(id: &str) -> Option<&'static str> {
+    match id {
+        "reasoning" => Some("Reasoning"),
+        "tools" => Some("Tools"),
+        "image_input" => Some("Image input"),
+        "image_generation" => Some("Image generation"),
+        "image_editing" => Some("Image editing"),
+        _ => None,
+    }
+}
+pub(super) fn model_capabilities(row: &Value) -> String {
+    row["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str().and_then(capability_label))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+pub(super) fn model_matches(row: &Value, query: &str, capabilities: &[String]) -> bool {
+    let searchable = format!(
+        "{} {} {}",
+        field(row, "id"),
+        field(row, "display_name"),
+        model_capabilities(row)
+    )
+    .to_lowercase();
+    searchable.contains(&query.trim().to_lowercase())
+        && capabilities.iter().all(|id| {
+            row["capabilities"].as_array().is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|v| v.as_str() == Some(id.replace('-', "_").as_str()))
+            })
+        })
+}
+pub(super) fn model_rows(value: &Value) -> Vec<&Value> {
+    let rows = value["data"].as_array();
+    rows.into_iter()
+        .flatten()
+        .rev()
+        .filter(|row| row["source"] != "platform")
+        .chain(
+            rows.into_iter()
+                .flatten()
+                .filter(|row| row["source"] == "platform"),
+        )
+        .collect()
 }
 fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
     if rows.is_empty() {
@@ -85,14 +209,14 @@ fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
 pub(super) fn response(kind: &str, v: &Value) -> String {
     match kind {
         "models" => {
-            let rows = v["data"].as_array().into_iter().flatten().rev().map(|m| vec![field(m,"id"), field(m,"display_name"), field(&m["exetrouter"],"context_window")]).collect::<Vec<_>>();
-            format!("Available models\n\n{}\nExport metadata: exr models --json --format <codex-json|opencode-v1-json|opencode-v2-json>", table(&["MODEL","NAME","CONTEXT"], &rows))
+            let rows = model_rows(v).into_iter().map(|m| vec![field(m,"id"), crate::catalog::display_name(&field(m,"display_name")), field(&m["exetrouter"],"context_window"), model_capabilities(m)]).collect::<Vec<_>>();
+            format!("Available models\n\n{}\nExport metadata: exr models --json --format <codex-json|opencode-v1-json|opencode-v2-json>", table(&["MODEL","NAME","CONTEXT","CAPABILITIES"], &rows))
         }
         "tokens" => {
-            let rows = v.as_array().into_iter().flatten().map(|t| vec![field(t,"id"),field(t,"name"), token_status(t),date(&t["expires_at"]),date(&t["last_used_at"])]).collect::<Vec<_>>();
-            format!("Your API tokens\n\n{}",table(&["ID","NAME","STATUS","EXPIRES","LAST USED"], &rows))
+            let rows = v.as_array().into_iter().flatten().map(|t| vec![field(t,"id"),field(t,"name"), token_status(t),token_dates(t),match t["fast_mode"].as_bool(){Some(true)=>"Fast: Allow".into(),Some(false)=>"Fast: Block".into(),None=>String::new()}]).collect::<Vec<_>>();
+            format!("Your API tokens\n\n{}",table(&["ID","NAME","STATUS","DATES","FAST OVERRIDE"], &rows))
         }
-        "token" => format!("Token       {}\nName        {}\nStatus      {}\nFast mode   {}\nCreated     {}\nExpires     {}\nLast used   {}\n",field(v,"id"),field(v,"name"),token_status(v),match v["fast_mode"].as_bool() {Some(true)=>"on",Some(false)=>"off",None=>"inherit"},date(&v["created_at"]),date(&v["expires_at"]),date(&v["last_used_at"])),
+        "token" => format!("Token       {}\nName        {}\nStatus      {}\n{}{}\n",field(v,"id"),field(v,"name"),token_status(v),match v["fast_mode"].as_bool() {Some(true)=>"Fast: Allow\n",Some(false)=>"Fast: Block\n",None=>""},token_dates(v)),
         "revoke" => if v["revoked"].as_bool()==Some(true) { "Token revoked.\n".into() } else { "Token was already revoked or does not exist.\n".into() },
         "fast_mode" => format!("Token Fast mode: {}.\n", match v["fast_mode"].as_bool() {Some(true)=>"on",Some(false)=>"off",None=>"inherit"}),
         "token_enabled" => format!("Token {}.\n",if v["enabled"]==true {"enabled"} else {"disabled"}),
@@ -100,7 +224,12 @@ pub(super) fn response(kind: &str, v: &Value) -> String {
         "usage" => usage(v),
         "quota_history" => {
             let rows=v["points"].as_array().into_iter().flatten().map(|p|vec![date(&p["hour"]),field(p,"kind"),percent(&p["used_percent"]),date(&p["observed_at"])]).collect::<Vec<_>>();
-            format!("Subscription history\n{} → {}\n\n{}",date(&v["from_utc"]),date(&v["to_utc"]),table(&["HOUR","WINDOW","USED","OBSERVED"],&rows))
+            let mut text=format!("Subscription history\n{} → {}\n\n{}",date(&v["from_utc"]),date(&v["to_utc"]),table(&["HOUR","WINDOW","USED","OBSERVED"],&rows));
+            if v["platform"].is_object() {
+                let rows=v["platform"]["points"].as_array().into_iter().flatten().map(|p|vec![date(&p["from_utc"]),p["usd_nanos"].as_i64().map(|n|crate::money::usd(n as f64/1e9)).unwrap_or_else(||"Unknown".into()),date(&p["observed_at"])]).collect::<Vec<_>>();
+                text.push_str(&format!("\nPlatform API costs · daily organization-wide USD (not a remaining balance)\n{}",table(&["DAY","COST","OBSERVED"],&rows)));
+            }
+            text
         },
         "doctor" => format!("Server       Connected\nRouting      {}\nOAuth        {} active accounts · {} require login\nModels       {} · {}\nGenerations  {} active / {} per user\nWebSockets   {} active / {} per user",routing(v),field(&v["oauth"],"active_accounts"),field(&v["oauth"],"reauth_required_accounts"),field(&v["catalog"],"models"),catalog_status(v),field(&v["limits"]["generations"],"active_for_user"),field(&v["limits"]["generations"],"per_user_limit"),field(&v["limits"]["websockets"],"active_for_user"),field(&v["limits"]["websockets"],"per_user_limit")),
         _ => "Request completed.\n".into(),
@@ -160,6 +289,18 @@ fn usage(v: &Value) -> String {
             field(&row, "input_tokens"),
             field(&row, "output_tokens"),
             field(&row, "cached_input_tokens")
+        ));
+        text.push_str(&format!(
+            "  API equivalent {}{}\n",
+            row["estimated_usd"]
+                .as_f64()
+                .map(crate::money::usd)
+                .unwrap_or_else(|| "Unknown".into()),
+            if row["unpriced_requests"].as_u64().is_some_and(|n| n > 0) {
+                " (partial; unpriced requests excluded)"
+            } else {
+                ""
+            }
         ));
         if row["unknown_usage"].as_i64().unwrap_or(0) > 0 {
             text.push_str(&format!(
@@ -241,7 +382,7 @@ pub(super) fn terminal(text: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-fn token_status(v: &Value) -> String {
+pub(super) fn token_status(v: &Value) -> String {
     if !v["revoked_at"].is_null() {
         "revoked"
     } else if v["expires_at"]
@@ -286,6 +427,14 @@ pub(super) fn limits(v: &Value) -> String {
     }
     for account in &accounts {
         text.push_str(&format!("{}\n", field(account, "label")));
+        for line in subscription(&account["subscription"]).lines() {
+            text.push_str(&format!("  {line}\n"));
+        }
+        if account["platform"].is_object() {
+            for line in crate::platform::render(&account["platform"]).lines() {
+                text.push_str(&format!("  {line}\n"));
+            }
+        }
         if account["preference"].is_object() {
             let routing = account_routing(account);
             if !routing.is_empty() {
@@ -412,33 +561,15 @@ fn routing_current(account: &Value, now: i64) -> bool {
 pub(super) fn account_details(account: &Value, now: i64) -> String {
     let label = &account["label"];
     let mut text = format!("{}\n\n", safe(label.as_str().unwrap_or("Account")));
-    let fresh = routing_current(account, now);
-    if best_account(account, now) {
-        text.push_str("Best candidate for new dialogs\n");
+    if account["platform"].is_object() {
+        text.push_str(&crate::platform::render(&account["platform"]));
+        text.push_str("\n\n");
     }
-    let reason = match account["routing"]["reason"].as_str() {
-        Some("reset_expiring") => "Expiring reset credit",
-        Some("weekly_reset_soon") => "Weekly quota resets within 24 hours",
-        Some("short_window_first") => "Short-window capacity first",
-        Some("reserve") => "Weekly-only reserve",
-        _ => "Metadata unknown",
-    };
-    text.push_str(&format!(
-        "Routing: {reason}{}\n",
-        if fresh { "" } else { " (historical)" }
-    ));
-    if fresh {
-        if let Some(share) = account["routing"]["target_share_percent"].as_f64() {
-            text.push_str(&format!(
-                "Target share: {} (approximate)\n",
-                percent(&serde_json::json!(share))
-            ));
-        }
+    let billing = subscription(&account["subscription"]);
+    if !billing.is_empty() {
+        text.push_str(&billing);
+        text.push_str("\n\n");
     }
-    if let Some(deadline) = account["routing"]["deadline"].as_i64() {
-        text.push_str(&format!("Priority deadline: {}\n", date(&deadline.into())));
-    }
-    text.push('\n');
     let Some(count) = account["clients"]["count"].as_u64() else {
         text.push_str("Client activity unavailable on this server.");
         return text;
@@ -501,7 +632,7 @@ pub(super) fn account_details(account: &Value, now: i64) -> String {
     if account["clients"]["truncated"] == true {
         text.push_str("\nShowing at most 128 tokens, running requests first.\n");
     }
-    text.push_str("\nTokens disappear after 15 minutes without requests; running requests remain visible.\nOne token may represent multiple apps or appear on multiple accounts.\n\nModel availability and existing dialog affinity may change selection.\nWeights use percentages, not calibrated capacity across plans.");
+    text.push_str("\nTokens disappear after 15 minutes without requests; running requests remain visible.\nOne token may represent multiple apps or appear on multiple accounts.");
     text
 }
 

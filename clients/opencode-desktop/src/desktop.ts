@@ -61,7 +61,7 @@ export class DesktopClient {
     child.stdout.on("data", (chunk: string) => {
       if (this.child !== child) return
       this.buffer += chunk
-      if (Buffer.byteLength(this.buffer) > 1_048_576) { this.fail(); return }
+      if (Buffer.byteLength(this.buffer) > 8_388_608) { this.fail(); return }
       const end = this.buffer.indexOf("\n")
       if (end < 0) return
       const line = this.buffer.slice(0, end)

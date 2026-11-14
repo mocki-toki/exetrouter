@@ -1,0 +1,865 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+  <title>ExetRouter · Account &amp; Platform preview</title>
+  <style>
+    /* Offline adaptations of the extension's window.css and OpenCode v2.2.6:
+       packages/app/src/settings/{settings.css,search-field.tsx},
+       packages/ui/src/navigation/tabs/tabs-current.css,
+       packages/ui/src/{actions/{button,icon-button},data-display/badge,
+       forms/text-input,overlays/{dialog,tooltip}} and theme/themes/oc-2.json.
+       Semantic token fallbacks are local; there are no imported assets or fonts.
+       GUI guide: https://opencode.ai/docs/build/plugins/gui
+       Pinned source: https://github.com/anomalyco/opencode/tree/v2.2.6/packages/ui/src
+       Behavior reference: clients/opencode-desktop/src/{quota-history-view,
+       quota-history,time-range,resource-views,actions,action-menu,overview,ui}.
+       This is a visual study, not an SDK/Electron compatibility test. */
+    :root {
+      color-scheme: dark;
+      --font-family-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --v2-background-bg-deep: #080808; --v2-background-bg-base: #161616;
+      --v2-background-bg-layer-01: #242424; --v2-background-bg-layer-02: #2e2e2e;
+      --v2-background-bg-layer-03: #3a3a3a; --v2-background-bg-button-neutral: #ffffff0f;
+      --v2-text-text-base: #fafafa; --v2-text-text-muted: #aeaeae; --v2-text-text-faint: #808080;
+      --v2-border-border-base: #ffffff1a; --v2-border-border-muted: #ffffff14;
+      --v2-border-border-focus: #7698fd; --v2-overlay-simple-overlay-hover: #ffffff0f;
+      --v2-overlay-simple-overlay-scrim: #0009;
+      --v2-state-fg-success: #6bd586; --v2-state-bg-success: #14361d; --v2-state-border-success: #1d783c;
+      --v2-state-fg-warning: #f2cf76; --v2-state-bg-warning: #4b4025; --v2-state-border-warning: #ac8833;
+      --v2-state-fg-danger: #f17471; --v2-state-bg-danger: #461516; --v2-state-border-danger: #97252b;
+      --v2-elevation-raised: 0 2px 4px #0005, 0 0 0 .5px #ffffff29;
+      --v2-elevation-floating: 0 8px 16px #0005, 0 4px 8px #0005, 0 0 0 .5px #ffffff29;
+      --v2-elevation-overlay: 0 16px 32px #0005, 0 8px 16px #0005, 0 0 0 .5px #ffffff29;
+      --v2-elevation-button-neutral: 0 1px 2px #0006, 0 0 0 .5px #fff3, 0 -.5px 0 #ffffff1a;
+      --page: var(--v2-background-bg-deep); --base: var(--v2-background-bg-base);
+      --surface: var(--v2-background-bg-layer-01); --raised: var(--v2-background-bg-layer-02);
+      --hover: var(--v2-background-bg-layer-03); --border: var(--v2-border-border-base); --subtle: var(--v2-border-border-muted);
+      --text: var(--v2-text-text-base); --muted: var(--v2-text-text-muted); --faint: var(--v2-text-text-faint);
+      --green: var(--v2-state-fg-success); --green-bg: var(--v2-state-bg-success);
+      --amber: var(--v2-state-fg-warning); --amber-bg: var(--v2-state-bg-warning);
+      --red: var(--v2-state-fg-danger); --red-bg: var(--v2-state-bg-danger);
+      --blue: #84becb; --purple: #aaa3e6;
+      --v2-history-api: #ffa478;
+    }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --v2-background-bg-deep: #fafafa; --v2-background-bg-base: #fff;
+      --v2-background-bg-layer-01: #fafafa; --v2-background-bg-layer-02: #f2f2f2;
+      --v2-background-bg-layer-03: #eee; --v2-background-bg-button-neutral: #fff;
+      --v2-text-text-base: #161616; --v2-text-text-muted: #5c5c5c; --v2-text-text-faint: #808080;
+      --v2-border-border-base: #0000001a; --v2-border-border-muted: #00000014;
+      --v2-overlay-simple-overlay-hover: #0000000a; --v2-overlay-simple-overlay-scrim: #0006;
+      --v2-state-fg-success: #198b43; --v2-state-bg-success: #e7f9ea; --v2-state-border-success: #b8e9c1;
+      /* Use the same yellow ramp's darker stop for readable warning text on white. */
+      --v2-state-fg-warning: #8e7231; --v2-state-bg-warning: #fefaec; --v2-state-border-warning: #f7e5b5;
+      --v2-state-fg-danger: #b82d35; --v2-state-bg-danger: #fceceb; --v2-state-border-danger: #f2bbb7;
+      --v2-elevation-raised: 0 2px 4px #0000000a, 0 0 0 .5px #0000001f;
+      --v2-elevation-floating: 0 8px 16px #0000000a, 0 4px 8px #00000014, 0 0 0 .5px #0000001f;
+      --v2-elevation-overlay: 0 16px 32px #0000000a, 0 8px 16px #00000014, 0 0 0 .5px #0000001f;
+      --v2-elevation-button-neutral: 0 1px 1.5px #0000001a, 0 0 0 .5px #00000024;
+      --blue: #007d9b; --purple: #7152f4;
+      --v2-history-api: #b35624;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--page); color: var(--text); font: 440 13px/20px var(--font-family-sans); letter-spacing: -.04px; -webkit-font-smoothing: antialiased; }
+    button, input, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    button, select { -webkit-tap-highlight-color: transparent; }
+    button:disabled { cursor: default; opacity: .38; }
+    :is(button, input, select, time, [tabindex]):focus-visible { outline: 2px solid var(--v2-border-border-focus); outline-offset: 2.5px; }
+    button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 28px; border: 0; border-radius: 6px; background: var(--v2-background-bg-button-neutral); box-shadow: var(--v2-elevation-button-neutral); padding: 0 11px; font-weight: 530; line-height: 20px; }
+    button:not(:disabled):hover { background-image: linear-gradient(var(--v2-overlay-simple-overlay-hover), var(--v2-overlay-simple-overlay-hover)); }
+    h1, h2, h3, h4, p, dl { margin: 0; }
+    h1 { font-size: 14px; font-weight: 600; }
+    h2, h3, h4, strong { font-size: inherit; font-weight: 530; }
+    svg { display: block; flex-shrink: 0; }
+    code { font: inherit; overflow-wrap: anywhere; }
+    .muted, .caption { color: var(--muted); }
+    .caption { font-size: 12px; line-height: 16px; }
+    .tiny { font-size: 11px; }
+    .green { color: var(--green); }
+    .amber { color: var(--amber); }
+    .number { font-variant-numeric: tabular-nums; }
+    .inline { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .between { justify-content: space-between; }
+    .wrap { flex-wrap: wrap; }
+    .spacer { flex: 1; }
+    .icon-button { flex: none; width: 24px; height: 24px; min-height: 0; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--muted); }
+    .preview-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; max-width: 1100px; margin: auto; padding: 20px 24px; }
+    .preview-heading { display: flex; flex-direction: column; gap: 2px; }
+    .preview-kicker { color: var(--muted); font-size: 11px; }
+    .preview-pages { display: flex; gap: 6px; }
+    .preview-pages button { min-height: 24px; border: .5px solid transparent; border-radius: 4px; background: transparent; box-shadow: none; color: var(--muted); padding: 0 6px; font-size: 12px; font-weight: 440; }
+    .preview-pages button[aria-pressed="true"] { background: var(--surface); border-color: var(--subtle); color: var(--text); }
+    .preview-options { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+    .preview-options select { height: 28px; max-width: 170px; border: .5px solid var(--border); border-radius: 6px; background: var(--base); padding: 0 8px; font-size: 12px; }
+    .preview-options button { font-size: 12px; }
+    .preview-options button[aria-pressed="true"] { background: var(--hover); }
+    .stage { padding: 12px 20px 32px; }
+    .panel { container-type: inline-size; width: 600px; max-width: 100%; margin: auto; border-radius: 8px; background: var(--base); box-shadow: var(--v2-elevation-raised); overflow: hidden; }
+    body[data-narrow] .panel { width: 380px; }
+    .panel-toolbar { display: flex; min-width: 0; align-items: center; padding-right: 4px; border-bottom: .5px solid var(--border); }
+    .tabs { display: flex; flex: 1; min-width: 0; align-items: center; gap: 6px; height: 32px; padding: 0 8px; overflow-x: auto; scrollbar-width: none; }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab { flex: none; height: 32px; padding: 6px; border: 0; border-radius: 0; border-bottom: 1px solid transparent; background: transparent; box-shadow: none; color: var(--muted); font-size: 13px; font-weight: 440; line-height: 16px; white-space: nowrap; }
+    .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--faint); }
+    .tab:not(:disabled):hover { color: var(--text); background: transparent; }
+    .tab:focus-visible { outline-offset: -2px; border-radius: 4px; }
+    .pane { padding: 16px 16px 24px; outline: none; }
+    .router-status { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+    .compact-stats { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; margin: 12px 0 24px; font-size: 12px; line-height: 16px; color: var(--muted); }
+    .compact-stats > span { white-space: nowrap; }
+    .compact-stats strong { color: var(--text); }
+    .account-list { display: grid; gap: 8px; }
+    .account { min-width: 0; padding: 16px; border-radius: 8px; background: var(--surface); box-shadow: inset 0 0 0 .5px var(--subtle); }
+    .account-header { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+    .account-title { min-width: 0; flex: 1; }
+    .account-title h3 { overflow-wrap: anywhere; line-height: 16px; }
+    .account-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 16px; }
+    .badge { display: inline-flex; height: 16px; align-items: center; justify-content: center; gap: 4px; padding: 0 4px; border: .5px solid var(--border); border-radius: 2px; background: var(--raised); color: var(--muted); font-size: 11px; font-weight: 530; line-height: 1; letter-spacing: .05px; white-space: nowrap; }
+    .badge.success { color: var(--green); background: var(--green-bg); border-color: var(--v2-state-border-success); }
+    .badge.warning { color: var(--amber); background: var(--amber-bg); border-color: var(--v2-state-border-warning); }
+    .badge.danger { color: var(--red); background: var(--red-bg); border-color: var(--v2-state-border-danger); }
+    .best { color: var(--green); font-size: 12px; font-weight: 530; }
+    .quota-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 16px; }
+    .quota { min-width: 0; font-size: 12px; line-height: 16px; --meter: var(--green); }
+    .quota.low { --meter: var(--amber); }
+    .quota.empty { --meter: var(--red); }
+    .quota.historical { --meter: var(--faint); }
+    .quota strong { color: var(--meter); }
+    .track { height: 4px; margin: 8px 0; overflow: hidden; border-radius: 2px; background: var(--hover); }
+    .track span { display: block; height: 100%; width: var(--fill); border-radius: inherit; background: var(--meter); }
+    .quota-note { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; color: var(--muted); font-size: 12px; }
+    .api-quota { margin-top: 16px; }
+    .api-quota .caption { font-size: 11px; }
+    .account-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 12px; line-height: 16px; }
+    .account-footer .dot { width: 5px; height: 5px; }
+    .notice { margin: 0 0 12px; padding: 12px; border: .5px solid var(--subtle); border-radius: 6px; background: var(--surface); color: var(--muted); font-size: 12px; }
+    .notice.warning { color: var(--amber); background: var(--amber-bg); border-color: var(--v2-state-border-warning); }
+    .notice p + p { margin-top: 4px; }
+    .search { display: flex; min-width: 0; align-items: center; gap: 8px; height: 36px; margin-bottom: 24px; padding: 0 4px 0 14px; border-radius: 6px; background: color-mix(in oklab, var(--raised) 60%, transparent); color: var(--faint); }
+    .search:is(:hover, :focus-within) { background: var(--raised); }
+    .search:focus-within { outline: 1px solid var(--v2-border-border-focus); outline-offset: -1px; }
+    .search input { flex: 1; width: 100%; height: 100%; min-width: 0; padding: 0; border: 0; outline: 0; background: transparent; font-size: 13px; font-weight: 440; }
+    .search input::placeholder { color: var(--muted); opacity: 1; }
+    .search input::-webkit-search-cancel-button { appearance: none; }
+    .search .icon-button { width: 28px; height: 28px; }
+    .group-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .group-heading h3 { font-size: 13px; line-height: 16px; }
+    .model-group + .model-group { margin-top: 24px; }
+    .feature-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -8px; }
+    .feature-filters button { min-height: 24px; padding: 0 6px; border: .5px solid transparent; border-radius: 4px; background: transparent; box-shadow: none; color: var(--muted); font-size: 12px; font-weight: 440; line-height: 16px; }
+    .feature-filters button:is(:hover, [aria-pressed="true"]) { color: var(--text); background: var(--hover); border-color: var(--subtle); }
+    .filter-summary { margin: 10px 0 20px; color: var(--muted); font-size: 11px; }
+    .model-group > .caption { margin: -3px 0 12px; }
+    .model-list { min-width: 0; padding: 0 16px; background: var(--surface); box-shadow: inset 0 0 0 .5px var(--subtle); border-radius: 8px; }
+    .model-row { display: flex; min-width: 0; align-items: center; gap: 16px; padding: 16px 0; }
+    .model-row + .model-row { border-top: .5px solid var(--border); }
+    .model-copy { min-width: 0; flex: 1; }
+    .model-copy h4 { font-size: 13px; line-height: 16px; }
+    .model-id { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 16px; }
+    .capabilities { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; }
+    .capability { display: inline-flex; align-items: center; gap: 4px; min-height: 16px; padding: 0 4px; border-radius: 2px; background: var(--raised); color: var(--muted); font-size: 11px; line-height: 16px; letter-spacing: .05px; }
+    .capability svg { width: 11px; height: 11px; }
+    .model-context { align-self: flex-start; text-align: right; white-space: nowrap; font-size: 12px; line-height: 16px; }
+    .model-context span { display: block; font-size: 11px; color: var(--muted); }
+    .model-row > .icon-button { align-self: flex-start; }
+    .empty-search { padding: 30px 0; text-align: center; color: var(--muted); }
+    .models-footnote { margin-top: 20px; }
+    .tokens-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 24px; }
+    .tokens-toolbar .search { flex: 1; min-width: min(100%, 160px); margin-bottom: 0; }
+    .tokens-toolbar > button { min-height: 24px; border-radius: 4px; padding-inline: 9px; font-size: 13px; }
+    .token-list { padding-inline: 16px; box-shadow: inset 0 0 0 .5px var(--subtle); border-radius: 8px; background: var(--surface); }
+    .token-row { padding-block: 16px; min-width: 0; }
+    .token-row + .token-row { border-top: .5px solid var(--border); }
+    .token-header { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+    .token-header h3 { min-width: 0; max-width: 100%; margin-right: auto; line-height: 16px; overflow-wrap: anywhere; }
+    .token-id { display: flex; min-width: 0; align-items: center; gap: 5px; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 16px; }
+    .token-id .icon-button { width: 20px; height: 20px; border-radius: 4px; }
+    .token-dates { display: flex; align-items: baseline; gap: 6px; margin-top: 6px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .token-dates time, .token-dates .never { color: var(--text); }
+    .token-dates > i { color: var(--faint); font-style: normal; }
+    @container (max-width: 360px) { .token-dates { font-size: 10px; gap: 4px; } .token-list { padding-inline: 12px; } }
+    .preview-footer { max-width: 600px; margin: 0 auto 28px; padding: 0 20px; color: var(--faint); font-size: 11px; text-align: center; }
+    .preview-footer p + p { margin-top: 4px; }
+    dialog { width: 640px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 48px); padding: 0; overflow: hidden; border: 0; border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: var(--v2-elevation-overlay); }
+    dialog[open] { display: flex; flex-direction: column; }
+    dialog::backdrop { background: var(--v2-overlay-simple-overlay-scrim); }
+    .dialog-header { display: flex; align-items: flex-start; gap: 16px; flex-shrink: 0; padding: 16px; }
+    .dialog-header h2 { font-size: 15px; line-height: 20px; letter-spacing: -.13px; overflow-wrap: anywhere; }
+    .dialog-header p { margin-top: 4px; font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
+    .dialog-header .icon-button { width: 20px; height: 20px; border-radius: 4px; }
+    .dialog-header > div { flex: 1; min-width: 0; }
+    .dialog-body { min-height: 0; padding: 0 16px 16px; overflow-y: auto; overscroll-behavior: contain; }
+    .dialog-footer { display: flex; justify-content: flex-end; padding: 16px; flex-shrink: 0; }
+    .detail-quotas { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+    .detail-codex-quotas { display: grid; min-width: 0; grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: 12px; }
+    .detail-quota { padding: 16px; background: var(--base); box-shadow: inset 0 0 0 .5px var(--subtle); border-radius: 8px; }
+    .detail-quota .quota > .inline { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .detail-quota .quota strong { font-size: 20px; }
+    .detail-quota .quota strong span { font-size: 11px; font-weight: 400; color: var(--muted); }
+    .detail-quota .quota-note { font-size: 11px; }
+    .detail-section { margin-top: 24px; }
+    .detail-section > .inline { flex-wrap: wrap; gap: 8px; }
+    .detail-section > h3 { margin-bottom: 16px; line-height: 16px; }
+    .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 24px; }
+    .fields dt { color: var(--muted); font-size: 12px; line-height: 16px; margin-bottom: 4px; }
+    .fields dd { margin: 0; font-size: 12px; font-weight: 500; line-height: 16px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .fields .wide { grid-column: 1 / -1; }
+    .detail-section > .caption:last-child { margin-top: 12px; }
+    .history { padding: 16px; background: var(--base); box-shadow: inset 0 0 0 .5px var(--subtle); border-radius: 8px; }
+    .history svg { width: 100%; height: auto; }
+    .history svg:focus-visible { outline: 2px solid var(--v2-border-border-focus); outline-offset: 2px; border-radius: 4px; }
+    .history-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .history-heading p { margin-top: 6px; }
+    .range-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+    .range-periods { display: flex; flex-wrap: wrap; gap: 6px; }
+    .range-periods button { height: 24px; min-height: 0; padding: 0 6px; border: .5px solid transparent; border-radius: 4px; background: transparent; box-shadow: none; color: var(--muted); font-size: 13px; font-weight: 440; line-height: 16px; }
+    .range-periods button:is(:hover, [aria-pressed="true"]) { border-color: var(--subtle); background: var(--hover); color: var(--text); }
+    .range-dates { margin-bottom: 12px; }
+    .chart-plot { position: relative; margin-top: 8px; }
+    .chart-cursor { pointer-events: none; }
+    .chart-cursor line { stroke: var(--faint); stroke-width: 1; vector-effect: non-scaling-stroke; }
+    .chart-cursor circle { stroke: var(--base); stroke-width: 1; }
+    .chart-tooltip { position: absolute; top: 12px; z-index: 1; width: max-content; max-width: calc(100% - 16px); padding: 12px; border-radius: 8px; background: var(--raised); box-shadow: var(--v2-elevation-floating); font-size: 12px; line-height: 16px; pointer-events: none; }
+    .chart-tooltip > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin-top: 8px; }
+    .chart-tooltip i { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; }
+    .history-api-readout { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+    .history-api-readout .caption { font-size: 11px; overflow-wrap: anywhere; }
+    .history-latest { margin-top: 8px; }
+    .action-menu { position: fixed; z-index: 100; width: 188px; max-width: calc(100vw - 16px); padding: 4px; border: .5px solid var(--border); border-radius: 8px; background: var(--raised); box-shadow: var(--v2-elevation-floating); }
+    .action-menu button { display: flex; justify-content: space-between; width: 100%; height: 28px; min-height: 0; padding: 4px 8px; border: 0; border-radius: 4px; background: transparent; box-shadow: none; text-align: left; font-size: 13px; font-weight: 440; }
+    .action-menu button:is(:hover, :focus-visible) { outline: none; background: var(--hover); }
+    .action-menu hr { border: 0; border-top: .5px solid var(--border); margin: 4px; }
+    .danger-text { color: var(--red); }
+    .token-form { display: grid; gap: 16px; }
+    .token-form label { display: flex; flex-direction: column; gap: 8px; }
+    .token-form input { width: 100%; min-width: 0; height: 28px; padding: 0 8px; border: .5px solid var(--border); border-radius: 6px; background: var(--base); font-size: 13px; }
+    .token-form .notice { margin: 0; }
+    #token-dialog { width: 480px; }
+    #token-dialog .dialog-footer { gap: 8px; }
+    .button-danger { background: var(--red-bg); color: var(--red); box-shadow: inset 0 0 0 .5px var(--v2-state-border-danger); }
+    .clipboard-notice .inline { margin-top: 8px; }
+    .clipboard-notice button { min-height: 24px; padding-inline: 9px; font-size: 12px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 8px; font-size: 11px; line-height: 16px; color: var(--muted); }
+    .legend i { display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; }
+    .history text { font: 11px var(--font-family-sans); fill: var(--muted); }
+    .history line { stroke: var(--border); stroke-width: .6; }
+    .client-row { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; font-size: 12px; }
+    .client-row > div { min-width: 0; }
+    .client-row > .badge { flex: none; }
+    .client-row + .client-row { border-top: .5px solid var(--subtle); }
+    .client-row p + p { margin-top: 3px; }
+    .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 10; width: max-content; max-width: calc(100vw - 32px); padding: 9px 12px; border-radius: 6px; background: var(--surface); box-shadow: var(--v2-elevation-floating); font-size: 12px; }
+    .tooltip { position: fixed; inset: auto; z-index: 1000; width: max-content; max-width: min(320px, calc(100vw - 16px)); margin: 0; padding: 5px 6px; border: 0; border-radius: 4px; background: var(--surface); color: var(--text); box-shadow: var(--v2-elevation-floating); font-size: 11px; font-weight: 530; line-height: 12px; letter-spacing: .05px; overflow-wrap: anywhere; pointer-events: none; }
+    @container (min-width: 512px) { .pane { padding-inline: 24px; } }
+    @container (max-width: 420px) { .quota-grid { grid-template-columns: 1fr; } }
+    @container (max-width: 340px) { .router-status { flex-wrap: wrap; gap: 4px 8px; } .router-status .spacer { display: none; } .router-status > :last-child { width: 100%; padding-left: 14px; } .compact-stats { font-size: 11px; gap: 4px; } }
+    @media (max-width: 680px) {
+      .preview-bar { padding: 18px 20px 10px; gap: 14px; }
+      .preview-heading { width: 100%; }
+      .preview-options { margin-left: 0; flex-wrap: wrap; }
+      .preview-pages { flex-wrap: wrap; }
+      .stage { padding: 12px 12px 24px; }
+      dialog { max-height: calc(100dvh - 24px); }
+    }
+    @media (max-width: 420px) { .fields, .detail-codex-quotas { grid-template-columns: 1fr; } .model-row { gap: 8px; } }
+    @media (prefers-reduced-motion: no-preference) { .panel { transition: width .18s ease; } }
+  </style>
+</head>
+<body>
+  <header class="preview-bar">
+    <div class="preview-heading"><span class="preview-kicker">OpenCode Desktop · Offline study</span><h1>ExetRouter · Platform accounts</h1></div>
+    <nav class="preview-pages" aria-label="Preview screens">
+      <button type="button" data-screen="overview" aria-pressed="true">Overview</button>
+      <button type="button" data-screen="account" aria-pressed="false">Account details</button>
+      <button type="button" data-screen="tokens" aria-pressed="false">Tokens</button>
+      <button type="button" data-screen="models" aria-pressed="false">Models</button>
+    </nav>
+    <div class="preview-options">
+      <label><span class="tiny muted">Scenario </span><select id="scenario" aria-label="Preview scenario"><option value="ready">Ready</option><option value="fallback">API fallback active</option><option value="missing">API not connected</option><option value="stale">Historical API data</option></select></label>
+      <button type="button" id="width-toggle" aria-pressed="false">Narrow</button>
+      <button type="button" id="theme-toggle" aria-label="Switch to light theme">Light</button>
+      <label id="clipboard-control" hidden><span class="tiny muted">Clipboard demo </span><select id="clipboard-mode" aria-label="Synthetic clipboard outcome"><option value="success">Success</option><option value="unavailable">Unavailable before issue</option><option value="failed">Copy fails after issue</option></select></label>
+    </div>
+  </header>
+
+  <main class="stage">
+    <div class="panel" aria-label="ExetRouter extension preview">
+      <!-- Like the extension, start at its toolbar; the host owns the branded panel tab. -->
+      <div class="panel-toolbar">
+      <div class="tabs" role="tablist" aria-label="ExetRouter views">
+        <button type="button" class="tab" id="tab-overview" role="tab" aria-selected="true" aria-controls="overview" tabindex="0">Overview</button>
+        <button type="button" class="tab" role="tab" aria-selected="false" disabled title="Unchanged in this proposal">Usage</button>
+        <button type="button" class="tab" id="tab-tokens" role="tab" aria-selected="false" aria-controls="tokens" tabindex="-1">Tokens</button>
+        <button type="button" class="tab" id="tab-models" role="tab" aria-selected="false" aria-controls="models" tabindex="-1">Models</button>
+        <button type="button" class="tab" role="tab" aria-selected="false" disabled title="Server credentials are managed by the operator">Settings</button>
+      </div>
+      <button type="button" class="icon-button" id="refresh" aria-label="Refresh demo snapshot" title="Refresh demo snapshot"></button>
+      </div>
+
+      <section class="pane" id="overview" role="tabpanel" aria-labelledby="tab-overview">
+        <div class="router-status"><span class="dot"></span><strong>ExetRouter ready</strong><span class="spacer"></span><span class="caption tiny" id="updated">Updated just now</span></div>
+        <p class="compact-stats"><span>Per-user limit:</span> <span>Generations <strong class="number">1 / 8</strong></span> <span aria-hidden="true">•</span> <span>WebSockets <strong class="number">1 / 8</strong></span></p>
+        <div id="scenario-notice" class="notice" hidden></div>
+        <div class="account-list" id="account-list"></div>
+      </section>
+
+      <section class="pane" id="tokens" role="tabpanel" aria-labelledby="tab-tokens" hidden>
+        <div class="notice warning clipboard-notice" id="clipboard-notice" hidden><p>Demo token issued, but not copied. Do not issue it again. No real secret exists.</p><div class="inline wrap"><button type="button" id="retry-copy">Retry copying</button><button type="button" id="discard-copy">Discard secret</button></div><p class="caption" id="clipboard-feedback" hidden></p></div>
+        <div class="tokens-toolbar"><div class="search" role="search" aria-label="Token search"><span id="token-search-icon" aria-hidden="true"></span><input type="search" id="token-search" aria-label="Search tokens" placeholder="Search tokens…" autocomplete="off" spellcheck="false"><button type="button" class="icon-button" data-clear="token-search" aria-label="Clear token search" title="Clear token search" hidden></button></div><button type="button" id="create-token">Create token</button></div>
+        <div class="token-list" id="token-list"></div>
+        <p class="empty-search" id="empty-token-search" hidden>No matching tokens.</p>
+        <p class="caption models-footnote">Synthetic demo actions only. No credential is generated, displayed or copied. Hover or focus dates for full timestamps. Fast is shown only for an Allow or Block override.</p>
+      </section>
+
+      <section class="pane" id="models" role="tabpanel" aria-labelledby="tab-models" hidden>
+        <div class="search" role="search" aria-label="Model search"><span id="search-icon" aria-hidden="true"></span><input type="search" id="model-search" aria-label="Search models" placeholder="Search models or capabilities…" autocomplete="off" spellcheck="false"><button type="button" class="icon-button" data-clear="model-search" aria-label="Clear model search" title="Clear model search" hidden></button></div>
+        <div class="feature-filters" role="group" aria-label="Filter models by capability">
+          <button type="button" data-capability="all" aria-pressed="true">All</button>
+          <button type="button" data-capability="Reasoning" aria-pressed="false">Reasoning</button>
+          <button type="button" data-capability="Tools" aria-pressed="false">Tools</button>
+          <button type="button" data-capability="Image input" aria-pressed="false">Image input</button>
+          <button type="button" data-capability="Image generation" aria-pressed="false">Image generation</button>
+          <button type="button" data-capability="Image editing" aria-pressed="false">Image editing</button>
+        </div>
+        <p class="filter-summary" id="filter-summary" role="status" aria-live="polite"></p>
+        <div id="model-groups"></div>
+        <p class="empty-search" id="empty-search" hidden>No matching models.</p>
+        <p class="caption models-footnote">Model IDs are unchanged. Capability badges distinguish image input from image generation. This preview uses illustrative model metadata, not a live availability check.</p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="preview-footer"><p>Interactive design only · Synthetic accounts, balances and history · No network requests</p><p>OpenCode 2.2.6 component source study · Not an Electron compatibility check</p></footer>
+
+  <dialog id="account-dialog" aria-labelledby="account-title" aria-describedby="account-subtitle">
+    <div class="dialog-header"><div><h2 id="account-title">Account details</h2><p class="caption" id="account-subtitle">Subscription history, billing and API credits</p></div><button type="button" class="icon-button" id="close-dialog" aria-label="Close account details"></button></div>
+    <div class="dialog-body" id="account-body"></div>
+    <div class="dialog-footer"><button type="button" id="done-dialog">Done</button></div>
+  </dialog>
+  <dialog id="token-dialog" aria-labelledby="token-dialog-title" aria-describedby="token-dialog-description">
+    <div class="dialog-header"><div><h2 id="token-dialog-title"></h2><p id="token-dialog-description" class="caption"></p></div><button type="button" class="icon-button" id="close-token-dialog" aria-label="Close token action" title="Close token action"></button></div>
+    <form id="token-form" class="dialog-body token-form" novalidate></form>
+    <div class="dialog-footer"><button type="button" id="cancel-token-dialog">Cancel</button><button type="submit" form="token-form" id="submit-token-dialog"></button></div>
+  </dialog>
+  <div id="token-menu" class="action-menu" role="menu" aria-label="Token actions" hidden></div>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <div class="tooltip" id="tooltip" role="tooltip" popover="manual" hidden></div>
+
+  <script>
+    "use strict";
+    // Fixed synthetic fixtures. This file never reads credentials or calls an API.
+    const accounts = [
+      { id: "a", email: "north-studio@example.com", plan: "Pro $100", day: 8, ordinal: "8th", budget: 100, spent: 8.4, short: 68, weekly: 42, hours: 8, shortReset: "Nov 12, 6:20 PM", weeklyReset: "Nov 15, 9:00 AM", period: "Nov 8 – Dec 8", nextBilling: "Dec 8", resets: 2, clients: 2 },
+      { id: "b", email: "river-workshop@example.com", plan: "Pro $200", day: 6, ordinal: "6th", budget: 200, spent: 24.75, short: null, weekly: 78, hours: null, weeklyReset: "Nov 19, 11:30 AM", period: "Nov 6 – Dec 6", nextBilling: "Dec 6", resets: 1, clients: 1 },
+      { id: "c", email: "quiet-orbit@example.com", plan: "Plus $20", day: 1, ordinal: "1st", budget: null, spent: null, short: 91, weekly: 64, hours: 5, shortReset: "Nov 12, 5:10 PM", weeklyReset: "Nov 17, 2:00 PM", period: "Nov 1 – Dec 1", nextBilling: "Dec 1", resets: 0, clients: 0 }
+    ];
+    const modelData = [
+      { id: "gpt-6.1-sol", name: "GPT 6.1 Sol", source: "Codex", context: "400K", caps: ["Reasoning", "Tools", "Image input"], fallback: true },
+      { id: "gpt-6-astra", name: "GPT 6 Astra", source: "Codex", context: "400K", caps: ["Reasoning", "Tools", "Image input"], fallback: true },
+      { id: "gpt-5.6-sol", name: "GPT 5.6 Sol", source: "Codex", context: "400K", caps: ["Reasoning", "Tools", "Image input"], fallback: false },
+      { id: "gpt-image-2", name: "GPT Image 2", source: "Codex", context: null, caps: ["Image generation", "Image editing"], fallback: false },
+      { id: "gpt-5-mini", name: "GPT 5 Mini", source: "Platform", context: "400K", caps: ["Reasoning", "Tools", "Image input"] },
+      { id: "gpt-5-nano", name: "GPT 5 Nano", source: "Platform", context: "400K", caps: ["Reasoning", "Tools", "Image input"] },
+      { id: "gpt-4.1", name: "GPT 4.1", source: "Platform", context: "1M", caps: ["Tools", "Image input"] }
+    ];
+    const tokens = [
+      { name: "Workstation", id: "tok_demo_workstation", fast: null, created: "Nov 8", createdISO: "2026-11-08T09:15:00", createdFull: "Nov 8, 2026, 9:15 AM", expires: "Dec 8", expiresISO: "2026-12-08T09:15:00", expiresFull: "Dec 8, 2026, 9:15 AM", used: "2m ago", usedISO: "2026-11-12T14:28:00", usedFull: "Nov 12, 2026, 2:28 PM" },
+      { name: "CI runner", id: "tok_demo_ci_runner", fast: true, created: "Nov 6", createdISO: "2026-11-06T11:30:00", createdFull: "Nov 6, 2026, 11:30 AM", expires: "Feb 4", expiresISO: "2027-02-04T11:30:00", expiresFull: "Feb 4, 2027, 11:30 AM", used: "1h ago", usedISO: "2026-11-12T13:30:00", usedFull: "Nov 12, 2026, 1:30 PM" },
+      { name: "Tablet", id: "tok_demo_tablet", fast: false, created: "Nov 1", createdISO: "2026-11-01T18:00:00", createdFull: "Nov 1, 2026, 6:00 PM", expires: "Dec 1", expiresISO: "2026-12-01T18:00:00", expiresFull: "Dec 1, 2026, 6:00 PM", used: null, usedFull: "This token has never been used" }
+    ];
+    const paths = {
+      chevron: '<path d="m9 5 7 7-7 7"/>',
+      close: '<path d="m6 6 12 12M18 6 6 18"/>',
+      refresh: '<path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 18 17"/>',
+      search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/>',
+      copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/>',
+      reasoning: '<path d="M9 18h6M9 21h6M8 14a7 7 0 1 1 8 0l-1 2H9z"/>',
+      tools: '<path d="m14 7 3 3 4-4a6 6 0 0 1-8 8l-7 7-3-3 7-7A6 6 0 0 1 18 3z"/>',
+      image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1"/><path d="m3 17 5-5 4 4 3-3 6 6"/>',
+      generate: '<rect x="3" y="8" width="13" height="13" rx="2"/><path d="m3 18 4-4 3 3 3-3 3 3M18 2v6M15 5h6"/>',
+      more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>'
+    };
+    const $ = (selector) => document.querySelector(selector);
+    const all = (selector) => [...document.querySelectorAll(selector)];
+    const icon = (name, size = 16) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]}</svg>`;
+    const money = (value) => value == null ? "Unknown" : "$" + (Math.abs(value) >= 1000 ? new Intl.NumberFormat("en", {notation:"compact", maximumFractionDigits:1}).format(value).replace("K","k") : Number.isInteger(value) ? value : value.toFixed(2));
+    const scenario = () => $("#scenario").value;
+    const escapeHTML = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+    const demoNow = new Date(2026, 10, 12, 14, 30).getTime();
+    const fullDate = (at) => new Date(at).toLocaleString("en", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+    const shortDate = (at) => new Date(at).toLocaleDateString("en", { month: "short", day: "numeric" });
+    const historyPeriods = [{ value: "24h", label: "24 hours", days: 1 }, { value: "7d", label: "7 days", days: 7 }, { value: "30d", label: "30 days", days: 30 }, { value: "90d", label: "90 days", days: 90 }];
+    const historyStates = new Map();
+    let nextToken = 4;
+    let pendingClipboard;
+    let tokenDialogAction;
+    let tokenMenuTrigger;
+    const historyState = (id) => {
+      if (!historyStates.has(id)) historyStates.set(id, { period: "7d", before: undefined, selected: undefined });
+      return historyStates.get(id);
+    };
+    let currentAccount = accounts[0];
+    let activeView = "overview";
+    const selectedCapabilities = new Set();
+    let toastTimer;
+    let tooltipTarget;
+    let tooltipDescription;
+
+    // The native host tooltip is reproduced locally, including keyboard focus.
+    // A manual popover keeps it above a modal dialog without changing focus.
+    function hideTooltip() {
+      const tip = $("#tooltip");
+      if (tip.matches(":popover-open")) tip.hidePopover();
+      tip.hidden = true;
+      if (tooltipTarget) {
+        if (tooltipDescription === null) tooltipTarget.removeAttribute("aria-describedby");
+        else tooltipTarget.setAttribute("aria-describedby", tooltipDescription);
+      }
+      tooltipTarget = undefined;
+    }
+    function showTooltip(target) {
+      if (!target?.title || target === tooltipTarget) return;
+      hideTooltip();
+      tooltipTarget = target;
+      tooltipDescription = target.getAttribute("aria-describedby");
+      target.setAttribute("aria-describedby", `${tooltipDescription || ""} tooltip`.trim());
+      const tip = $("#tooltip");
+      tip.textContent = target.title;
+      tip.hidden = false;
+      tip.showPopover?.();
+      const r = target.getBoundingClientRect();
+      const t = tip.getBoundingClientRect();
+      tip.style.left = `${Math.max(8, Math.min(r.left + (r.width - t.width) / 2, innerWidth - t.width - 8))}px`;
+      tip.style.top = `${r.top > t.height + 16 ? r.top - t.height - 8 : Math.min(r.bottom + 8, innerHeight - t.height - 8)}px`;
+    }
+
+    function field(label, value, wide = false) {
+      return `<div${wide ? ' class="wide"' : ""}><dt>${label}</dt><dd>${value}</dd></div>`;
+    }
+    function quota(label, remaining, reset, detail = false) {
+      const n = scenario() === "fallback" ? 0 : remaining;
+      const tone = n === 0 ? "empty" : n <= 50 ? "low" : "";
+      return `<div class="quota ${tone}"><div class="inline between"><span>${label}</span><strong class="number">${n}%${detail ? ' <span>left</span>' : ' <span class="muted">left</span>'}</strong></div><div class="track" role="meter" aria-label="${label} quota remaining" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${n}" style="--fill:${n}%"><span></span></div><div class="quota-note"><span tabindex="0" title="Resets ${reset} · observed Nov 12, 2026, 2:30 PM · current synthetic observation">Resets ${reset}</span></div></div>`;
+    }
+    function apiQuota(a, detail = false) {
+      if (!a.budget || scenario() === "missing") return "";
+      const remaining = a.budget - a.spent;
+      const historical = scenario() === "stale";
+      const amount = `${money(remaining)} / ${money(a.budget)}`;
+      return `<div class="quota ${historical ? "historical" : ""}"><div class="inline between wrap"><span>Platform API${detail ? "" : ' <span class="badge">Reserve</span>'}</span><strong class="number" title="Estimated remaining budget; not a verified credit balance">${detail ? money(remaining) + ' <span>left</span>' : amount + ' <span class="muted">left</span>'}</strong></div><div class="track" role="meter" aria-label="Estimated API budget remaining in USD" aria-valuemin="0" aria-valuemax="${a.budget}" aria-valuenow="${remaining}" aria-valuetext="${money(remaining)} of ${money(a.budget)} estimated remaining" style="--fill:${remaining / a.budget * 100}%"><span></span></div><div class="quota-note"><span>${detail ? money(a.spent) + " used / " + money(a.budget) : "Estimated · current billing cycle"}</span><span>${historical ? "Historical" : detail ? "Estimated" : ""}</span></div></div>`;
+    }
+    function renderOverview() {
+      const state = scenario();
+      const notice = $("#scenario-notice");
+      notice.hidden = state !== "fallback" && state !== "stale";
+      notice.className = `notice${state === "stale" ? " warning" : ""}`;
+      notice.innerHTML = state === "fallback" ? '<strong>Using Platform API · GPT 6.1 Sol</strong><p>All Codex quotas exhausted. Same-model reserve using available Platform funds.</p>' : state === "stale" ? '<strong>API cost observations are historical</strong><p>Showing the last observation. Platform determines current fund availability; costs are not a remaining balance.</p>' : "";
+      $("#account-list").innerHTML = accounts.map((a) => `<article class="account">
+        <header class="account-header"><div class="account-title"><h3>${a.email}</h3><div class="account-meta"><span>${a.plan}</span>
+          ${a.id === "a" && state !== "fallback" ? '<span class="best" tabindex="0" title="Best candidate for new dialogs. Existing dialogs retain their account affinity.">Best</span>' : ""}
+          ${state === "fallback" && a.id === "a" ? '<span class="badge success">API in use</span>' : ""}
+        </div></div><button type="button" class="icon-button" data-account="${a.id}" aria-label="View ${a.email} details" title="Account details">${icon("chevron")}</button></header>
+        <div class="quota-grid">${a.short !== null ? quota(a.hours + " hour", a.short, a.shortReset) : ""}${quota("Weekly", a.weekly, a.weeklyReset)}</div>
+        ${a.budget && state !== "missing" ? '<div class="api-quota">' + apiQuota(a) + '</div>' : ""}
+        <footer class="account-footer"><span tabindex="0" title="Reset credits: ${a.resets} available${a.resets ? ' · next expires Nov 30, 2026, 11:59 PM' : ''} · observed Nov 12, 2026, 2:30 PM. Expiring reset credits are used automatically.">${a.resets} ${a.resets === 1 ? "reset" : "resets"}${a.resets ? " · expires Nov 30" : ""}</span>
+          <span class="inline" tabindex="0" title="Recently active API tokens across all users: ${a.clients} · observed Nov 12, 2026, 2:30 PM">${a.clients ? '<span class="dot"></span>' : ""}${a.clients} ${a.clients === 1 ? "client" : "clients"}</span></footer>
+      </article>`).join("");
+      all("[data-account]").forEach((button) => button.addEventListener("click", () => openAccount(button.dataset.account)));
+    }
+    function history(a) {
+      return `<section class="detail-section" id="subscription-history" aria-label="Subscription history for ${a.email}"></section>`;
+    }
+    function apiHistory(a, times) {
+      // Separate synthetic organization-cost observations, not Codex percentages.
+      // Costs accumulate in three-hour batches and restart at the billing day.
+      const cycleStart = (at) => {
+        const date = new Date(at);
+        return new Date(date.getFullYear(), date.getMonth() - (date.getDate() < a.day ? 1 : 0), a.day).getTime();
+      };
+      const elapsedNow = Math.max(1, (demoNow - cycleStart(demoNow)) / 3600000);
+      const lastAvailable = scenario() === "stale" ? demoNow - 86400000 : demoNow;
+      const observations = times.map((at) => {
+        const observedAt = at + 120000;
+        const bucket = Math.floor(at / 600000);
+        if (observedAt > lastAvailable || (bucket + a.id.charCodeAt(0) * 3) % 137 < 9) return null;
+        const elapsed = Math.floor((at - cycleStart(at)) / 10800000) * 3;
+        const costs = Math.min(a.budget, a.spent * (elapsed / elapsedNow) ** 1.08);
+        const remaining = Math.round((a.budget - costs) * 100) / 100;
+        return { remaining, allowance: a.budget, observedAt };
+      });
+      return { kind: "api", label: "Platform API", color: "var(--v2-history-api)", observations,
+        values: observations.map((point) => point === null ? null : point.remaining / point.allowance * 100) };
+    }
+    function historyData(a) {
+      const state = historyState(a.id);
+      const period = historyPeriods.find((p) => p.value === state.period);
+      const interval = (period.days <= 7 ? 10 : 60) * 60000;
+      const to = state.before ?? demoNow;
+      const from = to - period.days * 86400000;
+      const times = Array.from({ length: (to - from) / interval }, (_, i) => from + i * interval);
+      const seed = a.id.charCodeAt(0);
+      const makeLine = (kind, label, color, current, hours) => ({ kind, label, color, values: times.map((at) => {
+        const bucket = Math.floor(at / 600000);
+        // Deterministic missing intervals, shared across periods; never join across them.
+        if ((bucket + seed) % 113 < 5 || kind === "weekly" && (bucket + seed) % 211 < 3) return null;
+        const ago = (demoNow - 600000 - at) / 3600000;
+        return Math.round(((current + ago / hours * 100) % 100 + 100) % 100);
+      }) });
+      const series = [];
+      if (a.short !== null) series.push(makeLine("short", a.hours + " hour", "var(--blue)", a.short, a.hours));
+      series.push(makeLine("weekly", "Weekly", "var(--purple)", a.weekly, 168));
+      if (a.budget && scenario() !== "missing") series.push(apiHistory(a, times));
+      const latest = series.reduce((at, line) => {
+        const index = line.values.findLastIndex((value) => value !== null);
+        return index < 0 ? at : Math.max(at ?? 0, line.observations?.[index]?.observedAt ?? times[index]);
+      }, undefined);
+      return { from, to, times, series, interval, period, latest };
+    }
+    const chartX = (index, count) => 44 + index / Math.max(1, count - 1) * 600;
+    const chartY = (left) => 204 - left / 100 * 184;
+    function historyPaths(line, count) {
+      const paths = [];
+      let points = [];
+      const flush = () => {
+        if (points.length === 1) paths.push(`<circle cx="${points[0][0]}" cy="${points[0][1]}" r="2.5" fill="${line.color}"/>`);
+        else if (points.length) paths.push(`<polyline points="${points.map((p) => p.join(",")).join(" ")}" fill="none" stroke="${line.color}" stroke-width="1.7" stroke-linejoin="round"/>`);
+        points = [];
+      };
+      line.values.forEach((value, i) => { if (value === null) flush(); else points.push([chartX(i, count).toFixed(2), chartY(value).toFixed(2)]); });
+      flush();
+      return paths.join("");
+    }
+    function renderHistory() {
+      const a = currentAccount, state = historyState(a.id), data = historyData(a);
+      const root = $("#subscription-history");
+      const ticks = [...new Set(Array.from({ length: 5 }, (_, i) => Math.round(i / 4 * (data.times.length - 1))))];
+      const hasAPI = data.series.some((line) => line.kind === "api");
+      root.innerHTML = `<header class="history-heading"><div><h3>Subscription history</h3><p class="caption">${data.interval === 600000 ? "10-minute" : "Hourly"} illustrative observations · unavailable intervals remain gaps${hasAPI ? ' · API: estimated remaining allowance' : ''}</p></div></header>
+        <div class="range-toolbar"><div class="range-periods" role="group" aria-label="Subscription history period">${historyPeriods.map((p) => `<button type="button" data-history-period="${p.value}" aria-pressed="${p.value === state.period}">${p.label}</button>`).join("")}</div><div class="inline"><button type="button" class="icon-button" id="history-previous" aria-label="Previous subscription history interval" title="Previous interval">${icon("chevron").replace('viewBox="0 0 24 24"', 'viewBox="0 0 24 24" style="transform:rotate(180deg)"')}</button><button type="button" class="icon-button" id="history-next" aria-label="Next subscription history interval" title="Next interval" ${state.before === undefined ? "disabled" : ""}>${icon("chevron")}</button></div></div>
+        <p class="caption range-dates">${fullDate(data.from)} – ${fullDate(data.to)} · ${data.period.label}</p>
+        <div class="history"><div class="inline between caption"><span>Quota left</span><span>0–100%</span></div><div class="chart-plot"><svg id="history-chart" viewBox="0 0 668 240" role="img" tabindex="0" aria-label="${data.period.label} subscription quota remaining${hasAPI ? ', including estimated Platform API dollars normalized to the configured allowance' : ''}. Left and right inspect intervals; Home and End select first and latest; Escape clears the cursor.">
+          ${[0, 25, 50, 75, 100].map((v) => `<line x1="44" x2="644" y1="${chartY(v)}" y2="${chartY(v)}"/><text x="34" y="${chartY(v) + 4}" text-anchor="end">${v}%</text>`).join("")}
+          ${data.series.map((line) => `<g data-window="${line.kind}">${historyPaths(line, data.times.length)}</g>`).join("")}
+          ${ticks.map((i) => `<text x="${chartX(i, data.times.length)}" y="231" text-anchor="${i === 0 ? "start" : i === data.times.length - 1 ? "end" : "middle"}">${state.period === "24h" ? new Date(data.times[i]).toLocaleTimeString("en", { hour: "numeric", minute: "2-digit" }) : shortDate(data.times[i])}</text>`).join("")}
+          <g class="chart-cursor" id="history-cursor"></g></svg><div id="history-tooltip" class="chart-tooltip" role="status" hidden></div></div>
+          <div class="legend">${data.series.map((line) => `<span><i style="background:${line.color}"></i>${line.label}</span>`).join("")}</div><p class="caption history-latest">Latest observation · ${data.latest === undefined ? "Not observed" : fullDate(data.latest)}</p></div>`;
+      all("[data-history-period]").forEach((button) => button.addEventListener("click", () => { state.period = button.dataset.historyPeriod; state.before = undefined; renderHistory(); $("[data-history-period='" + state.period + "']").focus(); }));
+      $("#history-previous").addEventListener("click", () => { state.before = data.from; renderHistory(); $("#history-previous").focus(); });
+      $("#history-next").addEventListener("click", () => { const next = data.to + data.period.days * 86400000; state.before = next >= demoNow ? undefined : next; renderHistory(); $(state.before === undefined ? "#history-previous" : "#history-next").focus(); });
+      $(".range-periods").addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const i = historyPeriods.findIndex((p) => p.value === state.period);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? 3 : (i + (event.key === "ArrowLeft" ? 3 : 1)) % 4;
+        $("[data-history-period='" + historyPeriods[next].value + "']").click();
+      });
+      const chart = $("#history-chart");
+      chart.addEventListener("pointermove", (event) => { const r = chart.getBoundingClientRect(); const i = Math.round(Math.max(0, Math.min(1, ((event.clientX - r.left) / r.width * 668 - 44) / 600)) * (data.times.length - 1)); state.selected = data.times[i]; renderHistoryCursor(data); });
+      const clear = () => { state.selected = undefined; renderHistoryCursor(data); };
+      chart.addEventListener("pointerleave", clear);
+      chart.addEventListener("blur", clear);
+      chart.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End", "Escape"].includes(event.key)) return;
+        event.preventDefault(); event.stopPropagation();
+        if (event.key === "Escape") { clear(); return; }
+        const current = data.times.indexOf(state.selected), last = data.times.length - 1;
+        const next = event.key === "Home" ? 0 : event.key === "End" ? last : Math.max(0, Math.min(last, (current < 0 ? last : current) + (event.key === "ArrowLeft" ? -1 : 1)));
+        state.selected = data.times[next]; renderHistoryCursor(data);
+      });
+      renderHistoryCursor(data);
+    }
+    function renderHistoryCursor(data) {
+      const state = historyState(currentAccount.id), index = data.times.indexOf(state.selected);
+      const tip = $("#history-tooltip"), cursor = $("#history-cursor");
+      tip.hidden = index < 0;
+      if (index < 0) { cursor.innerHTML = ""; return; }
+      const x = chartX(index, data.times.length);
+      cursor.innerHTML = `<line x1="${x}" x2="${x}" y1="20" y2="204"/>${data.series.filter((line) => line.values[index] !== null).map((line) => `<circle cx="${x}" cy="${chartY(line.values[index])}" r="3.5" fill="${line.color}"/>`).join("")}`;
+      tip.innerHTML = `<strong>${fullDate(state.selected)}</strong>${data.series.map((line) => {
+        const point = line.observations?.[index];
+        const readout = line.kind === "api" ? `<span class="history-api-readout">${point ? `<span class="number">${money(point.remaining)} / ${money(point.allowance)} left</span><span class="caption">Estimated · observed ${fullDate(point.observedAt)}</span>` : '<span>Not observed</span><span class="caption">Estimated allowance · no observation in this interval</span>'}</span>` : `<span>${line.values[index] === null ? "Not observed" : line.values[index] + "% left"}</span>`;
+        return `<div data-history-readout="${line.kind}"><span><i style="background:${line.color}"></i>${line.label}</span>${readout}</div>`;
+      }).join("")}`;
+      const width = $(".chart-plot").getBoundingClientRect().width;
+      // Follow the host's 24px cursor offset; keep a readable tooltip on narrow plots.
+      tip.style.left = x <= 334 ? `${Math.min(width - tip.offsetWidth - 4, x / 668 * width + 24)}px` : "auto";
+      tip.style.right = x > 334 ? `${Math.min(width - tip.offsetWidth - 4, (1 - x / 668) * width + 24)}px` : "auto";
+    }
+    function renderAccount() {
+      const a = currentAccount;
+      const restoreChartFocus = document.activeElement?.id === "history-chart";
+      const connected = a.budget && scenario() !== "missing";
+      $("#account-title").textContent = a.email;
+      $("#account-subtitle").textContent = connected ? "Subscription history, billing and API credits" : "Subscription history and billing";
+      const apiDetails = connected ? `<section class="detail-section">
+        <div class="inline between" style="margin-bottom:14px"><h3>Platform API</h3><span class="badge ${scenario() === "stale" ? "warning" : "success"}">${scenario() === "stale" ? "Historical" : "Connected"}</span></div>
+        <dl class="fields">${field("Monthly allowance", money(a.budget) + ' <span class="muted">· display reference</span>')}${field("Estimated difference", money(a.budget - a.spent))}${field("Reported API spend", money(a.spent))}${field("Billing period", a.period)}${field("Display estimate", "Configured reference minus organization costs", true)}${field("Observation", scenario() === "stale" ? '<span class="amber">Historical · Nov 11, 2:30 PM</span>' : "Nov 12, 2:30 PM")}${field("Spending policy", "All available Platform funds")}${field("Automatic use", scenario() === "fallback" ? '<span class="green">In use · same model</span>' : "Reserve after all Codex quotas")}${field("Funding source", "Free and purchased funds")}</dl>
+        <p class="caption">A display estimate, not a remaining balance or a spending cap. Platform determines available funds and rejects requests when they are exhausted.</p>
+      </section>` : "";
+      $("#account-body").innerHTML = `
+        <div class="detail-quotas"><div class="detail-codex-quotas">${a.short !== null ? '<div class="detail-quota">' + quota(a.hours + " hour", a.short, a.shortReset, true) + '</div>' : ""}<div class="detail-quota">${quota("Weekly", a.weekly, a.weeklyReset, true)}</div></div>${connected ? '<div class="detail-quota api-detail-quota">' + apiQuota(a, true) + '</div>' : ""}</div>
+        ${history(a)}
+        <section class="detail-section"><h3>Subscription &amp; billing</h3>
+          <dl class="fields">${field("Plan", a.plan)}${field("Billing day", a.ordinal + " of every month")}${field("Next expected renewal", a.nextBilling)}${field("Billing source", "Set by server operator")}</dl>
+          <p class="caption">The billing day is separate from Codex quota resets. Renewal dates are expected dates, not a confirmed payment or charge time.</p>
+        </section>
+        ${apiDetails}
+        ${connected ? `<section class="detail-section"><h3>Platform access</h3><dl class="fields">${field("Admin API Key", "Configured · server only")}${field("Project / service account", "exetrouter / exetrouter")}${field("Working API key", 'exetrouter <span class="badge success">Active</span>')}${field("Key expires", "Dec 12, 2:30 PM · 30 day lifetime")}</dl><p class="caption">Secrets never appear here. The server maintains the working key; expired keys are replaced, not reactivated.</p></section>` : ""}
+        <section class="detail-section"><h3>Clients · ${a.clients}</h3>
+          <p class="caption">Recently active tokens across all users · observed Nov 12, 2:30 PM</p>
+          ${a.clients ? '<div class="client-row"><div><strong>Workstation</strong><p class="caption"><code>tok_demo_workstation</code></p><p class="caption tiny" tabindex="0" title="Last request Nov 12, 2026, 2:30 PM">Your token · last request just now</p></div><span class="badge success">1 running</span></div>' : '<p class="caption">No recent inference requests.</p>'}
+          ${a.clients > 1 ? '<div class="client-row"><div><strong>Shared client 8D4A</strong><p class="caption"><code>tok_demo_shared_8d4a</code></p><p class="caption tiny" tabindex="0" title="Last request Nov 12, 2026, 2:26 PM">Other user · last request 4 minutes ago</p></div><span class="badge">Idle</span></div>' : ""}
+          <p class="caption">Tokens disappear after 15 minutes without requests; running requests stay visible. One token may represent multiple apps or appear on multiple accounts.</p>
+        </section>`;
+      renderHistory();
+      if (restoreChartFocus) $("#history-chart").focus({ preventScroll: true });
+    }
+    function capIcon(cap) { return cap === "Reasoning" ? "reasoning" : cap === "Tools" ? "tools" : cap === "Image input" ? "image" : "generate"; }
+    function renderModels() {
+      const query = $("#model-search").value.trim().toLowerCase();
+      const filtered = modelData.filter((m) => `${m.id} ${m.name} ${m.source} ${m.caps.join(" ")}`.toLowerCase().includes(query) && [...selectedCapabilities].every((capability) => m.caps.includes(capability)));
+      all("[data-capability]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.capability === "all" ? selectedCapabilities.size === 0 : selectedCapabilities.has(button.dataset.capability))));
+      $("#filter-summary").textContent = `${filtered.length} ${filtered.length === 1 ? "model" : "models"}`;
+      $("#empty-search").hidden = filtered.length > 0;
+      $("#model-groups").innerHTML = ["Codex", "Platform"].map((source) => {
+        const rows = filtered.filter((m) => m.source === source);
+        if (!rows.length) return "";
+        return `<section class="model-group" aria-label="${source} models"><header class="group-heading"><h3>${source === "Codex" ? "Codex models" : "Additional Platform models"}</h3><span class="badge">${rows.length}</span></header>${source === "Platform" ? '<p class="caption">API credits · available by explicit model selection</p>' : '<p class="caption">Subscription quotas first · API reserve where supported</p>'}<div class="model-list">${rows.map((m) => `<article class="model-row"><div class="model-copy"><h4>${m.name}</h4><code class="model-id">${m.id}</code><div class="capabilities">${m.caps.map((c) => `<span class="capability">${icon(capIcon(c), 11)}${c}</span>`).join("")}${m.fallback ? '<span class="capability" title="Illustrative: requires the identical model on Platform and compatible context">API reserve</span>' : ""}</div></div>${m.context ? '<div class="model-context number">' + m.context + '<span>context</span></div>' : ""}<button type="button" class="icon-button" data-copy="${m.id}" aria-label="Copy ${m.name} model ID" title="Copy model ID">${icon("copy")}</button></article>`).join("")}</div></section>`;
+      }).join("");
+      all("[data-copy]").forEach((button) => button.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(button.dataset.copy); toast("Model ID copied"); }
+        catch { toast("Clipboard unavailable. Select and copy the model ID below its name."); }
+      }));
+    }
+    function selectView(view) {
+      activeView = view;
+      $("#clipboard-control").hidden = view !== "tokens";
+      closeTokenMenu();
+      for (const name of ["overview", "tokens", "models"]) {
+        $("#" + name).hidden = name !== view;
+        $("#tab-" + name).setAttribute("aria-selected", String(name === view));
+        $("#tab-" + name).tabIndex = name === view ? 0 : -1;
+      }
+      selectPreview(view);
+    }
+    function selectPreview(screen) { all("[data-screen]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.screen === screen))); }
+    function openAccount(id) {
+      currentAccount = accounts.find((a) => a.id === id) || accounts[0];
+      renderAccount();
+      $("#account-body").scrollTop = 0;
+      if (!$("#account-dialog").open) $("#account-dialog").showModal();
+      selectPreview("account");
+    }
+    function toast(message) {
+      clearTimeout(toastTimer);
+      $("#toast").textContent = message;
+      $("#toast").hidden = false;
+      toastTimer = setTimeout(() => { $("#toast").hidden = true; }, 3500);
+    }
+    function renderTokens() {
+      const query = $("#token-search").value.trim().toLowerCase();
+      const filtered = tokens.filter((token) => `${token.name} ${token.id}`.toLowerCase().includes(query));
+      $("#empty-token-search").hidden = filtered.length > 0;
+      $("#token-list").hidden = filtered.length === 0;
+      $("#token-list").innerHTML = filtered.map((token) => `<article class="token-row"><header class="token-header"><h3>${escapeHTML(token.name)}</h3><span class="badge ${(token.status ?? "Active") === "Active" ? "success" : ""}">${token.status ?? "Active"}</span>${token.fast === null ? "" : '<span class="badge">Fast: ' + (token.fast ? "Allow" : "Block") + '</span>'}<button type="button" class="icon-button" data-token-action="${token.id}" aria-haspopup="menu" aria-expanded="false" aria-controls="token-menu" aria-label="Actions for ${escapeHTML(token.name)}" title="Token actions">${icon("more")}</button></header><div class="token-id"><code>${token.id}</code><button type="button" class="icon-button" data-token-copy="${token.id}" aria-label="Copy ${escapeHTML(token.name)} token ID" title="Copy token ID">${icon("copy", 12)}</button></div><div class="token-dates"><span>Created <time tabindex="0" datetime="${token.createdISO}" title="Created ${token.createdFull}" aria-label="Created ${token.createdFull}">${token.created}</time></span><i aria-hidden="true">·</i><span>Expires <time tabindex="0" datetime="${token.expiresISO}" title="Expires ${token.expiresFull}" aria-label="Expires ${token.expiresFull}">${token.expires}</time></span><i aria-hidden="true">·</i><span>Used ${token.used ? '<time tabindex="0" datetime="' + token.usedISO + '" title="Last used ' + token.usedFull + '" aria-label="Last used ' + token.usedFull + '">' + token.used + '</time>' : '<span class="never" tabindex="0" title="' + token.usedFull + '">Never</span>'}</span></div></article>`).join("");
+      all("[data-token-action]").forEach((button) => {
+        button.addEventListener("click", () => openTokenMenu(button));
+        button.addEventListener("keydown", (event) => { if (event.key === "ArrowDown") { event.preventDefault(); openTokenMenu(button); } });
+      });
+      all("[data-token-copy]").forEach((button) => button.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(button.dataset.tokenCopy); toast("Token ID copied"); }
+        catch { toast("Clipboard unavailable. Select and copy the visible token ID."); }
+      }));
+      $("#clipboard-notice").hidden = !pendingClipboard;
+      $("#create-token").disabled = !!pendingClipboard;
+    }
+    function closeTokenMenu(restoreFocus = false) {
+      $("#token-menu").hidden = true;
+      tokenMenuTrigger?.setAttribute("aria-expanded", "false");
+      if (restoreFocus) tokenMenuTrigger?.focus();
+    }
+    function openTokenMenu(trigger, fast = false) {
+      closeTokenMenu(); hideTooltip();
+      tokenMenuTrigger = trigger;
+      trigger.setAttribute("aria-expanded", "true");
+      const token = tokens.find((t) => t.id === trigger.dataset.tokenAction);
+      const menu = $("#token-menu");
+      const manageable = ["Active", "Disabled"].includes(token.status ?? "Active");
+      menu.setAttribute("aria-label", fast ? "Fast mode policy" : `Actions for ${token.name}`);
+      const item = (action, label, disabled = false, extra = "") => `<button type="button" role="menuitem" data-menu-action="${action}" ${disabled ? "disabled" : ""} ${extra}>${label}</button>`;
+      menu.innerHTML = fast ? item("back", "‹ Token actions") + '<hr>' + [null, true, false].map((value) => `<button type="button" role="menuitemradio" aria-checked="${token.fast === value}" data-fast="${value}" ${manageable ? "" : "disabled"}>${value === null ? "Default" : value ? "Allow" : "Block"}<span aria-hidden="true">${token.fast === value ? "✓" : ""}</span></button>`).join("") :
+        item("rename", "Rename") + item("fast", "Fast mode <span aria-hidden=\"true\">›</span>", !manageable, 'aria-haspopup="menu"') + item(token.status === "Disabled" ? "enable" : "disable", token.status === "Disabled" ? "Enable" : "Disable", !manageable) + '<hr>' + item("rotate", "Rotate", !!pendingClipboard) + item("revoke", "Revoke", token.status === "Revoked", 'class="danger-text"');
+      menu.hidden = false;
+      const r = trigger.getBoundingClientRect();
+      menu.style.left = `${Math.max(8, Math.min(innerWidth - 196, r.right - 188))}px`;
+      menu.style.top = `${Math.max(8, Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8))}px`;
+      all("#token-menu button").forEach((button) => button.addEventListener("click", () => {
+        const action = button.dataset.menuAction;
+        if (action === "fast" || action === "back") { openTokenMenu(trigger, action === "fast"); return; }
+        closeTokenMenu(true);
+        openTokenAction(button.hasAttribute("data-fast") ? "fast" : action, token, button.dataset.fast === "null" ? null : button.dataset.fast === "true");
+      }));
+      menu.onkeydown = (event) => {
+        const items = all("#token-menu button:not(:disabled)"), index = items.indexOf(document.activeElement);
+        if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) { event.preventDefault(); const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (index + (event.key === "ArrowUp" ? items.length - 1 : 1)) % items.length; items[next].focus(); }
+        if (event.key === "Escape") { event.preventDefault(); closeTokenMenu(true); }
+        if (event.key === "Tab") closeTokenMenu(true);
+        if (event.key === "ArrowRight" && document.activeElement?.dataset.menuAction === "fast") { event.preventDefault(); openTokenMenu(trigger, true); }
+        if (event.key === "ArrowLeft" && fast) { event.preventDefault(); openTokenMenu(trigger); $("[data-menu-action='fast']").focus(); }
+      };
+      menu.querySelector("button:not(:disabled)").focus();
+    }
+    function openTokenAction(action, token, fastValue) {
+      const names = { create: "Create token", rename: "Rename token", fast: "Change Fast mode?", enable: "Enable token?", disable: "Disable token temporarily?", rotate: "Rotate token?", revoke: "Revoke token?", discard: "Discard uncopied secret?" };
+      const policy = fastValue === null ? "Default" : fastValue ? "Allow" : "Block";
+      const descriptions = {
+        create: "Demo only. A synthetic metadata row is added; no secret is generated or copied.",
+        rename: "Change this demo label without changing the synthetic token ID.",
+        fast: `${token?.name}: ${policy.toLowerCase()}. Default inherits server policy; Allow and Block override it.`,
+        enable: `${token?.name} will be enabled in this demo.`, disable: `${token?.name} will stop authorizing new requests in this demo. You can enable it later.`,
+        rotate: `Replace ${token?.name} in this demo. The old synthetic ID is retired. No secret exists.`,
+        revoke: `${token?.name} will be revoked in this demo. This action cannot be undone.`,
+        discard: "This discards the demo's pending copy state. No actual secret was retained."
+      };
+      tokenDialogAction = { action, token, fastValue };
+      $("#token-dialog-title").textContent = names[action];
+      $("#token-dialog-description").textContent = descriptions[action];
+      $("#submit-token-dialog").textContent = ({ create: "Create and copy (demo)", rename: "Save name", fast: "Save", enable: "Enable", disable: "Disable", rotate: "Rotate and copy (demo)", revoke: "Revoke", discard: "Discard secret" })[action];
+      $("#submit-token-dialog").classList.toggle("button-danger", ["rotate", "revoke", "discard"].includes(action));
+      $("#token-form").innerHTML = `${["create", "rename"].includes(action) ? `<label>Token name<input id="token-name" aria-label="Token name" value="${escapeHTML(token?.name ?? "")}" autocomplete="off"></label>` : ""}${action === "create" ? '<label>Expires in days<input id="token-days" aria-label="Expires in days" value="90" inputmode="numeric" autocomplete="off"></label><p class="caption">Choose 1–365 days. Clipboard support is checked before issuance. Use the outer Clipboard demo control to preview failures.</p>' : ""}<p class="notice warning" id="token-action-error" role="alert" hidden></p>`;
+      $("#token-dialog").showModal();
+      validateTokenAction();
+    }
+    function validateTokenAction() {
+      if (!$("#token-action-error").hidden) { $("#submit-token-dialog").disabled = true; return; }
+      const name = $("#token-name")?.value;
+      const days = $("#token-days")?.value;
+      const validName = name === undefined || !!name.trim() && new TextEncoder().encode(name.trim()).length <= 80 && !/[\u0000-\u001f\u007f]/.test(name);
+      $("#submit-token-dialog").disabled = !validName || days !== undefined && (!/^\d+$/.test(days) || Number(days) < 1 || Number(days) > 365);
+    }
+    function applyTokenAction(event) {
+      event.preventDefault(); validateTokenAction();
+      if ($("#submit-token-dialog").disabled) return;
+      const { action, token, fastValue } = tokenDialogAction;
+      const issues = action === "create" || action === "rotate";
+      if (issues && $("#clipboard-mode").value === "unavailable") {
+        $("#token-action-error").textContent = "Demo: no clipboard helper available. Nothing was issued or rotated. Close and change the Clipboard demo outcome before trying again.";
+        $("#token-action-error").hidden = false; $("#submit-token-dialog").disabled = true; return;
+      }
+      if (action === "create") {
+        const expires = demoNow + Number($("#token-days").value) * 86400000;
+        tokens.push({ name: $("#token-name").value.trim(), id: `tok_demo_created_${nextToken++}`, status: "Active", fast: null, created: shortDate(demoNow), createdISO: new Date(demoNow).toISOString(), createdFull: fullDate(demoNow), expires: shortDate(expires), expiresISO: new Date(expires).toISOString(), expiresFull: fullDate(expires), used: null, usedFull: "This token has never been used" });
+      }
+      if (action === "rename") token.name = $("#token-name").value.trim();
+      if (action === "fast") token.fast = fastValue;
+      if (["enable", "disable", "revoke"].includes(action)) token.status = action === "enable" ? "Active" : action === "disable" ? "Disabled" : "Revoked";
+      if (action === "rotate") { token.id = `tok_demo_rotated_${nextToken++}`; token.status = "Active"; }
+      if (action === "discard") pendingClipboard = undefined;
+      if (issues && $("#clipboard-mode").value === "failed") pendingClipboard = { id: token?.id ?? tokens[tokens.length - 1].id };
+      $("#token-dialog").close();
+      renderTokens();
+      restoreTokenFocus();
+      $("#clipboard-feedback").hidden = true;
+      toast(issues ? pendingClipboard ? "Demo copy failed — retry without issuing again" : "Demo complete — no real secret generated or copied" : "Demo metadata updated");
+    }
+    function restoreTokenFocus() {
+      const id = tokenDialogAction?.token?.id;
+      const target = (id ? $("[data-token-action='" + id + "']") : $("#create-token")) ?? $("#create-token");
+      (target.disabled ? $("#retry-copy") : target).focus({ preventScroll: true });
+    }
+    all("[data-screen]").forEach((button) => button.addEventListener("click", () => button.dataset.screen === "account" ? openAccount(currentAccount.id) : selectView(button.dataset.screen)));
+    for (const name of ["overview", "tokens", "models"]) $("#tab-" + name).addEventListener("click", () => selectView(name));
+    $(".tabs").addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const views = ["overview", "tokens", "models"];
+      const next = (views.indexOf(activeView) + (event.key === "ArrowLeft" ? -1 : 1) + views.length) % views.length;
+      selectView(event.key === "Home" ? "overview" : event.key === "End" ? "models" : views[next]);
+      $("#tab-" + activeView).focus();
+    });
+    $("#close-dialog").addEventListener("click", () => $("#account-dialog").close());
+    $("#done-dialog").addEventListener("click", () => $("#account-dialog").close());
+    $("#account-dialog").addEventListener("close", () => selectPreview(activeView));
+    $("#account-dialog").addEventListener("click", (event) => { if (event.target === $("#account-dialog")) { const r = event.target.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) event.target.close(); } });
+    $("#model-search").addEventListener("input", renderModels);
+    all("[data-capability]").forEach((button) => button.addEventListener("click", () => {
+      const capability = button.dataset.capability;
+      if (capability === "all") selectedCapabilities.clear();
+      else if (selectedCapabilities.has(capability)) selectedCapabilities.delete(capability);
+      else selectedCapabilities.add(capability);
+      renderModels();
+    }));
+    $("#token-search").addEventListener("input", renderTokens);
+    all("[data-clear]").forEach((button) => {
+      const input = $("#" + button.dataset.clear);
+      const clear = () => {
+        input.value = "";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.focus({ preventScroll: true });
+      };
+      button.innerHTML = icon("close", 12);
+      button.addEventListener("click", clear);
+      input.addEventListener("input", () => { button.hidden = !input.value; });
+      input.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape" || event.isComposing || !input.value) return;
+        event.preventDefault(); event.stopPropagation(); clear();
+      });
+    });
+    document.addEventListener("pointerover", (event) => showTooltip(event.target.closest("[title]")));
+    document.addEventListener("pointerout", (event) => { if (tooltipTarget && !tooltipTarget.contains(event.relatedTarget)) hideTooltip(); });
+    document.addEventListener("focusin", (event) => showTooltip(event.target.closest("[title]")));
+    document.addEventListener("focusout", hideTooltip);
+    document.addEventListener("pointerdown", hideTooltip);
+    document.addEventListener("scroll", hideTooltip, true);
+    window.addEventListener("resize", hideTooltip);
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") hideTooltip(); });
+    $("#create-token").addEventListener("click", () => openTokenAction("create"));
+    $("#token-form").addEventListener("input", validateTokenAction);
+    $("#token-form").addEventListener("submit", applyTokenAction);
+    $("#token-form").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.isComposing) applyTokenAction(event); });
+    $("#close-token-dialog").addEventListener("click", () => $("#token-dialog").close());
+    $("#cancel-token-dialog").addEventListener("click", () => $("#token-dialog").close());
+    $("#token-dialog").addEventListener("close", restoreTokenFocus);
+    $("#retry-copy").addEventListener("click", () => {
+      if ($("#clipboard-mode").value !== "success") { $("#clipboard-feedback").textContent = "Demo clipboard is still unavailable. The same pending copy is retained; no second token is issued."; $("#clipboard-feedback").hidden = false; return; }
+      pendingClipboard = undefined; renderTokens(); $("#create-token").focus(); toast("Demo copy recovered — no real credential was copied");
+    });
+    $("#discard-copy").addEventListener("click", () => openTokenAction("discard"));
+    document.addEventListener("pointerdown", (event) => { if (!$("#token-menu").contains(event.target) && !tokenMenuTrigger?.contains(event.target)) closeTokenMenu(); });
+    window.addEventListener("resize", () => closeTokenMenu());
+    document.addEventListener("scroll", (event) => { if (!$("#token-menu").contains(event.target)) closeTokenMenu(); }, true);
+    $("#scenario").addEventListener("change", () => { renderOverview(); if ($("#account-dialog").open) renderAccount(); });
+    $("#width-toggle").addEventListener("click", () => { const narrow = document.body.toggleAttribute("data-narrow"); $("#width-toggle").setAttribute("aria-pressed", String(narrow)); });
+    $("#theme-toggle").addEventListener("click", () => {
+      const light = document.documentElement.dataset.theme !== "light";
+      document.documentElement.dataset.theme = light ? "light" : "dark";
+      $("#theme-toggle").textContent = light ? "Dark" : "Light";
+      $("#theme-toggle").setAttribute("aria-label", `Switch to ${light ? "dark" : "light"} theme`);
+    });
+    $("#refresh").addEventListener("click", () => { $("#updated").textContent = "Demo snapshot refreshed"; renderOverview(); if ($("#account-dialog").open) renderAccount(); renderTokens(); renderModels(); toast("Demo only — selections retained; no API request was made"); });
+    $("#refresh").innerHTML = icon("refresh");
+    $("#search-icon").innerHTML = icon("search");
+    $("#token-search-icon").innerHTML = icon("search");
+    $("#close-dialog").innerHTML = icon("close");
+    $("#close-token-dialog").innerHTML = icon("close");
+    renderOverview();
+    renderModels();
+    renderTokens();
+    // Direct links make each proposal easy to review and capture independently.
+    const initial = new URLSearchParams(location.hash.slice(1));
+    if (initial.get("theme") === "light") $("#theme-toggle").click();
+    if (initial.get("narrow") === "1") $("#width-toggle").click();
+    if (["ready", "fallback", "missing", "stale"].includes(initial.get("scenario"))) { $("#scenario").value = initial.get("scenario"); renderOverview(); }
+    if (initial.get("screen") === "models") selectView("models");
+    if (initial.get("screen") === "tokens") selectView("tokens");
+    if (initial.get("screen") === "account") openAccount(initial.get("account") || "a");
+  </script>
+</body>
+</html>

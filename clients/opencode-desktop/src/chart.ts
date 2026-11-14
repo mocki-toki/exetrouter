@@ -8,9 +8,7 @@ export function activityDate(bucket: Usage["timeline"][number], period: string):
 
 export const chartColors = ["#84becb", "#aaa3e6", "#8fc9a4", "#e4bd79", "#e39393", "#85a8e1", "#cf9dc6", "#c5c48d"]
 export function compact(value: number): string { return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) }
-export function dollars(value: number | null | undefined): string {
-  return value == null ? "—" : `$${value.toLocaleString("en", { minimumFractionDigits: 2, maximumFractionDigits: value < 0.0001 ? 8 : value < 0.01 ? 5 : 2 })}`
-}
+export { dollars } from "./format"
 /** Older bridges omit pricing fields; unknown pricing must never become $0. */
 export function unpricedRequests(row: Usage["rows"][number]): number {
   return row.unpriced ?? (row.usd == null ? row.requests : 0)

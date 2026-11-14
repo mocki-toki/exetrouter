@@ -1,9 +1,9 @@
-# Hourly subscription history
+# Subscription history
 
 Account details in the native TUI and OpenCode Desktop show short and weekly
 subscription windows together, with separate colors, a shared 0–100% quota-left
-axis. The native TUI shows seven days; OpenCode Desktop offers rolling **24 hours,
-7 days, 30 days and 90 days**, with arrows to earlier/later intervals. The web chart
+axis. Both native TUI and OpenCode Desktop offer rolling **24 hours,
+7 days, 30 days and 90 days**, with earlier/later interval paging. The web chart
 supports pointer/keyboard selection; TUI details use Left/Right and Home/End, with Up/Down for scrolling.
 Lines and cursor values show only the remaining percentage: a full window is
 100%, an exhausted window is 0%, and quota recovery moves the line upward.
@@ -13,28 +13,31 @@ Usage charts use the same quiet containers, fine lines, distinct identity-based
 colors and interval values (Shift+Left/Right and Home/End in the TUI, without
 changing Left/Right tab navigation).
 
-The router stores the **latest accepted numeric observation in each UTC hour**,
+The router stores the **latest accepted numeric observation in each UTC ten-minute interval**,
 not an average, token-derived estimate or historical upstream query. Both
 general-meter kinds retain their actual duration, reset time and observation
-time. A new quota cycle is not smoothed away. Charts leave missing hours empty
+time. A new quota cycle is not smoothed away. Charts leave missing intervals empty
 and do not connect across gaps or duration changes. Display dates use the
-client's local time zone; an hourly tooltip identifies its bucket, not an exact
-measurement at the start of that hour. A current hour can change in the background.
+client's local time zone; a tooltip identifies its bucket, not an exact
+measurement at its start. The current bucket can change in the background.
 
 Collection runs wherever quota observations already arrive: HTTP/WS metadata
 and the existing passive limits worker. No new inference, metadata poll, OAuth
 operation or reset-credit action is introduced. It works while dashboards are
 closed and survives restart. History starts after upgrade; old days cannot be
-reconstructed. Older routers/native clients show an unavailable-history caption,
-without hiding current account details.
+reconstructed. Updated clients also accept older routers' hourly history. Older
+clients require an update for ten-minute history; current account details remain
+available in the native TUI.
 
 Authenticated Doctor/Limits expose optional `quota_accounts[].quota_history`
-with `from_utc`, exclusive `to_utc`, `interval_seconds: 3600` and bounded `points`.
+with `from_utc`, exclusive `to_utc`, `interval_seconds: 600` and bounded `points`.
 Each point includes `kind`, `hour`, `observed_at`, `used_percent`, nullable
-`window_minutes` and nullable `reset_at`. The current hour and preceding 167
-hours are returned, up to 336 points per account; no client identities, request
+`window_minutes` and nullable `reset_at`. The legacy name `hour` now denotes the
+start of a ten-minute bucket. The current bucket and preceding 1,007 buckets
+are returned, up to 2,016 points per account; no client identities, request
 contents or credentials are retained in history. Capability
-`hourly_quota_history: 1` identifies collection support. Ordinary CLI reports
+`ten_minute_quota_history: 1` identifies the new resolution; the legacy
+`hourly_quota_history: 1` collection flag is retained. Ordinary CLI reports
 remain text-only; JSON is the automation interface.
 
 OpenCode Desktop also accepts ten-minute (`interval_seconds: 600`) reports from
@@ -48,15 +51,48 @@ current account details. Explicit history reads still reject invalid reports.
 
 `exr quota-history ACCOUNT --period 90d --json` reads a wider interval through the
 authenticated management channel, without refreshing upstream. `--before UNIX`
-sets its exclusive, hour-aligned end; subtract the selected duration to page back.
-Each response contains at most 90 days / 4,320 points. Desktop paging needs updated
+sets its exclusive, ten-minute-aligned end; subtract the selected duration to page back.
+Each response contains at most 90 days / 25,920 points. Desktop paging needs updated
 native and server binaries; an older router's seven-day snapshot remains visible.
-Numeric observations are retained for at most **365 days**, up to 8,760 rows per
-account/window. Previously pruned hours cannot be recovered; retention expands
-only as new observations arrive. No additional schema migration is needed for
-the longer retention. Rolling windows have fixed durations even across DST.
+Numeric observations are retained for at most **365 days**, up to 52,560 rows per
+account/window. Previously pruned observations cannot be recovered; retention expands
+only as new observations arrive. Rolling windows have fixed durations even
+across DST. Collection still uses the existing roughly 30-second passive worker;
+changing bucket size adds no polls.
 
-## Schema 13 to 14: reviewed migration and rollback
+## Schema 15 to 16: ten-minute buckets
+
+Migration 016 transactionally rebuilds only the numeric history table with
+600-second alignment and observation constraints. Each old hourly sample moves
+to the bucket containing its actual `observed_at`. No samples are invented for
+the other five buckets; old gaps remain gaps. Credentials, keys, tokens, usage,
+current quotas, routing and reset ledgers are unchanged. Retention remains 365
+days, with a sixfold maximum row count. Allow disk space for a temporary second
+copy of the history table.
+
+This is not a routine one-click deployment. With operator authorization, stop
+the runtime, create and verify a private consistent backup of current state and
+keys, and rehearse the migration on a private copy. Deploy matching server and
+gateway binaries, verify schema 16, integrity/foreign keys, health, authentication
+and retained numeric history without inference or credit consumption. Update
+native clients and the Desktop plugin together; old Desktop plugins reject the
+new interval. Publishing source does not change deployed state.
+Desktop subprocess/stdio reports remain bounded to 8 MiB so a full 90-day
+ten-minute history fits; concurrent read limits are unchanged.
+
+For rollback, stop the runtime and preserve a verified **current** state/key
+backup first. Do not restore a pre-upgrade database or simply lower user_version:
+schema 15 cannot write ten-minute buckets. On a private copy, rehearse rebuilding
+the table using migration 014's original constraints: retain the latest
+`observed_at` (then `request_order` on ties) per account/kind/UTC hour, rounding
+the bucket start down to 3,600 seconds. Preserve an offline private copy of all
+fine-resolution rows before reducing them. Recreate the original pruning index,
+set `PRAGMA user_version=15` in the same transaction, and verify integrity,
+foreign keys and unchanged non-history state. Restore matching old server and
+gateway binaries and check read-only health/authentication. Re-upgrade remaps
+the retained hourly samples; it does not recover discarded fine-resolution rows.
+
+## Original schema 13 to 14: reviewed migration and rollback
 
 Migration 014 adds only `oauth_quota_history` and an hourly pruning index.
 Existing credentials/generations, policies, limits, cooldown/order fences,

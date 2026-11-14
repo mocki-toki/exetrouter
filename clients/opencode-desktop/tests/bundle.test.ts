@@ -111,7 +111,10 @@ test("rendered panel has five native web views, account details, usage graph, to
   } }
   const { plugin, timers } = await bundle(false, runtime)
   const contributions = new Map<string, unknown>()
-  const report = snapshot(doctor())
+  const clientRequestAt = Math.floor(Date.now() / 1000) - 1286 * 60
+  const rawReport = doctor()
+  rawReport.quota_accounts[0].clients.rows[0].last_request_at = clientRequestAt
+  const report = snapshot(rawReport)
   const rawUsage = usage()
   rawUsage.timeline[0].from_utc = Math.floor(Date.now() / 1000) - 3600
   let usageReport = normalizeUsage(rawUsage, "total")
@@ -232,6 +235,8 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.doesNotMatch(root.textContent, /OAuth|require login/)
     assert.doesNotMatch(root.textContent, /Passive refresh every|GMT/)
     assert.match(root.textContent, /Synthetic account/)
+    assert.match(root.querySelector('.exr-limit-summary')!.textContent, /Per-user limit: Generations 2 \/ 8 • WebSockets 1 \/ 4/)
+    assert.equal(root.querySelector('.exr-platform'), null, "disconnected Platform API must be omitted")
     assert.match(root.textContent, /2 resets/)
     assert.match(root.textContent, /Auto reset: waiting/)
     for (const status of ["reset", "idle", "waiting"]) {
@@ -246,34 +251,14 @@ test("rendered panel has five native web views, account details, usage graph, to
       tab.dispatchEvent(new window.MouseEvent("click", { bubbles: true })); await delay(10)
       assert.equal(root.querySelector('[role="tabpanel"]:not([hidden])')?.getAttribute("aria-labelledby"), tab.id)
     }
-    assert.match(root.querySelector(".exr-capacity")!.textContent,/Capacity outlook.*Insufficient data/)
-    click("Details")
-    assert.equal(window.document.querySelector('[role="dialog"]')!.getAttribute("aria-label"),"Capacity details")
-    click("Done")
-    const capacityNow=Math.floor(Date.now()/1000)
-    const capacityWindows=[{kind:"primary",minutes:300,remaining:100,used:0,observedAt:capacityNow,resetAt:capacityNow+1800,status:"current"},{kind:"secondary",minutes:10080,remaining:1,used:99,observedAt:capacityNow,resetAt:capacityNow+10800,status:"current"}]
-    const capacitySnapshot={...report,checkedAt:capacityNow,capacity:{lastHour:10,previousHour:10,inFlight:0,complete:true},accounts:report.accounts.map((a)=>({...a,cooldownUntil:null,windows:capacityWindows,capacity:{state:"available",shortWindow:true,models:["gpt-6.1-sol","synthetic-other"],resetEligibleUntil:null,costs:capacityWindows.map((w)=>({kind:w.kind,perRequest:0.1,from:capacityNow-3600,to:capacityNow,requests:10}))}}))}
-    setState((old)=>({...old,snapshot:capacitySnapshot}))
-    for (const tick of timers) tick()
-    assert.match(root.querySelector(".exr-capacity")!.textContent,/At risk.*gpt-6.1-sol.*Estimated runway.*1h 0m.*Possible interruption/)
-    click("Details")
-    const capacityDialog=window.document.querySelector('[role="dialog"]')!
-    assert.match(capacityDialog.textContent,/Account reserves.*Synthetic account.*Short window|Account reserves.*Short window/)
-    assert.match(capacityDialog.textContent,/Confirmed quota only.*Higher load.*With eligible reset credit/)
-    assert.equal(capacityDialog.querySelectorAll("tbody tr").length,1)
-    click("Model: gpt-6.1-sol");click("synthetic-other")
-    assert.match(root.querySelector(".exr-capacity")!.textContent,/synthetic-other/)
-    setState((old)=>({...old,snapshot:{...capacitySnapshot,accounts:capacitySnapshot.accounts.map((a)=>({...a,label:"Updated capacity account"}))}}))
-    assert.equal(window.document.querySelector('[role="dialog"]'),capacityDialog,"capacity details survive background snapshot refresh")
-    assert.match(capacityDialog.textContent,/Updated capacity account/)
-    setState((old)=>({...old,error:"Disconnected"}))
-    assert.match(root.querySelector(".exr-capacity")!.textContent,/Insufficient data/)
-    assert.doesNotMatch(root.querySelector(".exr-capacity")!.textContent,/Estimated runway/)
-    click("Done")
-    setState((old)=>({...old,snapshot:report,error:null}))
     click("View Synthetic account details")
     assert.match(window.document.querySelector('[role="dialog"]')!.textContent, /Synthetic client/)
     const accountDialog = window.document.querySelector('[role="dialog"]')!
+    assert.match(accountDialog.textContent, /Last request 21h ago/)
+    assert.ok(accountDialog.textContent.includes(new Date(clientRequestAt * 1000).toLocaleString("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })))
+    assert.doesNotMatch(accountDialog.textContent, /1286m ago/)
+    assert.ok(accountDialog.querySelector('.exr-detail-quotas')!.nextElementSibling!.classList.contains('exr-history'))
+    assert.doesNotMatch([...accountDialog.querySelectorAll('h3')].map((h)=>h.textContent).join('|'), /Routing|Subscription windows/)
     const history = accountDialog.querySelector('svg[aria-label^="Subscription quota left"]')!
     assert.ok(history)
     assert.equal(history.querySelectorAll("[data-window]").length,2,"both windows share the same chart")
@@ -285,6 +270,29 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.equal(history.querySelector('[data-window="secondary"] polyline')!.getAttribute('points')!.split(' ').at(-1),'644,112')
     history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"Home",bubbles:true}))
     assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/Not observed/)
+    const apiDay=Math.floor(report.checkedAt/86400)*86400
+    setState(old=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map(a=>({...a,subscription:{billingDay:8,planUSD:100,apiBudgetCents:10000},platform:{configuredAt:apiDay,inferenceEnabled:false,creditStatus:"unverified",codexFallbackAllowed:false,costs:{from:apiDay,to:report.checkedAt,observedAt:report.checkedAt,spentUSD:5000,budgetUSD:10000,complete:true,basis:"calendar_month_utc"}},history:a.history?{...a.history,platform:{from:a.history.from,to:a.history.to,points:[{from:apiDay,to:report.checkedAt,observedAt:report.checkedAt,usd:5000}]}}:a.history}))}}))
+    assert.match(root.querySelector('.exr-account-header')!.textContent, /Pro \$100/)
+    const subscriptionText = root.querySelector('.exr-account-header .exr-account-plan')!
+    assert.equal(subscriptionText.tagName, "SPAN")
+    assert.equal(subscriptionText.textContent, "Pro $100")
+    assert.equal(subscriptionText.closest('.exr-badge'), null)
+    assert.doesNotMatch(root.querySelector('.exr-account-header')!.textContent, /Platform API/)
+    await delay(10)
+    const apiHistory=accountDialog.querySelector('svg[aria-label^="Platform API daily"]')!
+    assert.ok(apiHistory)
+    assert.match(accountDialog.querySelector('.exr-platform')!.textContent,/\$5k \/ \$10k/)
+    const estimate={remainingUSD:99,spentUSD:1,through:report.checkedAt,observedAt:report.checkedAt,unpriced:0,status:"estimated"}
+    setState(old=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map(a=>({...a,platform:a.platform?{...a.platform,balance:{enteredAt:apiDay,initialUSD:100,exetrouter:estimate,organization:{...estimate,remainingUSD:97,spentUSD:3,status:"delayed_report"}}}:a.platform}))}}))
+    assert.match(root.querySelector('.exr-platform')!.textContent,/\$99 \/ \$100/)
+    assert.doesNotMatch(root.querySelector('.exr-platform')!.textContent,/\$97/)
+    assert.match(accountDialog.querySelector('.exr-platform')!.textContent,/Platform organization.*\$97 \/ \$100/)
+    assert.match(accountDialog.querySelector('.exr-platform')!.textContent,/delayed report.*reported through/)
+    assert.match(accountDialog.querySelector('.exr-platform')!.textContent,/no automatic monthly refill/)
+    apiHistory.dispatchEvent(new window.KeyboardEvent("keydown",{key:"End",bubbles:true}))
+    assert.match(apiHistory.parentElement!.querySelector('[role="status"]')!.textContent,/\$5k/)
+    setState(old=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map(a=>({...a,platform:null,history:a.history?{...a.history,platform:null}:a.history}))}}))
+    assert.equal(accountDialog.querySelector('.exr-platform-history'),null)
     const accountPane = root.querySelector('[role="tabpanel"]')!
     accountPane.scrollTop = 90
     setState((old) => ({ ...old, refreshing: true }))
@@ -437,13 +445,19 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.match(root.textContent, /Refreshed token/)
     assert.ok(root.querySelector('[data-component="exr-settings-list"] [data-slot="row-control"]'))
     assert.equal(root.querySelector('button[aria-label="View Refreshed token details"]'), null)
-    assert.match(root.textContent, /Fast: Default/)
+    assert.doesNotMatch(root.textContent, /Fast: Default/)
     assert.match(root.textContent, /Created/)
     await selectTab("Models")
     assert.match(root.textContent, /synthetic-model/)
     assert.match(root.textContent, /100,000/)
     click("Copy synthetic-model ID"); await delay(10)
     assert.deepEqual(copied, ["synthetic-model"])
+    click("Reasoning"); click("Tools")
+    assert.match(root.querySelector('[role="tabpanel"]:not([hidden])')!.textContent, /synthetic-model/)
+    click("Image generation")
+    assert.match(root.textContent, /No matching models/)
+    click("All")
+    assert.match(root.textContent, /synthetic-model/)
     const search = root.querySelector('input[aria-label="Search models"]')! as unknown as { value: string; dispatchEvent(event: unknown): void }
     search.value = "no matching model"
     search.dispatchEvent(new window.Event("input", { bubbles: true }))
@@ -537,11 +551,10 @@ test("the built main entry polls a synthetic exr once for all windows, publishes
     }
     cleanup = await plugin.main!(ctx as unknown as Parameters<Plugin.MainSetup>[0])
     assert.equal(timers.size, 1)
-    for (let i = 0; i < 100 && !impl?.state().snapshot; i++) await delay(10)
-    assert.equal(impl?.state().snapshot?.version, "0.0.0-test")
     const first = impl!.refresh()
     assert.equal(impl!.refresh(), first)
     await first
+    assert.equal(impl?.state().snapshot?.version, "0.0.0-test")
     controller.abort()
     await cleanup?.()
     cleanup = undefined

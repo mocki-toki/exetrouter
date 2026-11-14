@@ -10,6 +10,25 @@ import { NativeClient, snapshot, models, tokens, usage } from "../src/native"
 import { options } from "../src/options"
 import { Models, Profile, Tokens, Usage } from "../src/schemas"
 import { deferred, doctor, modelList, tokenList, usage as usageFixture } from "./fixtures"
+import { requestAge } from "../src/format"
+
+test("client request ages use seconds, minutes, hours and days without inventing unknown times", () => {
+  const now = 1_800_000_000
+  for (const [age, expected] of [[0, "0s ago"], [59, "59s ago"], [60, "1m ago"], [3599, "59m ago"], [3600, "1h ago"], [1286 * 60, "21h ago"], [86400, "1d ago"], [172800, "2d ago"]] as const) {
+    assert.equal(requestAge(now - age, now), expected)
+  }
+  assert.equal(requestAge(now - .5, now), "0s ago")
+  for (const at of [null, now + 1, NaN, Infinity]) assert.equal(requestAge(at, now), "Unknown")
+  assert.equal(requestAge(now, NaN), "Unknown")
+})
+
+test("client labels from older native reports never expose private ciphertext", () => {
+  const raw = doctor()
+  raw.quota_accounts[0].clients.rows[0].name = "exrp1:synthetic-ciphertext"
+  const report = snapshot(raw)
+  assert.equal(report.accounts[0].clients.rows[0].name, "Label unavailable")
+  assert.doesNotMatch(JSON.stringify(report), /exrp1:|synthetic-ciphertext/)
+})
 
 test("chart indexes duplicate buckets, selects by identity and excludes future activity", () => {
   const raw = usageFixture()
@@ -55,6 +74,9 @@ test("USD chart preserves model prices, partial totals and small dollar scales",
   assert.ok(Math.abs(activity(report, "gpt-6.1-sol", "usd", 1800003600).maximum - 0.00005) < 1e-12)
   assert.equal(dollars(0.00004), "$0.00004")
   assert.equal(dollars(undefined), "—")
+  assert.equal(dollars(-1), "-$1")
+  assert.equal(dollars(-5000), "-$5k")
+  for (const [value, formatted] of [[5000,"$5k"],[12500,"$12.5k"],[1200000,"$1.2M"],[999999,"$1M"],[100,"$100"],[0,"$0"]] as const) assert.equal(dollars(value),formatted)
   const unknown = usage({ ...raw, rows: [{ ...first, estimated_usd: null }], timeline: [{ from_utc: 1800000000, to_utc: 1800003600, rows: [{ ...first, estimated_usd: null }] }] }, "model")
   assert.equal(activity(unknown, "", "usd", 1800003600).usd, null)
   assert.equal(activityValue(unknown.timeline[0], "gpt-6-astra", "usd").value, null)

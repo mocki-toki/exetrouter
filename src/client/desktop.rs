@@ -400,7 +400,7 @@ pub(super) async fn run(connection: config::Connection, path: PathBuf) -> Result
                 Err(_) => json!({"id":request.id,"error":"Operation failed. The outcome may be unknown; refresh metadata before repeating a mutation."}),
             };
             let mut bytes = serde_json::to_vec(&value)?;
-            if bytes.len() > 1_048_576 { return Err("desktop response too large".into()); }
+            if bytes.len() > 8_388_608 { return Err("desktop response too large".into()); }
             bytes.push(b'\n'); output.write_all(&bytes).await?; output.flush().await?;
         }
     }.await;
