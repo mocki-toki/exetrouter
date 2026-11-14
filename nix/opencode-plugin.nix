@@ -11,7 +11,7 @@ in
       src = lib.cleanSource ../clients/opencode-desktop;
       filter = path: type: !(type == "directory" && builtins.elem (builtins.baseNameOf path) ["node_modules" "dist"]);
     };
-    npmDepsHash = "sha256-eaBO9huYL3cKYgDTZrfTis3muWQMLBuI7QI+Lzj63ck=";
+    npmDepsHash = "sha256-kzRdZeKLXI6pU+TKEEZR16XE/XYL4Bq/+96azCZ/u1I=";
     npmFlags = ["--ignore-scripts"];
     doCheck = true;
     checkPhase = ''

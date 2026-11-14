@@ -2,7 +2,7 @@
 
 A local OpenCode V2 plugin with a dynamically discovered **ExetRouter** provider,
 a single native-web dashboard panel. Targets the
-OpenCode **2.2.6** plugin contract; GUI APIs are experimental. This package is not
+OpenCode **2.3.0** plugin contract, with support for 2.2.x and 2.3.x hosts; GUI APIs are experimental. This package is not
 published to npm. See [the integration guide](../../docs/opencode-desktop.md).
 
 For configured Platform accounts, Overview shows estimated remaining funds from
@@ -250,7 +250,7 @@ management HTTP API is exposed; ordinary CLI terminal/secret guards are intact.
 ## Native package smoke test
 
 After building, an optional isolated test packs and installs the package, then
-loads it in an exact OpenCode 2.2.0 binary against a synthetic loopback catalog:
+loads it in a supplied OpenCode 2.2.x or 2.3.x binary against a synthetic loopback catalog:
 
 ```sh
 EXETROUTER_OPENCODE_PLUGIN_BIN=/absolute/path/to/opencode npm test

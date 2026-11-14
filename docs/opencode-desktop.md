@@ -162,10 +162,12 @@ full native Electron compatibility testing on 2.2.5.
 
 ## Reviewed contract and verification
 
-Targets OpenCode **2.2.0**, source revision
-`1097e2668b1e08ad63bdf0b1c4860b9bc01e420c`. Review covered GUI registries/main
-process APIs, provider/integration schema and provider transforms. The SDK is
-pinned to that version because the GUI API is experimental. Relevant references:
+The SDK targets OpenCode **2.3.0**, source revision
+`a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`, with supported hosts restricted to
+2.2.x and 2.3.x. Review covers the used GUI registries/main-process APIs,
+provider/integration schema and provider transforms; TypeScript and bundle
+tests exercise the pinned 2.3.0 SDK. Future minor versions remain rejected
+until verified because the GUI API is experimental. Relevant references:
 [GUI plugins](https://opencode.ai/v2/docs/build/plugins/gui/),
 [server plugins](https://opencode.ai/v2/docs/build/plugins/server),
 [RPC](https://opencode.ai/v2/docs/build/plugins/rpc).
@@ -183,7 +185,7 @@ failover, bounded metadata retention and no Best fallback. Offline router tests
 verify opt-in HTTP and per-turn WS observations, socket reuse, deactivation
 transfer and user-scoped alias matching; no real upstream inference was used.
 Forecast tests cover the native algorithm's freshness/reset fences.
-The optional native test loads a packed/installed package in an isolated 2.2.0
+The optional native test loads a packed/installed package in an isolated 2.2.x or 2.3.x
 server against a loopback catalog without generation. It does not prove the
 rendered Electron UI, live upstream inference, long sessions or compaction;
 the [existing compatibility matrix](compatibility.md) retains its recorded scope.

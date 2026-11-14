@@ -40,8 +40,8 @@ in {
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = let version = config.programs.opencode.package.version or "0"; in lib.versionAtLeast version "2.2.0" && lib.versionOlder version "2.3.0";
-        message = "programs.opencode.exr requires programs.opencode.package to provide OpenCode V2 2.2.x (the packaged plugin's API contract); the nixpkgs default may still be V1.";
+        assertion = let version = config.programs.opencode.package.version or "0"; in lib.versionAtLeast version "2.2.0" && lib.versionOlder version "2.4.0";
+        message = "programs.opencode.exr requires programs.opencode.package to provide OpenCode V2 2.2.x or 2.3.x (the packaged plugin's API contract); the nixpkgs default may still be V1.";
       }
       {
         assertion = exr.enable && connection != null;
