@@ -4,6 +4,9 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod calendar;
+pub use calendar::Calendar;
+
 const INTERVAL: i64 = crate::quota_history::INTERVAL;
 const DAYS: i64 = 30;
 const DAY: i64 = 86400;
@@ -45,6 +48,9 @@ pub struct Forecast {
     pub current_status: Option<CurrentStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_valid_until: Option<i64>,
+    /// Separate calendar projection; raw current pace remains independently inspectable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<Calendar>,
     pub usual: Option<Projection>,
     pub warning: Option<Warning>,
     pub recent_seconds: i64,
@@ -401,6 +407,18 @@ pub fn calculate(points: &[Point], windows: &[Window], now: i64) -> Vec<Forecast
                         .filter(|r| r.is_finite()),
                     limit_before_reset: current.as_ref().is_some_and(|p| p.limit_at.is_some()),
                 });
+            let calendar = (minutes >= 10080).then(|| {
+                calendar::calculate(
+                    points,
+                    current_points,
+                    windows,
+                    w,
+                    current.as_ref(),
+                    current_valid_until,
+                    if elevated { 1800 } else { horizon },
+                    now,
+                )
+            });
             Some(Forecast {
                 kind: w.kind.clone(),
                 window_minutes: minutes,
@@ -410,6 +428,7 @@ pub fn calculate(points: &[Point], windows: &[Window], now: i64) -> Vec<Forecast
                 current,
                 current_status,
                 current_valid_until,
+                calendar,
                 usual,
                 warning,
                 recent_seconds: recent.map_or(0, |r| r.seconds),
@@ -455,10 +474,34 @@ impl Forecast {
             && self.reset_at > now
     }
     pub fn current_label(&self, now: i64) -> Option<String> {
+        if self.short_blocked(now) {
+            return Some("Weekly pace paused: short window exhausted".into());
+        }
         if self.blocked_current_label(now).is_some() {
             return None;
         }
+        if let Some(p) = self.calendar_projection(now) {
+            let suffix = if self.calendar.as_ref().is_some_and(|c| c.pauses > 0) {
+                " incl. short-window pauses"
+            } else {
+                ""
+            };
+            return Some(match p.limit_at {
+                Some(at) => format!(
+                    "At this pace: {} to limit{suffix}",
+                    estimate_duration(at, now)
+                ),
+                None => format!("At this pace: reset first{suffix}"),
+            });
+        }
         self.current.as_ref().map(|p| match p.limit_at {
+            Some(at) if self.window_minutes >= 10080 => {
+                format!(
+                    "Without future pauses: {} to limit",
+                    estimate_duration(at, now)
+                )
+            }
+            None if self.window_minutes >= 10080 => "Without future pauses: reset first".into(),
             Some(at) => format!("At this pace: {} to limit", estimate_duration(at, now)),
             None => "At this pace: reset first".into(),
         })
@@ -469,8 +512,8 @@ impl Forecast {
         {
             Some("Pace unavailable: quota unchanged")
         } else if self
-            .current
-            .as_ref()
+            .calendar_projection(now)
+            .or(self.current.as_ref())
             .and_then(|p| p.limit_at)
             .is_some_and(|at| now >= at)
         {
@@ -496,23 +539,35 @@ impl Forecast {
         })
     }
     pub fn warning_label(&self, now: i64) -> Option<String> {
-        if self.blocked_current_label(now).is_some() {
+        if self.blocked_current_label(now).is_some() || self.short_blocked(now) {
             return None;
         }
         self.warning.as_ref().map(|w| {
+            let before_reset = if self.window_minutes >= 10080 {
+                self.calendar_projection(now)
+                    .is_some_and(|p| p.limit_at.is_some())
+            } else {
+                w.limit_before_reset
+            };
             let ratio = w
                 .rate_ratio
                 .map(|r| format!(" · ~{r:.1}x normal"))
                 .unwrap_or_default();
             format!(
                 "Usage above usual{ratio}{}",
-                if w.limit_before_reset {
+                if before_reset {
                     " · may run out before reset"
                 } else {
                     ""
                 }
             )
         })
+    }
+    fn calendar_projection(&self, now: i64) -> Option<&Projection> {
+        self.calendar.as_ref()?.projection(now)
+    }
+    fn short_blocked(&self, now: i64) -> bool {
+        self.calendar.as_ref().is_some_and(|c| c.short_blocked(now))
     }
 }
 

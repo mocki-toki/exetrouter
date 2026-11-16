@@ -21,8 +21,15 @@ pub(super) fn historical(
         .iter()
         .take(2)
         .find_map(|value| {
-            let forecast: crate::quota_forecast::Forecast =
+            let mut forecast: crate::quota_forecast::Forecast =
                 serde_json::from_value(value.clone()).ok()?;
+            if let Some(calendar) = &forecast.calendar {
+                let windows: Vec<crate::quota::Window> =
+                    serde_json::from_value(account["quota"]["windows"].clone()).ok()?;
+                if !calendar.matches(&windows, now) {
+                    forecast.calendar = None;
+                }
+            }
             forecast.matches(&window, now).then_some(forecast)
         })
 }
@@ -60,10 +67,33 @@ pub(super) fn label(
         return None;
     }
     let id = account["id"].as_i64();
+    if window["window_minutes"]
+        .as_i64()
+        .is_some_and(|m| m >= 10080)
+        && sample(window, now).is_some_and(|(p, _, _)| p.used < 100.0)
+        && account["quota"]["windows"]
+            .as_array()
+            .is_some_and(|windows| {
+                windows.iter().any(|w| {
+                    w["kind"] != window["kind"]
+                        && w["kind"]
+                            .as_str()
+                            .is_some_and(|k| matches!(k, "primary" | "secondary"))
+                        && sample(w, now).is_some_and(|(p, m, _)| m < 10080 && p.used >= 100.0)
+                })
+            })
+    {
+        return Some("Weekly pace paused: short window exhausted".into());
+    }
+    let runtime = historical(account, window, now);
+    if let Some(text) = runtime.as_ref().and_then(|f| f.current_label(now)) {
+        if text == "Weekly pace paused: short window exhausted" {
+            return Some(text);
+        }
+    }
     if id.is_some_and(|id| fallback.is_idle(id, window, now)) {
         return Some("Pace unavailable: quota unchanged".into());
     }
-    let runtime = historical(account, window, now);
     if let Some(text) = runtime.as_ref().and_then(|f| f.blocked_current_label(now)) {
         return Some(text.into());
     }
@@ -72,7 +102,16 @@ pub(super) fn label(
         .and_then(|f| f.current_label(now))
         .or_else(|| {
             id.and_then(|id| fallback.label(id, window, now))
-                .map(|label| format!("At this pace: {label}"))
+                .map(|label| {
+                    if window["window_minutes"]
+                        .as_i64()
+                        .is_some_and(|m| m >= 10080)
+                    {
+                        format!("Without future pauses: {label}")
+                    } else {
+                        format!("At this pace: {label}")
+                    }
+                })
         })
         .or_else(|| {
             runtime
@@ -374,5 +413,40 @@ mod tests {
             changed["reset_at"] = serde_json::json!(BASE + 604801);
             assert!(!forecasts.is_idle(1, &changed, until));
         }
+    }
+    #[test]
+    fn weekly_fallback_is_unadjusted_and_calendar_requires_the_exact_companion() {
+        let mut forecasts = Forecasts::default();
+        forecasts.observe(&report(BASE, 10.0, 10080), BASE);
+        let mut latest = report(BASE + 60, 12.0, 10080);
+        forecasts.observe(&latest, BASE + 60);
+        let w = window(&latest).clone();
+        let account = &mut latest["quota_accounts"][0];
+        assert_eq!(
+            label(account, &w, BASE + 60, &forecasts).as_deref(),
+            Some("Without future pauses: ~44m to limit")
+        );
+        let short = json!({"kind":"secondary","used_percent":50,"remaining_percent":50,"window_minutes":300,"observed_at":BASE+60,"reset_at":BASE+18000,"status":"current"});
+        account["quota"]["windows"]
+            .as_array_mut()
+            .unwrap()
+            .push(short.clone());
+        account["quota_forecast"] = json!([{"kind":"primary","window_minutes":10080,"observed_at":BASE+60,"used_percent":12,"reset_at":BASE+604800,"current":{"percent_per_hour":88,"limit_at":BASE+3660},"usual":null,"warning":null,"recent_seconds":7200,"historical_intervals":0,"historical_cycles":0,"calendar":{"short":short,"current":{"percent_per_hour":88,"limit_at":BASE+21660},"valid_until":BASE+100,"pauses":1}}]);
+        assert!(label(account, &w, BASE + 60, &forecasts)
+            .unwrap()
+            .contains("incl. short-window pauses"));
+        account["quota"]["windows"][1]["reset_at"] = json!(BASE + 18001);
+        assert_eq!(
+            label(account, &w, BASE + 60, &forecasts).as_deref(),
+            Some("Without future pauses: ~1h 0m to limit")
+        );
+        account["quota"]["windows"][1]["used_percent"] = json!(100);
+        assert_eq!(
+            label(account, &w, BASE + 60, &forecasts).as_deref(),
+            Some("Weekly pace paused: short window exhausted")
+        );
+        let mut exhausted = w.clone();
+        exhausted["used_percent"] = json!(100);
+        assert!(label(account, &exhausted, BASE + 60, &forecasts).is_none());
     }
 }

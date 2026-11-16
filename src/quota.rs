@@ -8,7 +8,7 @@ use serde_json::Value;
 const BACKOFF_SECONDS: i64 = 60;
 const MAX_TIMESTAMP: i64 = 253_402_300_799;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Window {
     pub kind: String,
     pub used_percent: f64,
