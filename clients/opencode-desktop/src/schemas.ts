@@ -28,6 +28,7 @@ export const QuotaForecast = Schema.Struct({
   current: Schema.NullOr(QuotaProjection), usual: Schema.NullOr(QuotaProjection),
   currentStatus: Schema.optionalKey(Schema.Literals(["recent_pace", "insufficient_history", "quota_unchanged", "reset_changed", "reset_time_moving"])),
   currentValidUntil: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  calendar: Schema.optionalKey(Schema.Struct({ short: Schema.NullOr(Window), current: Schema.NullOr(QuotaProjection), validUntil: Schema.NullOr(Schema.Number), pauses: Schema.Number })),
   warning: Schema.NullOr(Schema.Struct({ rateRatio: Schema.NullOr(Schema.Number), limitBeforeReset: Schema.Boolean })),
   recentSeconds: Schema.Number, historicalIntervals: Schema.Number, historicalCycles: Schema.Number,
 })

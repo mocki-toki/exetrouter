@@ -18,7 +18,11 @@ export function visibleWindows(account: Account): readonly Window[] {
 /** All statistical calculation lives in the runtime; clients only match and format. */
 export function historicalForecast(account: Account, window: Window, now: number): QuotaForecast | undefined {
   if (account.refreshError || window.status !== "current" || !fresh(window.observedAt, now)) return
-  return account.forecasts?.find((f) => f.kind === window.kind && f.minutes === window.minutes && f.resetAt === window.resetAt && f.observedAt === window.observedAt && f.used === window.used && f.resetAt > now)
+  const f = account.forecasts?.find((f) => f.kind === window.kind && f.minutes === window.minutes && f.resetAt === window.resetAt && f.observedAt === window.observedAt && f.used === window.used && f.resetAt > now)
+  if (!f?.calendar) return f
+  const s = f.calendar.short
+  const matches = s ? account.windows.some((w) => w.kind === s.kind && w.minutes === s.minutes && w.resetAt === s.resetAt && w.observedAt === s.observedAt && w.used === s.used && w.status === "current" && fresh(w.observedAt,now) && w.resetAt !== null && w.resetAt > now) : account.windows.length === 1
+  return matches ? f : {...f,calendar:undefined}
 }
 function estimateDuration(at: number, now: number): string {
   const minutes = Math.max(1, Math.ceil(Math.max(0, at - now) / 60))
@@ -28,27 +32,48 @@ function estimateDuration(at: number, now: number): string {
   return `~${Math.floor(hours / 24)}d ${hours % 24}h`
 }
 export function currentForecast(f: QuotaForecast | undefined, now: number): string | undefined {
-  return !f?.current || blockedCurrent(f, now) ? undefined : f.current.limitAt === null ? "At this pace: reset first" : `At this pace: ${estimateDuration(f.current.limitAt, now)} to limit`
+  if (shortBlocked(f,now)) return "Weekly pace paused: short window exhausted"
+  if (!f?.current || blockedCurrent(f,now)) return
+  const c = calendarProjection(f,now)
+  if (c) {
+    const suffix = f.calendar!.pauses > 0 ? " incl. short-window pauses" : ""
+    return c.limitAt === null ? `At this pace: reset first${suffix}` : `At this pace: ${estimateDuration(c.limitAt,now)} to limit${suffix}`
+  }
+  if (f.minutes >= 10080) return f.current.limitAt === null ? "Without future pauses: reset first" : `Without future pauses: ${estimateDuration(f.current.limitAt,now)} to limit`
+  return f.current.limitAt === null ? "At this pace: reset first" : `At this pace: ${estimateDuration(f.current.limitAt, now)} to limit`
+}
+function calendarProjection(f: QuotaForecast | undefined, now: number) {
+  const c = f?.calendar, s = c?.short
+  return c?.validUntil != null && now < c.validUntil && (!s || s.status === "current" && fresh(s.observedAt,now) && s.resetAt !== null && s.resetAt > now) ? c.current : undefined
+}
+function shortBlocked(f: QuotaForecast | undefined, now: number): boolean {
+  const s = f?.calendar?.short
+  return !!s && s.minutes !== null && s.minutes > 0 && s.minutes < 10080 && s.used !== null && s.used >= 100 && s.status === "current" && fresh(s.observedAt,now) && s.resetAt !== null && s.resetAt > now
 }
 function blockedCurrent(f: QuotaForecast | undefined, now: number): string | undefined {
   if (!f) return
   if (f.currentStatus === "quota_unchanged" || f.currentValidUntil != null && now >= f.currentValidUntil) return "Pace unavailable: quota unchanged"
-  if (f.current?.limitAt != null && now >= f.current.limitAt) return "Estimate needs fresh quota"
+  const p = calendarProjection(f,now) ?? f.current
+  if (p?.limitAt != null && now >= p.limitAt) return "Estimate needs fresh quota"
 }
 export function forecastStatus(f: QuotaForecast | undefined, now: number): string | undefined {
   return blockedCurrent(f, now) ?? ({ insufficient_history: "Building recent pace", reset_changed: "Reset changed; rebuilding pace", reset_time_moving: "Reset time moving; no pace yet" } as Record<string, string>)[f?.currentStatus ?? ""]
 }
 export function quotaForecastLabel(account: Account, window: Window, now: number, fallback: Forecasts): string | undefined {
   if (account.refreshError || window.status !== "current" || !fresh(window.observedAt, now)) return
+  if (window.minutes !== null && window.minutes >= 10080 && window.used !== null && window.used < 100 && window.resetAt !== null && window.resetAt > now && account.windows.some((s) => ["primary","secondary"].includes(s.kind) && s.kind !== window.kind && s.minutes !== null && s.minutes > 0 && s.minutes < 10080 && s.used !== null && s.used >= 100 && s.status === "current" && fresh(s.observedAt,now) && s.resetAt !== null && s.resetAt > now)) return "Weekly pace paused: short window exhausted"
+  const f = historicalForecast(account, window, now)
+  if (shortBlocked(f,now)) return currentForecast(f,now)
   if (fallback.isIdle(account.id, window, now)) return "Pace unavailable: quota unchanged"
-  const f = historicalForecast(account, window, now), local = fallback.label(account.id, window, now)
-  return blockedCurrent(f, now) ?? currentForecast(f, now) ?? (local ? `At this pace: ${local}` : undefined) ?? forecastStatus(f, now)
+  const local = fallback.label(account.id, window, now)
+  return blockedCurrent(f, now) ?? currentForecast(f, now) ?? (local ? window.minutes !== null && window.minutes >= 10080 ? `Without future pauses: ${local}` : `At this pace: ${local}` : undefined) ?? forecastStatus(f, now)
 }
 export function usualForecast(f: QuotaForecast | undefined, now: number): string | undefined {
   return !f?.usual ? undefined : f.usual.limitAt === null ? "Historical pace: reset first" : f.usual.limitAt <= now ? "Historical estimate needs fresh quota" : `Historical pace: ${estimateDuration(f.usual.limitAt, now)} to limit`
 }
 export function forecastWarning(f: QuotaForecast | undefined, now: number): string | undefined {
-  return !f?.warning || blockedCurrent(f, now) ? undefined : `Usage above usual${f.warning.rateRatio === null ? "" : ` · ~${f.warning.rateRatio.toFixed(1)}x normal`}${f.warning.limitBeforeReset ? " · may run out before reset" : ""}`
+  const beforeReset = f && f.minutes >= 10080 ? calendarProjection(f,now)?.limitAt != null : f?.warning?.limitBeforeReset
+  return !f?.warning || blockedCurrent(f, now) || shortBlocked(f,now) ? undefined : `Usage above usual${f.warning.rateRatio === null ? "" : ` · ~${f.warning.rateRatio.toFixed(1)}x normal`}${beforeReset ? " · may run out before reset" : ""}`
 }
 
 /** Legacy session-local fallback when the runtime lacks enough recent history. */

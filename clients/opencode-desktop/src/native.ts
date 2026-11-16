@@ -73,6 +73,18 @@ function quotaForecasts(value: unknown): QuotaForecast[] {
     if (currentStatus !== undefined && !["recent_pace", "insufficient_history", "quota_unchanged", "reset_changed", "reset_time_moving"].includes(currentStatus)
       || currentValidUntil !== undefined && (!Number.isSafeInteger(currentValidUntil) || currentValidUntil > resetAt || current !== null && currentValidUntil <= observedAt)
       || currentStatus !== undefined && (currentStatus === "recent_pace") !== (current !== null)) throw new Error("Invalid quota forecast.")
+    const calendar = f.calendar == null ? undefined : (() => {
+      const c = record(f.calendar), projected = projection(c.current), validUntil = nullable(c.valid_until), pauses = number(c.pauses)
+      const short = c.short == null ? null : (() => {
+        const s = record(c.short), sk = text(s.kind,16), sm = nullable(s.window_minutes), sr = nullable(s.reset_at), so = number(s.observed_at), su = number(s.used_percent), remaining = number(s.remaining_percent), status = text(s.status,32)
+        if (!["primary","secondary"].includes(sk) || sk === kind || su > 100 || remaining > 100 || Math.abs(remaining-(100-su)) > 1e-9 || sm !== null && (!Number.isSafeInteger(sm) || sm <= 0)) throw new Error("Invalid quota calendar.")
+        return {kind:sk, minutes:sm, resetAt:sr, observedAt:so, used:su, remaining, status}
+      })()
+      if (minutes < 10080 || !Number.isSafeInteger(pauses) || validUntil !== null && (!Number.isSafeInteger(validUntil) || validUntil > resetAt)
+        || projected && (!current || projected.percentPerHour <= 0 || validUntil === null || validUntil <= observedAt || currentValidUntil !== undefined && validUntil > currentValidUntil || short && (short.minutes === null || short.minutes >= 10080 || short.observedAt !== observedAt || short.resetAt === null || short.resetAt <= observedAt || short.resetAt-observedAt > short.minutes*60 || validUntil > short.resetAt || short.used >= 100 || short.status !== "current"))
+        || !projected && (pauses !== 0 || validUntil !== null) || !short && pauses !== 0) throw new Error("Invalid quota calendar.")
+      return {short,current:projected,validUntil,pauses}
+    })()
     const warning = f.warning == null ? null : (() => {
       const w = record(f.warning), rateRatio = nullable(w.rate_ratio)
       if (typeof w.limit_before_reset !== "boolean" || !current || !usual || rateRatio !== null && rateRatio <= 0 || w.limit_before_reset !== (current.limitAt !== null)) throw new Error("Invalid quota forecast.")
@@ -81,7 +93,7 @@ function quotaForecasts(value: unknown): QuotaForecast[] {
     const recentSeconds = number(f.recent_seconds), historicalIntervals = number(f.historical_intervals), historicalCycles = number(f.historical_cycles)
     if (![recentSeconds, historicalIntervals, historicalCycles].every(Number.isSafeInteger) || historicalIntervals > 8642 || historicalCycles > historicalIntervals || recentSeconds > 86400 || current && recentSeconds <= 0 || usual && (historicalIntervals < 12 || historicalCycles < 2)) throw new Error("Invalid quota forecast.")
     return { kind, minutes, resetAt, observedAt, used, current, usual, warning, recentSeconds, historicalIntervals, historicalCycles,
-      ...(currentStatus === undefined ? {} : { currentStatus }), ...(currentValidUntil === undefined ? {} : { currentValidUntil }) }
+      ...(currentStatus === undefined ? {} : { currentStatus }), ...(currentValidUntil === undefined ? {} : { currentValidUntil }), ...(calendar === undefined ? {} : { calendar }) }
   })
 }
 

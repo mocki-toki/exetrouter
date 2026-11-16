@@ -53,6 +53,18 @@ export function usage() {
   ] }] }
 }
 
+export function weeklyCalendarReport(now = 1800000000) {
+  const report = forecastReport(now), a = report.quota_accounts[0]
+  const short = {...a.quota.windows[0],window_minutes:300,used_percent:82,remaining_percent:18,reset_at:now+10800}
+  const week = {...short,kind:"secondary",window_minutes:10080,used_percent:34,remaining_percent:66,reset_at:now+604800}
+  return {...report,quota_accounts:[{...a,quota:{...a.quota,windows:[short,week]},quota_forecast:[{
+    ...a.quota_forecast[0],kind:week.kind,window_minutes:week.window_minutes,used_percent:week.used_percent,reset_at:week.reset_at,
+    current:{percent_per_hour:12,limit_at:now+19800},usual:{percent_per_hour:6,limit_at:now+39600},
+    current_status:"recent_pace",current_valid_until:now+1800,recent_seconds:7200,
+    calendar:{short,current:{percent_per_hour:12,limit_at:now+36800},valid_until:now+600,pauses:2},
+  }]}]}
+}
+
 export function tokenList() { return [{ id: "tok_synthetic", name: "Synthetic token", created_at: 1800000000, expires_at: 1900000000, revoked_at: null, last_used_at: null }] }
 export function modelList() { return { data: [{ id: "synthetic-model", display_name: "Synthetic model", capabilities: ["reasoning", "tools"], exetrouter: { context_window: 100000 } }] } }
 
