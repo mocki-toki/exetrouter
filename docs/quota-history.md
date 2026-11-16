@@ -130,6 +130,54 @@ is shown as needing fresh quota, never reissued as a future countdown. Historica
 pace remains separate when recent pace is unavailable. Older metadata without
 the optional status/deadline fields remains readable.
 
+### Weekly calendar time and short-window pauses
+
+The weekly window's raw `current` projection remains inspectable and independent
+of the short window. It is **not** by itself a wall-clock depletion forecast.
+The optional weekly `calendar` object supplies a separate current projection,
+the exact companion `short` observation, `valid_until` and a bounded `pauses`
+count. Updated clients verify **both** observations, not just the weekly one.
+Unknown calendar metadata is not inferred from the chart or another account.
+
+For an account reporting both windows, a calendar estimate requires fresh,
+same-time observations and a contiguous, paired run of both windows with exact
+reset and duration continuity. Both rates use the same endpoints and the weekly
+recent horizon/evidence requirements. Any missing, exhausted, decreased,
+reset-changed or unaligned short-window interval breaks that run. In particular,
+a weekly rate averaged over an observed short-window block is not slowed again
+by adding that same block. The short rate must be positive and recently active;
+calendar validity is bounded by both activity deadlines and the reported short
+reset. Different primary/secondary order and actual short durations are supported.
+
+The conditional scenario spends both percentages at those paired rates until
+the first short exhaustion or reported reset. If the short budget expires first,
+weekly consumption pauses until that reset. The scenario then repeats full
+short-window capacity and its reported duration, resuming immediately each time.
+Subsequent modeled reset times are **assumptions**, not upstream observations;
+they are never persisted as quota, used for routing or used for reset credits.
+The calculation is closed-form rather than an unbounded loop over future windows.
+Depletion at or after the weekly reset is shown as reset-first, not exhaustion.
+
+The UI adds `incl. short-window pauses` when the scenario includes such pauses.
+A currently exhausted short window shows `Weekly pace paused: short window
+exhausted`, rather than inventing a rate after recovery. If paired evidence is
+unavailable, including immediately after a short reset, the weekly raw or legacy
+session-local fallback is explicitly labeled `Without future pauses`; it is not
+presented as a pause-adjusted calendar ETA. A weekly-only snapshot needs no short
+adjustment. Older routers without `calendar` remain readable, but their weekly
+estimates get the same unadjusted label in updated clients. Updated server and
+clients are required for calendar-aware display; this is not a release claim.
+
+Historical `usual` projections remain separate and unchanged: their observed
+rates may already include idle or blocked time. Do not add a second pause schedule
+to those rates. An acceleration warning can still describe unusually high
+consumption, but its weekly before-reset phrase requires a valid calendar
+projection predicting depletion before reset; the raw warning flag retains its
+single-window meaning for compatibility. The scenario does not predict future
+workload, changes in model mix, routing, provider accounting, extra reset credits
+or whether users will resume work immediately. It is not calibrated accuracy or
+a guarantee that the upstream will enforce the same future windows.
+
 `Usage above usual` requires a recent rate above both 1.5 times the usual pace
 and 1.1 times the historical 30-minute block-rate 90th percentile, with at least one
 percentage point consumed over the recent run. Three consecutive **closed**
@@ -171,6 +219,11 @@ python3 scripts/evaluate-quota-forecast.py --replay "$WORK/replay.jsonl" --outpu
 
 Replay excludes mutable current buckets and supplies only observations available
 at each simulated time, retaining at most the estimator's 30-day lookback.
+Companion windows at the same timestamp become available together; later
+companion observations are never borrowed. `runtime_current` retains the raw
+single-window comparison, while `runtime_calendar` separately scores calendar
+depletion ETAs and availability. Its paired active rate is not treated as a
+linear wall-clock consumption predictor at 10/30/60/120-minute horizons.
 Evaluation reserves the last third of **observed UTC buckets** as validation;
 it is not a split by two thirds of elapsed calendar time. Validation forecasts
 may use earlier training history, but training outcome labels stop before the

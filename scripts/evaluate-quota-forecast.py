@@ -125,7 +125,7 @@ def evaluate(rows, train_fraction=2 / 3):
                 tier = "weekly" if p["window_minutes"] >= 10080 else "short"
                 key = f"{partition}/{tier}"
                 if key not in results:
-                    results[key] = {"models": {name: metrics() for name in ("runtime_current", "runtime_usual", "interval_linear_proxy")},
+                    results[key] = {"models": {name: metrics() for name in ("runtime_current", "runtime_usual", "runtime_calendar", "interval_linear_proxy")},
                                     "paired_horizon_errors_pp": {str(h): {"runtime_current": [], "interval_linear_proxy": []} for h in HORIZONS},
                                     "paired_eta_interval_errors_minutes": {"runtime_current": [], "interval_linear_proxy": []},
                                     "paired_deadline_jumps_minutes": {"runtime_current": [], "interval_linear_proxy": []},
@@ -134,6 +134,7 @@ def evaluate(rows, train_fraction=2 / 3):
                 result = results[key]
                 f = row.get("forecast") or {}
                 estimates = {"runtime_current": f.get("current"), "runtime_usual": f.get("usual"),
+                             "runtime_calendar": (f.get("calendar") or {}).get("current"),
                              "interval_linear_proxy": proxy(episode[i-1]["point"] if i else None, p)}
                 # Training labels stop at the boundary; validation may use all prior history.
                 future = [r["point"] for r in episode[i+1:] if partition == "validation" or r["point"]["hour"] < split]
@@ -158,7 +159,7 @@ def evaluate(rows, train_fraction=2 / 3):
                     eta = estimate["limit_at"]
                     m["limit_predictions"] += eta is not None
                     for h, target in targets.items():
-                        if target is None:
+                        if target is None or name == "runtime_calendar":
                             continue
                         elapsed = target["observed_at"] - p["observed_at"]
                         predicted = min(100, p["used_percent"] + estimate["percent_per_hour"] * elapsed / 3600)
@@ -208,7 +209,9 @@ def evaluate(rows, train_fraction=2 / 3):
             "limitations": ["The interval-linear proxy is not the legacy sub-minute TUI estimator.",
                             "Hourly-era gaps are not interpolated into ten-minute observations.",
                             "Depletion is interval-censored; reset or disappearance alone is not exhaustion.",
-                            "Warning continuation is not a ground-truth false-positive label.",
+                             "Warning continuation is not a ground-truth false-positive label.",
+                            "runtime_current is the raw single-window pace, not the displayed calendar ETA.",
+                            "runtime_calendar is evaluated for depletion ETA only; its active rate is not a wall-clock linear consumption rate.",
                             "Overlapping observations are correlated; these are not confidence intervals."],
             "results": {key: {**{k: v for k,v in result.items() if k not in ("models", "paired_horizon_errors_pp", "paired_eta_interval_errors_minutes", "paired_deadline_jumps_minutes", "depletion_events", "depletion_bracket_minutes")},
                               "depletion_events": len(result["depletion_events"]),

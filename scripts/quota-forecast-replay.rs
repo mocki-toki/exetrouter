@@ -76,40 +76,55 @@ fn validate(data: &Dataset) -> Result<()> {
 
 fn records(a: &Account, collected_at: i64) -> Vec<Record> {
     let mut output = Vec::new();
-    for kind in ["primary", "secondary"] {
-        let mut points: Vec<_> = a
-            .points
+    let mut points: Vec<_> = a
+        .points
+        .iter()
+        .filter(|p| p.hour + 600 <= collected_at)
+        .cloned()
+        .collect();
+    points.sort_by_key(|p| (p.observed_at, p.kind.clone()));
+    let mut history: Vec<Point> = Vec::new();
+    let mut start = 0;
+    while start < points.len() {
+        let at = points[start].observed_at;
+        let end = start
+            + points[start..]
+                .iter()
+                .take_while(|p| p.observed_at == at)
+                .count();
+        let cutoff = points[start].hour - 30 * 86400;
+        history.retain(|p| p.hour >= cutoff);
+        // Simultaneous companion windows are available together, never from the future.
+        history.extend(points[start..end].iter().cloned());
+        let as_window = |p: &Point| Window {
+            kind: p.kind.clone(),
+            used_percent: p.used_percent,
+            remaining_percent: (100.0 - p.used_percent).max(0.0),
+            window_minutes: p.window_minutes,
+            reset_at: p.reset_at,
+            observed_at: p.observed_at,
+            status: if p.reset_at.is_some_and(|r| r > p.observed_at) {
+                "current"
+            } else {
+                "unknown"
+            }
+            .into(),
+        };
+        let windows: Vec<_> = ["primary", "secondary"]
             .iter()
-            .filter(|p| p.kind == kind && p.hour + 600 <= collected_at)
-            .cloned()
+            .filter_map(|kind| history.iter().rev().find(|p| p.kind == *kind))
+            .map(as_window)
             .collect();
-        points.sort_by_key(|p| p.observed_at);
-        let mut history = Vec::new();
-        for p in points {
-            let cutoff = p.hour - 30 * 86400;
-            history.retain(|previous: &Point| previous.hour >= cutoff);
-            history.push(p.clone());
-            let window = Window {
-                kind: p.kind.clone(),
-                used_percent: p.used_percent,
-                remaining_percent: (100.0 - p.used_percent).max(0.0),
-                window_minutes: p.window_minutes,
-                reset_at: p.reset_at,
-                observed_at: p.observed_at,
-                status: if p.reset_at.is_some_and(|r| r > p.observed_at) {
-                    "current"
-                } else {
-                    "unknown"
-                }
-                .into(),
-            };
-            let forecast = quota_forecast::calculate(&history, &[window], p.observed_at).pop();
+        let forecasts = quota_forecast::calculate(&history, &windows, at);
+        for p in &points[start..end] {
+            let forecast = forecasts.iter().find(|f| f.kind == p.kind).cloned();
             output.push(Record {
                 account: a.account.clone(),
-                point: p,
+                point: p.clone(),
                 forecast,
             });
         }
+        start = end;
     }
     output
 }
@@ -195,5 +210,73 @@ mod tests {
         assert!(validate(&data).is_ok());
         data.accounts[0].account = "owner@example.com".into();
         assert!(validate(&data).is_err());
+    }
+    #[test]
+    fn replay_supplies_only_causal_companion_windows_and_history() {
+        let mut a = account();
+        let mut weeks: Vec<_> = a
+            .points
+            .iter()
+            .map(|p| Point {
+                kind: "secondary".into(),
+                window_minutes: Some(10080),
+                reset_at: Some(1800604800),
+                used_percent: p.used_percent / 2.0,
+                ..p.clone()
+            })
+            .collect();
+        a.points.append(&mut weeks);
+        let output = records(&a, 1800100000);
+        let weekly = output
+            .iter()
+            .rev()
+            .find(|r| r.point.kind == "secondary")
+            .unwrap();
+        assert!(weekly
+            .forecast
+            .as_ref()
+            .unwrap()
+            .calendar
+            .as_ref()
+            .unwrap()
+            .current
+            .is_some());
+        let mut prefix = Account {
+            account: a.account.clone(),
+            interval_seconds: 600,
+            points: a
+                .points
+                .iter()
+                .filter(|p| p.hour <= 1800005400)
+                .cloned()
+                .collect(),
+        };
+        let earlier = records(&prefix, 1800100000);
+        prefix
+            .points
+            .extend(a.points.iter().filter(|p| p.hour > 1800005400).cloned());
+        let later = records(&prefix, 1800100000);
+        for (left, right) in earlier.iter().zip(&later) {
+            assert_eq!(
+                serde_json::to_value(left).unwrap(),
+                serde_json::to_value(right).unwrap()
+            );
+        }
+        for p in &mut a.points {
+            if p.kind == "primary" {
+                p.observed_at += 1;
+            }
+        }
+        let output = records(&a, 1800100000);
+        assert!(output
+            .iter()
+            .filter(|r| r.point.kind == "secondary")
+            .all(|r| r
+                .forecast
+                .as_ref()
+                .unwrap()
+                .calendar
+                .as_ref()
+                .is_none_or(|c| c.current.is_none())));
     }
 }

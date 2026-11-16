@@ -64,6 +64,20 @@ class EvaluationTests(unittest.TestCase):
         actual = evaluation.evaluate(changed)
         self.assertEqual(expected["results"]["training/short"],actual["results"]["training/short"])
 
+    def test_calendar_eta_is_scored_separately_without_a_fake_linear_horizon(self):
+        original=rows()
+        for r in original:
+            r["point"]["window_minutes"]=10080
+            r["forecast"]["calendar"]={"current":copy.deepcopy(r["forecast"]["current"])}
+        report=evaluation.evaluate(original)
+        for result in report["results"].values():
+            raw=result["models"]["runtime_current"]
+            calendar=result["models"]["runtime_calendar"]
+            self.assertEqual(raw["estimates"],calendar["estimates"])
+            self.assertEqual(raw["eta_interval_errors_minutes"],calendar["eta_interval_errors_minutes"])
+            self.assertEqual(calendar["horizon_errors_pp"]["1800"]["count"],0)
+            self.assertGreater(raw["horizon_errors_pp"]["1800"]["count"],0)
+
     def test_resets_gaps_and_unknowns_are_not_depletion(self):
         original = rows()
         for r in original:
