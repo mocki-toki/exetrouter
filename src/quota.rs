@@ -237,6 +237,7 @@ pub(crate) fn event(event: &Value, now: i64) -> Observation {
                 error.get(*key).and_then(Value::as_str),
                 Some(
                     "usage_limit_reached"
+                        | "insufficient_quota"
                         | "rate_limit_exceeded"
                         | "slow_down"
                         | "rate_limit_error"
@@ -298,6 +299,15 @@ pub(crate) fn save(
     observation: Observation,
     now: i64,
 ) -> Result<()> {
+    if account < 0 {
+        // Platform has no Codex percentage windows. Never contaminate the
+        // parent subscription with API headers or clear a rejection on success.
+        return if let Some(until) = observation.cooldown_until() {
+            crate::platform::routes::quota(conn, account, generation, order, until)
+        } else {
+            Ok(())
+        };
+    }
     if observation.is_empty() {
         return Ok(());
     }

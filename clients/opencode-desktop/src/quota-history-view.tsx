@@ -7,6 +7,7 @@ import { createLatest } from "@opencode/plugin/gui"
 import { Dashboard } from "./contract"
 import { RangeControls, type Period } from "./time-range"
 import { ReadState, useHost } from "./ui"
+import { PlatformHistoryChart } from "./platform-history"
 
 export function QuotaHistoryView(props: { account: Account }) {
   const ctx = useHost()
@@ -42,7 +43,7 @@ export function QuotaHistoryView(props: { account: Account }) {
   const day = (at: number) => new Date(at * 1000).toLocaleString("en", period() === "24h" ? {hour:"2-digit",minute:"2-digit"} : { month: "short", day: "numeric" })
   const ticks = createMemo(() => [...new Set([0, 1, 2, 3, 4, 5, 6, 7].map((i) => Math.round(i / 7 * (data().hours.length - 1))))])
   return <section class="exr-section exr-history">
-    <header class="exr-history-heading"><div><h3>Limit history</h3><p class="exr-caption">{(history()?.interval ?? 3600) === 600 ? "10-minute" : "Hourly"} observations · unavailable intervals remain gaps</p></div><div class="exr-history-legend"><For each={data().series}>{(line) => <span><i style={{ background: line.color }} />{line.label}</span>}</For></div></header>
+    <header class="exr-history-heading"><div><h3>Subscription history</h3><p class="exr-caption">{(history()?.interval ?? 3600) === 600 ? "10-minute" : "Hourly"} observations · unavailable intervals remain gaps</p></div><div class="exr-history-legend"><For each={data().series}>{(line) => <span><i style={{ background: line.color }} />{line.label}</span>}</For></div></header>
     <RangeControls label="Limit history" period={period()} before={before()} end={before() ?? history()?.to ?? latestEnd()} now={latestEnd()} loading={report.loading} onPeriod={(value) => { setBefore(undefined); setPeriod(value) }} onBefore={setBefore} />
     <ReadState loading={report.loading} error={report.error} hasData={!!history()} noun="limit history" />
     <Show when={history()}>{(h) => <p class="exr-caption">{date(h().from)} – {date(h().to)}</p>}</Show>
@@ -59,5 +60,6 @@ export function QuotaHistoryView(props: { account: Account }) {
         <p class="exr-caption exr-history-caption">Latest observation · {date(data().latest)}</p>
       </div>
     </Show>
+    <Show when={props.account.platform && history()?.platform}>{(platform)=><PlatformHistoryChart history={platform()} />}</Show>
   </section>
 }

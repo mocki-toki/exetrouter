@@ -1,5 +1,6 @@
 mod activation;
 pub(crate) mod native;
+mod platform;
 use crate::{
     oauth::{self, Account, Vault},
     store::Database,
@@ -99,9 +100,16 @@ pub struct InferenceHeaders<'a> {
 pub struct Config {
     pub base_url: String,
     pub issuer: String,
+    platform_base: String,
 }
 
 impl Config {
+    #[cfg(test)]
+    pub(crate) fn mock_platform(mut self, base: &str) -> Result<Self> {
+        crate::platform::validate_mock_endpoint(base)?;
+        self.platform_base = base.trim_end_matches('/').into();
+        Ok(self)
+    }
     pub fn new(base_url: String, issuer: String, allow_mock: bool) -> Result<Self> {
         for (value, production) in [(&base_url, BACKEND), (&issuer, oauth::ISSUER)] {
             let url = Url::parse(value)?;
@@ -122,6 +130,7 @@ impl Config {
         Ok(Self {
             base_url: base_url.trim_end_matches('/').into(),
             issuer: issuer.trim_end_matches('/').into(),
+            platform_base: crate::platform::BASE.into(),
         })
     }
 }
@@ -204,6 +213,15 @@ impl Upstream {
     }
 
     pub async fn account(&self, id: i64) -> Result<Account> {
+        if id < 0 {
+            let vault = self.vault.clone();
+            return self
+                .db
+                .call(move |conn| {
+                    crate::platform::routes::account(conn, &vault, id, Utc::now().timestamp())
+                })
+                .await;
+        }
         oauth::access(&self.db, &self.vault, &self.client, &self.config.issuer, id).await
     }
 
@@ -260,13 +278,46 @@ impl Upstream {
                 Err(_) => tracing::warn!(event = "account_catalog_unavailable"),
             }
         }
-        if successful == 0 {
+        let platform =
+            crate::platform::route_catalog(&self.db, &self.vault, &self.config.platform_base)
+                .await?;
+        if successful == 0 && platform.is_empty() {
             return Err("all active account catalogs unavailable".into());
         }
-        Ok(available.into_values().collect())
+        let mut models = available
+            .into_values()
+            .map(|mut model| {
+                model.present();
+                model
+            })
+            .collect::<Vec<_>>();
+        // Native descriptors remain authoritative for shared IDs; never merge
+        // Platform context limits into a Codex descriptor.
+        let ids = models
+            .iter()
+            .map(|m| m.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        models.extend(platform.into_iter().filter(|m| !ids.contains(&m.id)));
+        Ok(models)
     }
 
     async fn account_models(&self, id: i64) -> Result<Vec<Model>> {
+        if id < 0 {
+            let fresh = self
+                .db
+                .call(move |conn| crate::platform::routes::models(conn, id, Utc::now().timestamp()))
+                .await;
+            if let Ok(models) = fresh {
+                return Ok(models);
+            }
+            let _guard = self.catalog_lock.lock().await;
+            crate::platform::route_catalog(&self.db, &self.vault, &self.config.platform_base)
+                .await?;
+            return self
+                .db
+                .call(move |conn| crate::platform::routes::models(conn, id, Utc::now().timestamp()))
+                .await;
+        }
         let account = self.account(id).await?;
         let id = account.info.id;
         let now = Utc::now().timestamp();
@@ -276,7 +327,7 @@ impl Upstream {
                 if !valid { return Err("OAuth account changed during catalog read".into()); }
                 let mut stmt=conn.prepare("SELECT model,display_name,metadata FROM oauth_models WHERE account_id=?1 ORDER BY model")?;
                 let rows=stmt.query_map([id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
-                let rows=rows.into_iter().map(|(id,display_name,metadata)|Ok(Model { id,display_name,object:"model".into(),owned_by:"openai".into(),metadata:metadata.map(|value|serde_json::from_str(&value)).transpose()? })).collect::<Result<Vec<_>>>()?;
+                let rows=rows.into_iter().map(|(id,display_name,metadata)|Ok(Model { id,display_name,object:"model".into(),owned_by:"openai".into(),source:"codex".into(),capabilities:Vec::new(),metadata:metadata.map(|value|serde_json::from_str(&value)).transpose()? })).collect::<Result<Vec<_>>>()?;
                 Ok(rows)
             }).await;
         }
@@ -363,6 +414,12 @@ impl Upstream {
     }
 
     pub async fn account_enabled(&self, id: i64) -> crate::Result<bool> {
+        if id < 0 {
+            return self
+                .db
+                .call(move |conn| crate::platform::routes::enabled(conn, id))
+                .await;
+        }
         self.db
             .call(move |conn| {
                 // Only explicit deactivation permits this availability transfer;
@@ -389,7 +446,7 @@ impl Upstream {
         self.select_excluding(model, affinity, &[]).await
     }
 
-    pub(crate) async fn select_excluding(
+    pub(crate) async fn select_codex_excluding(
         &self,
         model: &str,
         affinity: Option<&str>,
@@ -521,6 +578,13 @@ impl Upstream {
 
     /// Percentages alone do not block an account: credits may still permit it.
     pub(crate) async fn quota_exhausted(&self, id: i64) -> std::result::Result<bool, SelectError> {
+        if id < 0 {
+            let account = self
+                .account(id)
+                .await
+                .map_err(|_| SelectError::UpstreamUnavailable)?;
+            return Ok(account.info.cooldown_until.is_some());
+        }
         self.db
             .call(move |conn| {
                 let now = Utc::now().timestamp();
@@ -540,6 +604,9 @@ impl Upstream {
         &self,
         id: i64,
     ) -> std::result::Result<bool, SelectError> {
+        if id < 0 {
+            return Ok(false);
+        }
         self.db
             .call(move |conn| {
                 if !crate::account_preferences::effective(conn, id)?.enabled {
@@ -562,6 +629,24 @@ impl Upstream {
         let Some(id) = owner else {
             return self.select_cached(model, affinity).await;
         };
+        if id < 0 {
+            // A project-owned opaque continuation never changes backend merely
+            // because another subscription recovered or this key is paused.
+            if !self
+                .account_enabled(id)
+                .await
+                .map_err(|_| SelectError::UpstreamUnavailable)?
+            {
+                return self.select_excluding(model, affinity, &[id]).await;
+            }
+            let pinned = self.select_pinned(model, id).await;
+            if matches!(&pinned, Err(SelectError::Cooldown(_))) {
+                if let Ok(alternate) = self.select_excluding(model, affinity, &[id]).await {
+                    return Ok(alternate);
+                }
+            }
+            return pinned;
+        }
         if !self
             .account_enabled(id)
             .await
@@ -612,6 +697,9 @@ impl Upstream {
         model: &str,
         owner: i64,
     ) -> std::result::Result<bool, SelectError> {
+        if owner < 0 {
+            return Ok(false);
+        }
         let requested = model.to_owned();
         let ids=self.db.call(move |conn|{
             let now=Utc::now().timestamp();
@@ -643,7 +731,8 @@ impl Upstream {
     }
 
     pub async fn check_available(&self) -> std::result::Result<(), SelectError> {
-        self.db
+        let native = self
+            .db
             .call(|conn| {
                 let now = Utc::now().timestamp();
                 let accounts = oauth::list(conn)?;
@@ -671,7 +760,43 @@ impl Upstream {
                 Ok(Err(wait_error(wait)))
             })
             .await
-            .map_err(|_| SelectError::UpstreamUnavailable)?
+            .map_err(|_| SelectError::UpstreamUnavailable)?;
+        if native.is_ok() {
+            return native;
+        }
+        let _ =
+            crate::platform::route_catalog(&self.db, &self.vault, &self.config.platform_base).await;
+        let vault = self.vault.clone();
+        let platform = self
+            .db
+            .call(move |conn| {
+                let now = Utc::now().timestamp();
+                for owner in crate::platform::routes::owners(conn)? {
+                    let Ok(account) = crate::platform::routes::account(conn, &vault, owner, now)
+                    else {
+                        continue;
+                    };
+                    if account.info.cooldown_until.is_some() || account.info.health_until.is_some()
+                    {
+                        continue;
+                    }
+                    if let Ok(models) = crate::platform::routes::models(conn, owner, now) {
+                        for model in models {
+                            if crate::platform::routes::model_spending_permitted(conn, &model.id)? {
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+                Ok(false)
+            })
+            .await
+            .map_err(|_| SelectError::UpstreamUnavailable)?;
+        if platform {
+            Ok(())
+        } else {
+            native
+        }
     }
     async fn failure_wait(&self, model: &str) -> SelectError {
         let model = model.to_owned();
@@ -692,6 +817,25 @@ impl Upstream {
         model: &str,
         id: i64,
     ) -> std::result::Result<Selection, SelectError> {
+        if id < 0 {
+            let account = self
+                .account(id)
+                .await
+                .map_err(|_| SelectError::UpstreamUnavailable)?;
+            self.validate(&account, model).await?;
+            let reservation = self
+                .pool
+                .reserve(&[crate::pool::Candidate {
+                    id,
+                    quota: None,
+                    routing: Default::default(),
+                }])
+                .expect("one candidate");
+            return Ok(Selection {
+                account,
+                _reservation: reservation,
+            });
+        }
         let enabled = self
             .db
             .call(move |conn| Ok(crate::account_preferences::effective(conn, id)?.enabled))
@@ -742,6 +886,30 @@ impl Upstream {
         account: &Account,
         model: &str,
     ) -> std::result::Result<(), SelectError> {
+        if account.info.id < 0 {
+            let requested = model.to_owned();
+            let permitted = self
+                .db
+                .call(move |conn| {
+                    crate::platform::routes::model_spending_permitted(conn, &requested)
+                })
+                .await
+                .map_err(|_| SelectError::UpstreamUnavailable)?;
+            if !permitted {
+                let _ = self.models().await;
+                let requested = model.to_owned();
+                if !self
+                    .db
+                    .call(move |conn| {
+                        crate::platform::routes::model_spending_permitted(conn, &requested)
+                    })
+                    .await
+                    .map_err(|_| SelectError::UpstreamUnavailable)?
+                {
+                    return Err(SelectError::UpstreamUnavailable);
+                }
+            }
+        }
         self.check_cooldown(account).await?;
         if !self
             .account_models(account.info.id)
@@ -758,6 +926,25 @@ impl Upstream {
     pub async fn check_cooldown(&self, account: &Account) -> std::result::Result<(), SelectError> {
         let id = account.info.id;
         let generation = account.info.generation;
+        if id < 0 {
+            let current = self
+                .account(id)
+                .await
+                .map_err(|_| SelectError::UpstreamUnavailable)?;
+            if current.info.generation != generation {
+                return Err(SelectError::UpstreamUnavailable);
+            }
+            return match (current.info.cooldown_until, current.info.health_until) {
+                (Some(c), Some(h)) => Err(if c >= h {
+                    SelectError::Cooldown(c)
+                } else {
+                    SelectError::Backoff(h)
+                }),
+                (Some(c), None) => Err(SelectError::Cooldown(c)),
+                (None, Some(h)) => Err(SelectError::Backoff(h)),
+                (None, None) => Ok(()),
+            };
+        }
         match self
             .db
             .call(move |conn| {
@@ -785,6 +972,74 @@ impl Upstream {
         order: i64,
         options: InferenceHeaders<'_>,
     ) -> Result<reqwest::Response> {
+        if account.info.id < 0 {
+            // Fixed public Responses endpoint, working key only. Codex account,
+            // turn/session/Lite headers and the caller's bearer never cross over.
+            if !matches!(path, "responses" | "responses/compact") || body["generate"] == false {
+                return Err("unsupported Platform operation".into());
+            }
+            self.check_cooldown(account)
+                .await
+                .map_err(|_| "Platform route is unavailable")?;
+            let model = body["model"]
+                .as_str()
+                .ok_or("model is required")?
+                .to_owned();
+            if !self
+                .db
+                .call(move |conn| crate::platform::routes::model_spending_permitted(conn, &model))
+                .await?
+            {
+                return Err("Platform spending is disabled for Codex models".into());
+            }
+            let body = crate::platform::inference_payload(body, path == "responses/compact")?;
+            let response = self
+                .inference_client
+                .post(format!("{}/{path}", self.config.platform_base))
+                .bearer_auth(&account.credentials.access_token)
+                .header(
+                    reqwest::header::ACCEPT,
+                    if path == "responses/compact" {
+                        "application/json"
+                    } else {
+                        "text/event-stream"
+                    },
+                )
+                .json(&body)
+                .send()
+                .await;
+            return match response {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    if status == 401 {
+                        self.unauthorized(account, crate::health::Scope::Responses, order)
+                            .await?;
+                    } else if status == 408 || (500..=599).contains(&status) {
+                        self.failure(
+                            account,
+                            crate::health::Scope::Responses,
+                            order,
+                            "upstream_5xx",
+                            retry_at(response.headers()),
+                        )
+                        .await?;
+                    }
+                    Ok(response)
+                }
+                Err(_) => {
+                    let _ = self
+                        .failure(
+                            account,
+                            crate::health::Scope::Responses,
+                            order,
+                            "transport",
+                            None,
+                        )
+                        .await;
+                    Err("upstream connection failed".into())
+                }
+            };
+        }
         let mut headers = inference_headers(account, body, options.responses_lite)?;
         if let Some(value) = options.turn_state {
             headers.insert("x-codex-turn-state", value.clone());
@@ -866,10 +1121,16 @@ impl Upstream {
                     if excluded.len() >= 4 {
                         return Err(SocketError::Cooldown(until));
                     }
-                    account = self
+                    let alternate = self
                         .select_excluding(model, None, &excluded)
                         .await
                         .map_err(|_| SocketError::Cooldown(until))?;
+                    if (account.info.id < 0 || alternate.info.id < 0)
+                        && !crate::platform::transfer_safe(payload)
+                    {
+                        return Err(SocketError::Cooldown(until));
+                    }
+                    account = alternate;
                     if let Some(metadata) = payload
                         .get_mut("client_metadata")
                         .and_then(Value::as_object_mut)
@@ -889,7 +1150,11 @@ impl Upstream {
         body: &Value,
         responses_lite: bool,
     ) -> std::result::Result<(ResponsesConnection, HeaderMap), SocketError> {
-        if prefer_http(body) {
+        if account.info.id < 0 && body["generate"] == false {
+            // Public HTTP cannot emulate a native non-generating warmup.
+            return Err(SocketError::Unavailable);
+        }
+        if account.info.id < 0 || prefer_http(body) {
             match self.check_cooldown(account).await {
                 Ok(()) => return Ok((ResponsesConnection::Http, HeaderMap::new())),
                 Err(SelectError::Cooldown(until)) => return Err(SocketError::Cooldown(until)),
@@ -910,6 +1175,9 @@ impl Upstream {
         body: &Value,
         responses_lite: bool,
     ) -> std::result::Result<(UpstreamSocket, HeaderMap), SocketError> {
+        if account.info.id < 0 {
+            return Err(SocketError::Unavailable);
+        }
         match self.check_cooldown(account).await {
             Ok(()) => {}
             Err(SelectError::Cooldown(until)) => return Err(SocketError::Cooldown(until)),
@@ -1393,6 +1661,8 @@ mod tests {
             display_name: id.into(),
             object: "model".into(),
             owned_by: "openai".into(),
+            source: "codex".into(),
+            capabilities: Vec::new(),
             metadata: None,
         }
     }

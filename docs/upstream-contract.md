@@ -2,6 +2,13 @@
 
 ExetRouter uses `https://chatgpt.com/backend-api/codex` with ChatGPT Codex OAuth. OpenAI Platform keys and registered ChatGPT token-sharing grants are separate credentials. Backend compatibility does not guarantee stability or permission to share subscriptions.
 
+Configured [Platform routes](platform-api.md) additionally use the fixed public
+API with project working keys, independent context identities and health. Codex
+remains primary; the operator-controlled same-model API fallback is quota-only,
+never an authentication/backoff bypass. Platform compaction is unary public API
+compaction, not the Codex trigger described below. Non-generating native warmup
+is unsupported on HTTP-backed Platform routes and never becomes billed inference.
+
 Reviewed client revisions live in [protocol-sources.json](protocol-sources.json). The [October 2 audit](native-protocol-audit.md) covers Codex 0.160.0 and OpenCode V2 2.0.22; the earlier October 1 live matrix used 0.159.3/2.0.21. See [compatibility](compatibility.md#verified-versions-and-scope) for scope and [live testing](live-testing.md) for measured evidence. Inspect exact current release sources before changing adapters.
 
 ## Protocol

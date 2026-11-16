@@ -5,6 +5,12 @@ a single native-web dashboard panel. Targets the
 OpenCode **2.2.6** plugin contract; GUI APIs are experimental. This package is not
 published to npm. See [the integration guide](../../docs/opencode-desktop.md).
 
+For configured Platform accounts, Overview shows estimated remaining funds from
+the operator's manual balance minus ExetRouter standard token costs. Account
+details also show a separate organization-wide estimate from delayed Costs API
+reports. New entries restart both calculations; neither is a live provider
+balance. Missing data stays explicitly unavailable. See [manual balance setup](../../docs/platform-api.md#manual-remaining-funds-estimates).
+
 ## Build
 
 Nix users can build `.#exetrouter-opencode-plugin` or use the Home Manager
@@ -117,13 +123,10 @@ The token action menu also uses a local accessible submenu, which the SDK's
 item-list menu API cannot represent.
 No separate UI framework or terminal renderer is bundled.
 
-- **Overview:** router status, OAuth/catalog/concurrency, account availability,
-  a compact [capacity outlook](../../docs/capacity-outlook.md) with model-scoped
-  runway/interruption estimates, expiring credits and detailed reserve/scenario
-  inspection (requires updated router/native metadata),
+- **Overview:** router status, concurrency, account availability,
   Best/Priority markers, reset credits/expiry, automatic reset and weekly
   activation status, reported quota windows/reset times, cooldown and bounded
-  session-local forecasts. Open account details for routing/target share/deadline
+  session-local forecasts. Open account details for subscription history, billing
   and server-wide client activity (own names and other users' aliases) in a
   live-updating details dialog.
 - **Usage:** rolling periods and interval paging, total/user/model/token grouping,

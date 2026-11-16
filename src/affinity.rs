@@ -166,7 +166,7 @@ fn open<'a>(value: &'a str, kind: Kind, key: &[u8], user: i64) -> Result<(&'a st
     let account = i64::from_be_bytes(meta[8..16].try_into()?);
     // The authenticated legacy expiry remains in the format, but is no longer
     // an authorization condition, including for already-issued proofs.
-    if owner != user || account <= 0 {
+    if owner != user || account == 0 || account == i64::MIN {
         return Err("context proof invalid".into());
     }
     Ok((raw, account))
@@ -345,6 +345,11 @@ pub(crate) fn references(value: &Value, key: &[u8], user: i64) -> Result<Vec<Ref
     ) -> Result<()> {
         let mut add = |raw: &str, kind| -> Result<()> {
             let item = reference(raw, kind, key, user)?;
+            if found.get(&item.digest).is_some_and(|old| {
+                old.account != item.account && (old.account < 0 || item.account < 0)
+            }) {
+                return Err("conflicting backend context".into());
+            }
             found.entry(item.digest).or_insert(item);
             Ok(())
         };
@@ -402,6 +407,9 @@ pub(crate) fn references(value: &Value, key: &[u8], user: i64) -> Result<Vec<Ref
         // carried by historical receipts that compaction may have made obsolete.
         for digest in plain[16..].as_chunks::<32>().0 {
             if let Some(item) = found.get_mut(digest) {
+                if item.account < 0 {
+                    return Err("Platform context cannot use a Codex transfer receipt".into());
+                }
                 item.portable = true;
             }
         }
@@ -498,11 +506,15 @@ pub(crate) fn lookup_references(
             }
             continue;
         }
-        let transferred = conn.query_row(
+        let transferred = if item.account < 0 {
+            None
+        } else {
+            conn.query_row(
             "SELECT b.account_id FROM context_bindings b JOIN context_bindings p ON p.user_id=b.user_id AND p.digest=?3 AND p.account_id=b.account_id WHERE b.user_id=?1 AND b.digest=?2",
             params![user,item.digest.as_slice(),portability_digest(&item.digest).as_slice()],
             |row| row.get::<_,i64>(0),
-        ).optional()?;
+        ).optional()?
+        };
         let (account, portable) = transferred.map_or((item.account, false), |id| (id, true));
         if portable {
             portable_owner.get_or_insert(account);
@@ -527,6 +539,17 @@ pub(crate) fn transfer_references(
     generation: i64,
     refs: &[Reference],
 ) -> Result<Vec<Digest>> {
+    if !can_transfer(refs, account) {
+        return Err("opaque context cannot cross Platform projects or backends".into());
+    }
+    if account < 0 {
+        if !crate::platform::routes::valid(conn, account, generation)?
+            || !crate::platform::routes::enabled(conn, account)?
+        {
+            return Err("Platform route changed before context transfer".into());
+        }
+        return Ok(Vec::new());
+    }
     let tx = conn.transaction()?;
     let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts WHERE id=?1 AND generation=?2 AND state='active')", params![account,generation], |r| r.get(0))?;
     if !valid || !crate::account_preferences::effective(&tx, account)?.enabled {
@@ -543,6 +566,11 @@ pub(crate) fn transfer_references(
     }
     tx.commit()?;
     Ok(digests)
+}
+
+/// Ownership proofs establish provenance, not provider-side portability.
+pub(crate) fn can_transfer(refs: &[Reference], target: i64) -> bool {
+    refs.iter().all(|item| item.account >= 0 && target >= 0)
 }
 
 pub(crate) fn digests(value: &Value, key: &[u8], user: i64) -> Result<Vec<Digest>> {

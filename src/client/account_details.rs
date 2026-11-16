@@ -8,7 +8,7 @@ use ratatui::{
     symbols::Marker,
     text::{Line, Span},
     widgets::{
-        Axis, Block, BorderType, Borders, Chart, Dataset, Gauge, GraphType, Paragraph, Widget, Wrap,
+        Axis, Block, BorderType, Borders, Chart, Dataset, GraphType, Paragraph, Widget, Wrap,
     },
     Frame,
 };
@@ -34,8 +34,8 @@ fn history(account: &Value) -> Option<History> {
         && h.to_utc % interval == 0
         && h.to_utc
             .checked_sub(h.from_utc)
-            .is_some_and(|span| (1..=168 * 3600).contains(&span))
-        && h.points.len() <= (168 * 3600 / interval * 2) as usize
+            .is_some_and(|span| (1..=2160 * 3600).contains(&span))
+        && h.points.len() <= (2160 * 3600 / interval * 2) as usize
         && h.points.iter().all(|p| {
             matches!(p.kind.as_str(), "primary" | "secondary")
                 && p.hour >= h.from_utc
@@ -54,23 +54,92 @@ pub(super) fn range(account: &Value) -> Option<(i64, i64, i64)> {
     history(account).map(|h| (h.from_utc, h.to_utc, h.interval_seconds))
 }
 fn details(account: &Value, now: i64) -> String {
-    let details = render::account_details(account, now)
+    render::account_details(account, now)
         .lines()
         .skip(2)
         .collect::<Vec<_>>()
-        .join("\n");
-    format!("Routing\n{details}")
+        .join("\n")
 }
 pub(super) fn height(account: &Value, now: i64, width: u16) -> usize {
-    TOP as usize
+    top_height(account) as usize
         + Paragraph::new(details(account, now))
             .wrap(Wrap { trim: false })
             .line_count(width.max(1))
+}
+
+fn top_height(account: &Value) -> u16 {
+    TOP + if account["platform"].is_object() {
+        4
+    } else {
+        0
+    } + if platform_history(account).is_some() {
+        15
+    } else {
+        0
+    }
+}
+fn platform_history(account: &Value) -> Option<crate::platform::costs::History> {
+    if !account["platform"].is_object() {
+        return None;
+    }
+    let h: crate::platform::costs::History =
+        serde_json::from_value(account["quota_history"]["platform"].clone()).ok()?;
+    let mut seen = std::collections::BTreeSet::new();
+    (h.interval_seconds == 86400
+        && h.to_utc > h.from_utc
+        && h.to_utc - h.from_utc <= 90 * 86400
+        && h.points.len() <= 92
+        && h.points.iter().all(|p| {
+            p.from_utc >= h.from_utc
+                && p.from_utc % 86400 == 0
+                && p.to_utc <= h.to_utc
+                && p.to_utc > p.from_utc
+                && p.to_utc <= p.from_utc + 86400
+                && p.observed_at >= p.to_utc
+                && p.usd_nanos >= 0
+                && seen.insert(p.from_utc)
+        }))
+    .then_some(h)
+}
+pub(super) fn cost_meter(buf: &mut Buffer, area: Rect, percent: Option<f64>) {
+    if area.is_empty() {
+        return;
+    }
+    let filled =
+        (f64::from(area.width) * percent.unwrap_or(0.).clamp(0., 100.) / 100.).round() as u16;
+    for x in 0..area.width {
+        buf[(area.x + x, area.y)]
+            .set_char('━')
+            .set_style(Style::default().fg(if x < filled {
+                Color::Rgb(210, 180, 125)
+            } else {
+                Color::DarkGray
+            }));
+    }
 }
 fn put(buf: &mut Buffer, y: u16, value: impl Into<Line<'static>>, color: Color) {
     Paragraph::new(value.into())
         .style(Style::default().fg(color))
         .render(Rect::new(0, y, buf.area.width, 1), buf);
+}
+
+pub(super) fn meter(buf: &mut Buffer, area: Rect, remaining: Option<f64>) {
+    if area.is_empty() {
+        return;
+    }
+    let filled =
+        (f64::from(area.width) * remaining.unwrap_or(0.).clamp(0., 100.) / 100.).round() as u16;
+    let color = match remaining {
+        Some(p) if p <= 20. => Color::Rgb(223, 104, 112),
+        Some(p) if p <= 50. => Color::Rgb(232, 191, 82),
+        Some(_) => Color::Rgb(93, 195, 143),
+        None => Color::DarkGray,
+    };
+    for x in 0..area.width {
+        buf[(area.x + x, area.y)]
+            .set_char('━')
+            .set_style(Style::default().fg(if x < filled { color } else { Color::DarkGray }));
+    }
 }
 
 pub(super) fn draw(
@@ -85,7 +154,8 @@ pub(super) fn draw(
         return;
     }
     let width = area.width;
-    let mut buf = Buffer::empty(Rect::new(0, 0, width, TOP));
+    let top_height = top_height(account);
+    let mut buf = Buffer::empty(Rect::new(0, 0, width, top_height));
     put(
         &mut buf,
         0,
@@ -104,8 +174,14 @@ pub(super) fn draw(
         .collect();
     let columns = windows.len().max(1) as u16;
     for (i, w) in windows.iter().enumerate() {
-        let x = i as u16 * width / columns;
-        let wwidth = (width / columns).saturating_sub(2);
+        let gap = if columns > 1 { 2 } else { 0 };
+        let col_width = width.saturating_sub(gap) / columns;
+        let x = i as u16 * (col_width + gap);
+        let wwidth = if i + 1 == windows.len() {
+            width - x
+        } else {
+            col_width
+        };
         let label = render::window_label(w);
         Paragraph::new(label)
             .style(Style::default().fg(Color::Gray))
@@ -116,13 +192,11 @@ pub(super) fn draw(
         ))
         .style(Style::default().fg(COLORS[i]).bold())
         .render(Rect::new(x, 3, wwidth, 1), &mut buf);
-        if let Some(left) = w["remaining_percent"].as_f64() {
-            Gauge::default()
-                .ratio((left / 100.0).clamp(0.0, 1.0))
-                .label("")
-                .gauge_style(Style::default().fg(COLORS[i]).bg(Color::DarkGray))
-                .render(Rect::new(x, 4, wwidth, 1), &mut buf);
-        }
+        meter(
+            &mut buf,
+            Rect::new(x, 4, wwidth, 1),
+            w["remaining_percent"].as_f64(),
+        );
         Paragraph::new(format!("Resets {}", chart_date(w["reset_at"].as_i64())))
             .style(Style::default().fg(Color::Gray))
             .render(Rect::new(x, 5, wwidth, 1), &mut buf);
@@ -132,9 +206,9 @@ pub(super) fn draw(
         7,
         Line::styled(
             if account["quota_history"]["interval_seconds"] == 3600 {
-                "Limit history · last 7 days · hourly"
+                "Subscription history · hourly"
             } else {
-                "Limit history · last 7 days · 10-minute steps"
+                "Subscription history · 10-minute steps"
             },
             Style::default().bold(),
         ),
@@ -146,6 +220,25 @@ pub(super) fn draw(
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(" Quota left ");
+    let span = range(account).map(|(from, to, _)| to - from);
+    let mut periods = Vec::new();
+    for (label, duration) in [
+        ("24 hours", 86400),
+        ("7 days", 7 * 86400),
+        ("30 days", 30 * 86400),
+        ("90 days", 90 * 86400),
+    ] {
+        periods.push(Span::styled(
+            format!(" {label} "),
+            if span == Some(duration) {
+                Style::default().fg(Color::Black).bg(Color::Gray)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+        periods.push(Span::raw(" "));
+    }
+    put(&mut buf, 8, Line::from(periods), Color::White);
     if let Some(h) = history(account).filter(|h| !h.points.is_empty()) {
         let mut kinds: Vec<_> = h.points.iter().map(|p| p.kind.as_str()).collect();
         kinds.sort_unstable();
@@ -270,7 +363,7 @@ pub(super) fn draw(
         }
         Paragraph::new(Line::from(legend))
             .alignment(Alignment::Right)
-            .render(Rect::new(0, 8, width, 1), &mut buf);
+            .render(Rect::new(0, 25, width, 1), &mut buf);
         put(&mut buf, 22, chart_date(Some(selected)), Color::White);
         if width < 80 {
             for (i, value) in values.into_iter().take(2).enumerate() {
@@ -290,21 +383,127 @@ pub(super) fn draw(
         .block(block)
         .render(chart_area, &mut buf);
     }
+    let shift = if account["platform"].is_object() {
+        4
+    } else {
+        0
+    };
+    if shift > 0 {
+        for y in (7..TOP).rev() {
+            for x in 0..width {
+                buf[(x, y + shift)] = buf[(x, y)].clone();
+            }
+        }
+        for y in 7..11 {
+            for x in 0..width {
+                buf[(x, y)].reset();
+            }
+        }
+        let c = &account["platform"]["balance"];
+        let remaining = c["exetrouter"]["remaining_usd_nanos"]
+            .as_i64()
+            .map(|n| n as f64 / 1e9);
+        let budget = c["initial_usd_nanos"].as_i64().map(|n| n as f64 / 1e9);
+        put(
+            &mut buf,
+            7,
+            crate::platform::balance::headline(&account["platform"]),
+            COLORS[3],
+        );
+        cost_meter(
+            &mut buf,
+            Rect::new(0, 8, width, 1),
+            remaining
+                .zip(budget)
+                .filter(|(_, b)| *b > 0.)
+                .map(|(s, b)| s / b * 100.),
+        );
+        put(
+            &mut buf,
+            9,
+            "ExetRouter token estimate · organization alternative below",
+            Color::Gray,
+        );
+    }
+    if let Some(h) = platform_history(account) {
+        let y = TOP + shift;
+        put(
+            &mut buf,
+            y,
+            "Platform API costs · daily USD · unavailable days remain gaps",
+            COLORS[3],
+        );
+        let points: Vec<_> = h
+            .points
+            .iter()
+            .map(|p| {
+                (
+                    (p.from_utc - h.from_utc) as f64 / 86400.,
+                    p.usd_nanos as f64 / 1e9,
+                )
+            })
+            .collect();
+        let maximum = points.iter().map(|(_, usd)| *usd).fold(0.01, f64::max);
+        let data = Dataset::default()
+            .data(&points)
+            .marker(Marker::Braille)
+            .graph_type(GraphType::Scatter)
+            .style(Style::default().fg(COLORS[3]));
+        let label = |at: i64| {
+            chrono::DateTime::from_timestamp(at, 0)
+                .map(|d| d.with_timezone(&chrono::Local).format("%b %-d").to_string())
+                .unwrap_or_default()
+        };
+        Chart::new(vec![data])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            )
+            .x_axis(
+                Axis::default()
+                    .bounds([0., ((h.to_utc - h.from_utc) as f64 / 86400.).max(1.)])
+                    .labels([label(h.from_utc), label(h.to_utc)]),
+            )
+            .y_axis(Axis::default().bounds([0., maximum]).labels([
+                crate::money::usd(0.),
+                crate::money::usd(maximum / 2.),
+                crate::money::usd(maximum),
+            ]))
+            .render(Rect::new(0, y + 1, width, 11), &mut buf);
+        let selected = selected.unwrap_or(h.to_utc - 1);
+        let point = h
+            .points
+            .iter()
+            .find(|p| p.from_utc <= selected && selected < p.to_utc);
+        put(
+            &mut buf,
+            y + 12,
+            format!(
+                "{} · {}",
+                chart_date(Some(selected)),
+                point
+                    .map(|p| crate::money::usd(p.usd_nanos as f64 / 1e9))
+                    .unwrap_or_else(|| "Not observed".into())
+            ),
+            Color::Gray,
+        );
+    }
     for y in 0..area.height {
         let source = y.saturating_add(scroll);
-        if source >= TOP {
+        if source >= top_height {
             break;
         }
         for x in 0..width {
             frame.buffer_mut()[(area.x + x, area.y + y)] = buf[(x, source)].clone();
         }
     }
-    let top = TOP.saturating_sub(scroll).min(area.height);
+    let top = top_height.saturating_sub(scroll).min(area.height);
     if top < area.height {
         frame.render_widget(
             Paragraph::new(details(account, now))
                 .wrap(Wrap { trim: false })
-                .scroll((scroll.saturating_sub(TOP), 0)),
+                .scroll((scroll.saturating_sub(top_height), 0)),
             Rect::new(area.x, area.y + top, width, area.height - top),
         );
     }
@@ -343,7 +542,7 @@ mod tests {
                 .iter()
                 .map(|c| c.symbol())
                 .collect::<String>();
-            assert!(text.contains("Limit history"));
+            assert!(text.contains("Subscription history"));
             assert!(text.contains("8-hour") && text.contains("Weekly"));
             if height >= 25 {
                 assert!(text.contains("Quota left"));
@@ -375,6 +574,41 @@ mod tests {
         ] {
             assert_eq!(quota_left(used), left);
         }
+    }
+
+    #[test]
+    fn platform_costs_have_a_full_width_meter_and_separate_daily_dollar_history() {
+        let base = 1_800_000_000 / 86400 * 86400;
+        let account = json!({"label":"Synthetic","platform":{"costs":{"spent_usd_nanos":5_000_000_000_i64,"budget_cents":10000}},"quota":{"windows":[{"window_minutes":10080,"remaining_percent":100}]},"quota_history":{"from_utc":base,"to_utc":base+86400,"interval_seconds":600,"points":[],"platform":{"from_utc":base,"to_utc":base+86400,"interval_seconds":86400,"points":[{"from_utc":base,"to_utc":base+86400,"observed_at":base+86400,"usd_nanos":5_000_000_000_i64}]}}});
+        let mut terminal = Terminal::new(TestBackend::new(104, 60)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), &account, base + 86400, 0, None))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("$5 / $100") && text.contains("daily USD"));
+        assert!((0..104).all(|x| terminal.backend().buffer()[(x, 8)].symbol() == "━"));
+        let mut disconnected = account;
+        disconnected.as_object_mut().unwrap().remove("platform");
+        assert!(platform_history(&disconnected).is_none());
+    }
+
+    #[test]
+    fn a_single_weekly_meter_uses_the_full_width() {
+        let account = json!({"label":"Synthetic", "quota":{"windows":[{"window_minutes":10080,"remaining_percent":100}]}});
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), &account, 1_800_000_000, 0, None))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!((0..80).all(
+            |x| buffer[(x, 4)].symbol() == "━" && buffer[(x, 4)].fg == Color::Rgb(93, 195, 143)
+        ));
     }
 
     #[test]

@@ -86,6 +86,10 @@ def main():
                 elif candidate.is_dir():
                     paths.extend(path for path in candidate.rglob("*") if path.is_file())
         for path in paths:
+            # git ls-files also lists intentional, unstaged source deletions.
+            # A dangling symlink is still an existing publication entry and must fail.
+            if not path.exists() and not path.is_symlink():
+                continue
             name = str(path.relative_to(root))
             if not allowed_path(name):
                 errors.append((name, "unexpected publication path"))

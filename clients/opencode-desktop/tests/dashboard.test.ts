@@ -4,12 +4,31 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 import { Schema } from "effect"
-import { best, Forecasts, priority, routingFresh, visibleWindows } from "../src/dashboard"
+import { best, Forecasts, priority, routingFresh, visibleWindows, historicalForecast, currentForecast, usualForecast, forecastWarning, forecastStatus, quotaForecastLabel } from "../src/dashboard"
 import { activity, activityDate, activityIndex, activityValue, dollars } from "../src/chart"
 import { NativeClient, snapshot, models, tokens, usage } from "../src/native"
 import { options } from "../src/options"
-import { Models, Profile, Tokens, Usage } from "../src/schemas"
-import { deferred, doctor, modelList, tokenList, usage as usageFixture } from "./fixtures"
+import { Models, Profile, Tokens, Usage, Snapshot } from "../src/schemas"
+import { deferred, doctor, forecastReport, modelList, tokenList, usage as usageFixture } from "./fixtures"
+import { requestAge } from "../src/format"
+
+test("client request ages use seconds, minutes, hours and days without inventing unknown times", () => {
+  const now = 1_800_000_000
+  for (const [age, expected] of [[0, "0s ago"], [59, "59s ago"], [60, "1m ago"], [3599, "59m ago"], [3600, "1h ago"], [1286 * 60, "21h ago"], [86400, "1d ago"], [172800, "2d ago"]] as const) {
+    assert.equal(requestAge(now - age, now), expected)
+  }
+  assert.equal(requestAge(now - .5, now), "0s ago")
+  for (const at of [null, now + 1, NaN, Infinity]) assert.equal(requestAge(at, now), "Unknown")
+  assert.equal(requestAge(now, NaN), "Unknown")
+})
+
+test("client labels from older native reports never expose private ciphertext", () => {
+  const raw = doctor()
+  raw.quota_accounts[0].clients.rows[0].name = "exrp1:synthetic-ciphertext"
+  const report = snapshot(raw)
+  assert.equal(report.accounts[0].clients.rows[0].name, "Label unavailable")
+  assert.doesNotMatch(JSON.stringify(report), /exrp1:|synthetic-ciphertext/)
+})
 
 test("chart indexes duplicate buckets, selects by identity and excludes future activity", () => {
   const raw = usageFixture()
@@ -55,6 +74,9 @@ test("USD chart preserves model prices, partial totals and small dollar scales",
   assert.ok(Math.abs(activity(report, "gpt-6.1-sol", "usd", 1800003600).maximum - 0.00005) < 1e-12)
   assert.equal(dollars(0.00004), "$0.00004")
   assert.equal(dollars(undefined), "—")
+  assert.equal(dollars(-1), "-$1")
+  assert.equal(dollars(-5000), "-$5k")
+  for (const [value, formatted] of [[5000,"$5k"],[12500,"$12.5k"],[1200000,"$1.2M"],[999999,"$1M"],[100,"$100"],[0,"$0"]] as const) assert.equal(dollars(value),formatted)
   const unknown = usage({ ...raw, rows: [{ ...first, estimated_usd: null }], timeline: [{ from_utc: 1800000000, to_utc: 1800003600, rows: [{ ...first, estimated_usd: null }] }] }, "model")
   assert.equal(activity(unknown, "", "usd", 1800003600).usd, null)
   assert.equal(activityValue(unknown.timeline[0], "gpt-6-astra", "usd").value, null)
@@ -233,4 +255,78 @@ test("quota forecasts match native elapsed-span, idle, reset and freshness fence
   }
   forecasts.observe(report(base + 390, 0), base + 390)
   assert.equal(forecasts.label(1, report(base + 390, 0).accounts[0].windows[0], base + 390), undefined)
+})
+
+test("shared history forecasts survive IPC and are matched to the exact current quota", () => {
+  const raw = forecastReport(), report = snapshot(raw), account = report.accounts[0], w = account.windows[0], now = report.checkedAt
+  Schema.decodeUnknownSync(Snapshot)(report)
+  const f = historicalForecast(account, w, now)
+  assert.ok(f)
+  assert.equal(currentForecast(f, now), "At this pace: ~2h 0m to limit")
+  assert.equal(usualForecast(f, now), "Historical pace: ~4h 0m to limit")
+  assert.equal(forecastWarning(f, now), "Usage above usual · ~2.0x normal · may run out before reset")
+  assert.equal(historicalForecast(account, w, now + 60), undefined)
+  assert.equal(historicalForecast({ ...account, refreshError: true }, w, now), undefined)
+  for (const changed of [{ ...w, used: 51 }, { ...w, resetAt: w.resetAt! + 1 }, { ...w, observedAt: now - 1 }, { ...w, minutes: 300 }, { ...w, kind: "secondary" }, { ...w, status: "stale" }]) {
+    assert.equal(historicalForecast(account, changed, now), undefined)
+  }
+  assert.equal(currentForecast({ ...f, current: { percentPerHour: 1, limitAt: null } }, now), "At this pace: reset first")
+  assert.equal(usualForecast({ ...f, usual: { percentPerHour: 0, limitAt: null } }, now), "Historical pace: reset first")
+  assert.equal(forecastWarning({ ...f, warning: { rateRatio: null, limitBeforeReset: false } }, now), "Usage above usual")
+  assert.equal(historicalForecast(snapshot(doctor()).accounts[0], w, now), undefined)
+})
+
+test("history forecast projection rejects malformed numeric evidence without forwarding payloads", () => {
+  const raw = forecastReport(), f = raw.quota_accounts[0].quota_forecast[0]
+  const withForecast = (forecast: unknown) => ({ ...raw, quota_accounts: [{ ...raw.quota_accounts[0], quota_forecast: [forecast] }] })
+  for (const invalid of [
+    { ...f, kind: "private-body-marker" }, { ...f, window_minutes: 0 }, { ...f, used_percent: 100 },
+    { ...f, current: { percent_per_hour: -1, limit_at: null } },
+    { ...f, current: { percent_per_hour: 25, limit_at: f.reset_at } },
+    { ...f, current: null }, { ...f, historical_cycles: 0 },
+    { ...f, warning: { rate_ratio: Infinity, limit_before_reset: true } },
+    { ...f, warning: { rate_ratio: 2, limit_before_reset: false } },
+    { ...f, current_status: "private-body-marker" }, { ...f, current_status: "quota_unchanged" },
+    { ...f, current_valid_until: f.observed_at }, { ...f, current_valid_until: f.reset_at + 1 },
+  ]) assert.throws(() => snapshot(withForecast(invalid)))
+  const safe = snapshot(withForecast({ ...f, secret: "private-body-marker" }))
+  assert.doesNotMatch(JSON.stringify(safe), /private-body-marker/)
+  assert.throws(() => snapshot({ ...raw, quota_accounts: [{ ...raw.quota_accounts[0], quota_forecast: [f, f] }] }))
+})
+
+test("runtime pace expiry suppresses obsolete ETAs and warnings without changing historical estimates", () => {
+  const raw = forecastReport(), base = raw.checked_at
+  const f = raw.quota_accounts[0].quota_forecast[0]
+  const withStatus = { ...raw, quota_accounts: [{ ...raw.quota_accounts[0], quota_forecast: [{ ...f, current_status: "recent_pace", current_valid_until: base + 20 }] }] }
+  const r = snapshot(withStatus), a = r.accounts[0], w = a.windows[0], model = historicalForecast(a,w,base)!
+  Schema.decodeUnknownSync(Snapshot)(r)
+  assert.equal(currentForecast(model,base+19), "At this pace: ~2h 0m to limit")
+  assert.equal(currentForecast(model,base+20), undefined)
+  assert.equal(forecastWarning(model,base+20), undefined)
+  assert.equal(quotaForecastLabel(a,w,base+20,new Forecasts()), "Pace unavailable: quota unchanged")
+  assert.equal(usualForecast(model,base+20), "Historical pace: ~4h 0m to limit")
+  const passed = { ...model, currentValidUntil: base+40, current: { percentPerHour:100, limitAt:base+5 } }
+  assert.equal(currentForecast(passed,base+5), undefined)
+  assert.equal(forecastStatus(passed,base+5), "Estimate needs fresh quota")
+  for (const [status, label] of [["reset_changed", "Reset changed; rebuilding pace"], ["reset_time_moving", "Reset time moving; no pace yet"], ["insufficient_history", "Building recent pace"]] as const) {
+    assert.equal(forecastStatus({ ...model, current: null, currentValidUntil: undefined, currentStatus: status },base),label)
+  }
+})
+
+test("continuous fine-grained idle observations override a coarse runtime estimate", () => {
+  for (const minutes of [300,10080]) {
+    const initial = snapshot(forecastReport()), base = initial.checkedAt, template = initial.accounts[0]
+    const fallback = new Forecasts()
+    const report = (at: number, used: number) => ({ ...initial, accounts: [{ ...template, windows: [{ ...template.windows[0], minutes, observedAt: at, used, remaining:100-used }], forecasts: [{ ...template.forecasts![0], minutes, observedAt:at, used, currentStatus:"recent_pace" as const, currentValidUntil:at+1000 }] }] })
+    fallback.observe(report(base,40),base)
+    fallback.observe(report(base+60,50),base+60)
+    const until = base+60+(minutes>=10080?1800:300)
+    let latest = report(base+60,50)
+    for (let at=base+90;at<=until;at+=30) { latest=report(at,50); fallback.observe(latest,at) }
+    const a = latest.accounts[0], w = a.windows[0]
+    assert.ok(currentForecast(historicalForecast(a,w,until),until))
+    assert.equal(quotaForecastLabel(a,w,until,fallback),"Pace unavailable: quota unchanged")
+    assert.equal(fallback.isIdle(2,w,until),false)
+    assert.equal(fallback.isIdle(a.id,{...w,resetAt:w.resetAt!+1},until),false)
+  }
 })

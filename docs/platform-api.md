@@ -1,0 +1,319 @@
+# Platform API routing, observations and managed keys
+
+Platform Admin credentials are separate from Codex OAuth. Only a local server
+operator or standalone owner can provision them; the SSH gateway, GUI and TUI
+never receive secrets or provide credential-management mutations.
+
+## Configure
+
+```sh
+exrd admin oauth platform set-admin-key 1 --key-file /private/path/admin-input
+exrd admin oauth platform configure 1 --project-id proj_example --manage-keys true
+exrd admin oauth platform refresh 1
+exrd admin oauth platform status 1 --json
+exrd admin oauth platform models 1 --json
+```
+
+The project must already exist and belong to the Admin Key's organization.
+Choosing it explicitly avoids silently modifying an unrelated project. Set
+`--manage-keys false` for costs-only observation. The standalone owner uses
+`exr account platform` with the same subcommands, arguments and implementation.
+`refresh` can provision a working key if management was explicitly configured;
+it never submits inference. Ordinary Doctor/history reads are passive.
+
+Both runtime modes run one bounded Platform maintenance loop. Metadata refreshes
+are coalesced durably and attempted at most once per 15-minute refresh interval;
+an explicit refresh may run after the one-minute in-flight exclusion. HTTP
+requests have ten-second deadlines, bounded bodies/pagination, no redirects and
+a fixed official API origin. The entire refresh has a 40-second deadline.
+Shutdown cancels work rather than leaving detached mutations.
+Key maintenance requires a successful costs read; unavailable costs do not
+trigger provisioning as a side effect of a failed refresh.
+
+## Costs, not free-credit balances
+
+The [organization Costs API](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/costs)
+provides **daily USD costs across the organization**, including activity outside
+ExetRouter. It does not report verified remaining subscription credits.
+
+Only numeric daily observations are retained, with exact integer nanodollars,
+observation time and interval. Empty returned buckets confirm zero; missing
+buckets, unsupported precision/currency and failed reads never imply zero.
+Duplicate buckets or malformed pages cannot partially overwrite a refresh.
+History retains at most 366 UTC daily buckets per configured account, even after
+a backward clock change. The refresh rereads 90 days to accept provider revisions.
+Admin credential generations prevent old or differently scoped refreshes from
+publishing. Credential replacement hides old-generation data until it is observed
+again. Removal deletes cost/working-key state, not upstream resources.
+
+The current spending summary uses the configured expected billing day at UTC
+midnight, clamped to the last day of short months; without a billing day it uses
+the UTC calendar month. This is an explicit **reporting convention**, not a
+verified invoice, grant, renewal instant or grant expiry. A contiguous observation
+through the requested end is required for a total. Otherwise it stays unknown.
+Observed spending against the configured budget is shown as `$10 / $100`, not a
+claimed free-credit balance. Human dollar displays use `$5k`, `$12.5k`, `$1.2M`;
+automation JSON retains numeric amounts. Tiny nonzero prices are not rendered $0.
+
+All available Platform funds may be used, whether granted or purchased. There is
+no free-only gate and the configured allowance is a display reference, not a local
+spending cap. Upstream remains authoritative about available funds and balance
+exhaustion. Daily costs are not subtracted from an assumed grant to admit work.
+
+Account details show separate daily-dollar Platform history under subscription
+history with the same 24-hour/7-day/30-day/90-day range controls. Daily costs are
+not interpolated into ten-minute quota samples. Partial boundary days outside a
+selected interval are omitted, not proportionally estimated. Disconnected
+accounts have no Platform meter, notice or history series.
+
+## Manual remaining-funds estimates
+
+The Admin API does not provide a documented remaining-credit balance endpoint.
+An operator can enter the amount currently visible in Platform Billing:
+
+```sh
+exrd admin oauth platform set-balance 1 --usd 75.25
+exrd admin oauth platform status 1 --json
+# Standalone owner:
+exr account platform set-balance 1 --usd 75.25
+```
+
+Each entry **replaces** the previous reconciliation point and restarts both
+estimates. It does not add credits or change the plan reference. There is no
+automatic monthly refill: enter the new actual amount after renewal, top-ups,
+expiry or other balance changes. Zero is valid. The operator/standalone-owner
+commands are local only; the restricted gateway and GUI cannot edit balances.
+
+The Overview meter defaults to **ExetRouter estimated remaining funds**: the
+entered amount minus standard token-cost estimates for Platform requests admitted
+after the entry. Native Codex requests and other accounts are excluded. The entry
+atomically captures a durable usage-event boundary; requests already admitted
+before it remain excluded even if they finish later. Token estimates are exact
+integer nanodollars at the implementation's reviewed standard prices, including
+cached input and the existing long-context tier. Each new finalized estimate is
+frozen atomically with usage, not repriced on dashboard reads. This is not an
+invoice: external activity, tool/storage fees and service-tier adjustments are
+excluded. An unpriced or interrupted request makes the remaining total unknown;
+the known subtotal and unpriced count remain visible. Negative results are not
+clamped or used to stop routing.
+
+Account details additionally show **Platform organization estimated remaining
+funds**. An independent Costs API query explicitly starts at the manual-entry
+timestamp, not at midnight or the subscription billing day. Its returned partial
+boundary buckets are never prorated, and their amounts are not added to the
+ExetRouter estimate. Missing, overlapping or duplicate intervals cannot establish
+a total; a report with contiguous coverage is labeled with its actual through
+time and observation time. Reporting can lag and be revised. Before a usable
+report arrives, this alternative is unknown, not zero spend. The bounded query
+supports up to 366 days since entry; older entries require a new reconciliation
+point for organization reporting.
+
+Both variants are estimates anchored to a manual value, **not a live provider
+balance**. Credential/project configuration changes invalidate the reconciliation
+point until re-entered. Epoch and credential-generation checks prevent delayed
+reads from updating a replacement entry. Read-only status is shared identically
+by remote/standalone CLI, GUI and TUI. No web-session credentials are required.
+
+## Thirty-day working keys
+
+The selected project uses the uniquely named `exetrouter` service account and
+an API key named `exetrouter`, with a requested lifetime of exactly 30 days and
+only model-list/Responses scopes. A missing service account is created with its
+default `member` membership, without a separate RBAC role assignment. Its initial
+bootstrap key requests the minimum supported one-second lifetime. The returned
+secret is encrypted and committed atomically with creation confirmation, marked
+inactive, and never used for model discovery or inference. Named-key provisioning
+waits until that bootstrap expiry has elapsed; if necessary a later refresh
+continues without creating another service account. A missing or unbounded
+bootstrap expiry is an uncertain operation, not permission to try again.
+Provider timestamps have second precision: an already-expired initial key may
+report equal creation and expiry timestamps. This zero observed lifetime is valid
+for a non-routable bootstrap key, never for a working key.
+
+Existing role-less accounts require explicit operator reconciliation: management
+does not automatically assign roles, delete or recreate service accounts. Existing
+member/owner roles are not demoted. Duplicate names and archived projects stop
+management. Bootstrap state uses the existing encrypted key row and confirmed
+creation operation; no database migration or new permission is required.
+
+Before reusing a stored secret, check the project's key inventory, owner access,
+account binding and provider expiry; perform a non-generating model-list read.
+Expired or confirmed-absent managed keys can be replaced. A live named key whose
+one-time secret is absent locally is not silently deleted or duplicated. A revoked
+key cannot be reactivated by recovering its redacted list value.
+
+Every potentially mutating POST is durably recorded before submission. Key
+ciphertext and successful creation confirmation commit atomically. Interruption,
+malformed replies, unconfirmed expiry or a storage failure leave an uncertain
+operation fence; **no automatic retry** occurs after restart or Admin Key
+removal/replacement. The operator must reconcile uncertain operations upstream;
+there is deliberately no blind retry/clear command. Deactivation prevents new
+key-management mutations. Encryption authenticates account, project, key ID and
+a separate versioned domain. Verified backups authenticate working keys too.
+
+Reviewed public contracts: [service accounts](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/projects/subresources/service_accounts),
+[default membership and expiring initial keys](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/projects/subresources/service_accounts/methods/create),
+[create named expiring keys](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/projects/subresources/service_accounts/subresources/api_keys/methods/create),
+[project key inventory](https://developers.openai.com/api/reference/resources/organization/subresources/projects/subresources/api_keys/methods/list).
+Offline fixtures verify these contracts, not a live account's permissions.
+
+## Read-only model availability
+
+`platform models ID` uses the actual stored working key, never the Admin Key. It
+requires matching current credential/project generations, an active account and
+operator availability, a nonexpired key and no uncertain key-management operation.
+The same identity is rechecked after the read, so replaced credentials cannot
+publish an older observation. It does not create, renew or activate a key.
+
+The bounded, atomic inventory contains at most 2,048 unique model IDs with normalized
+display names. Owner names, arbitrary metadata and payloads are discarded. The
+public Models API establishes availability only, not endpoint capabilities or a
+cash balance; no capability is guessed from a model name. The operator inventory
+retains all observed IDs. Only the intersection with reviewed public Responses
+descriptors enters routing; JSON `routing_enabled` indicates whether that
+intersection is nonempty, not whether a particular request has available funds.
+
+The reviewed descriptors are `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`,
+`gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` and `gpt-5.5`:
+Responses, function calling, text/image input, 1,050,000-token
+context and 128,000-token output. Public model pages were reviewed November 13,
+2026 ([Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol),
+[Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),
+[5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol),
+[5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra),
+[6.1 Terra](https://developers.openai.com/api/docs/models/gpt-6.1-terra),
+[6 Sol](https://developers.openai.com/api/docs/models/gpt-6-sol),
+[6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna),
+[5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna),
+[5.5](https://developers.openai.com/api/docs/models/gpt-5.5)).
+GPT-5.5 supports reasoning through `xhigh`, not `max`.
+Unknown inventory entries remain inspection-only until their endpoint contract
+is reviewed. No inference probe is used. Availability caches last 15 minutes.
+Distinct eligible Platform IDs follow Codex models; duplicate IDs retain their
+Codex descriptor rather than merging the larger API context window into it.
+
+A working key is marked active only after its model-list read authenticates and
+returns a valid inventory. A failed read does not cause another key to be created;
+the confirmed one-time secret and pre-POST fence are preserved for reconciliation.
+
+## Codex-model API spending policy
+
+`platform_codex_fallback` defaults to **false**. Operators can set it in the saved
+server JSON or with `exrd serve --platform-codex-fallback false`. Without an
+explicit startup value, the durable local policy is preserved. Immediate local
+operator/standalone equivalents:
+
+```sh
+exrd admin oauth platform codex-fallback false
+exr account platform codex-fallback false
+```
+
+The policy applies only to Platform spending for models also available in the
+Codex catalog. It does not disable native Codex quotas or independent Platform
+models. Both free and purchased funds are eligible; this flag controls only which
+models may use Platform, not the source of its funds.
+
+The
+[subscription credit benefit](https://developers.openai.com/api/docs/guides/chatgpt-api-credits)
+may continue onto purchased credits, and [hard spend limits](https://developers.openai.com/api/docs/guides/spend-limits)
+have delayed enforcement. Neither a free-only guarantee nor a strict local dollar
+ceiling is claimed.
+
+## Transport and context ownership
+
+The shared backend implements Platform Responses HTTP JSON/SSE, translated Chat,
+and HTTP-backed client WebSockets. Only the encrypted project working key is used
+at the fixed `https://api.openai.com/v1` origin; Admin Keys, Codex account/turn
+headers and the caller's bearer are never used for inference. The inference read
+budget is 900 seconds, with redirects disabled and no router input-size ceiling.
+Platform [compaction](https://developers.openai.com/api/reference/resources/responses/methods/compact)
+uses the public unary `/responses/compact` operation, not Codex's SSE trigger.
+Its returned visible prefix and opaque checkpoint are both preserved.
+
+Codex remains first choice. Same-model Platform fallback requires the operator
+policy and exhaustion of **every eligible Codex subscription for that model**.
+Unknown quota, authentication failures, expired credentials or operational backoff
+do not authorize API spending as a substitute. A recognized pre-generation quota
+refusal can trigger the existing bounded fallback; uncertain submitted inference
+is never replayed. If no safe Platform replacement is available, preserve the
+native credit-backed choice or original refusal.
+
+Each account/project has a distinct durable route identity, separate from OAuth.
+Working-key rotation preserves that project's context identity but fences old
+credential observations. Platform failures/cooldowns never modify the parent's
+Codex quotas or OAuth refresh state. Refreshing/rotating a working key does not
+erase an outstanding project quota rejection. Durable usage records retain the parent
+account and actual `platform_http_sse`/`platform_http_json` transport, including
+unknown outcomes on interruption/restart.
+
+Opaque reasoning, checkpoints and saved conversations remain user- and
+project-owned. Codex receipts/legacy registry overrides cannot authorize Platform
+state. Cross-backend or cross-project opaque transfer is not assumed portable:
+fallback requires self-contained text/tool context, without project-owned file or
+container references. No checkpoint or reasoning history is silently discarded.
+Same-project HTTP continuations and bounded WS recovery preserve exact input;
+unrecoverable incremental WS requests fail before accounting/submission and need
+client-supplied full input. Public HTTP cannot emulate `generate=false` native
+warmup: it returns a local unsupported-parameter error without inference or a
+usage row, leaving the client WS open for a generating request.
+
+These adapters have synthetic upstream coverage, not a renewed live/native-client
+compatibility matrix. Real permissions, funds and model access remain provider
+decisions. Standalone and remote servers use the same implementation.
+
+Passive Doctor/Overview readiness includes eligible observed Platform routes and
+the combined catalog, without decrypting credentials or contacting upstream.
+Native pool/quota counters remain Codex-only; API routes are not fabricated
+subscription accounts. A healthy API route can therefore keep the router ready
+while every native subscription is in quota cooldown.
+
+## Schema 20 upgrade and rollback
+
+Stop/drain workers and create a verified private snapshot before schema 19 → 20.
+The additive migration creates manual reconciliation and numeric per-request
+token-estimate tables plus an index, without changing OAuth, signing keys,
+Platform credentials, uncertain-operation fences or existing usage rows. No
+manual amount is inferred from the plan, and no upstream mutation is triggered.
+The image and native gateway must both declare/support schema 20.
+
+For rollback, preserve a current verified snapshot, stop workers and restore
+matching schema-19 binaries/gateway with `PRAGMA user_version=19`. **Retain both
+new tables and the usage index**; there are no new columns on existing tables.
+Re-upgrade is idempotent and preserves manual epochs and frozen cost rows.
+Platform requests processed by the older binary have no frozen token estimate,
+so they remain unpriced after re-upgrade until the operator enters a new manual
+balance. Never replace newer usage with an old backup just to roll back code.
+This requires an explicit reviewed migration, not the ordinary same-schema
+Docker update path.
+
+## Schema 18 upgrade and rollback
+
+Stop workers and take a verified private snapshot before upgrading schema 17 → 18.
+The additive migration creates only Platform policy, settings, observation,
+working-key and uncertain-operation tables. Existing OAuth/token keys, account
+policy, inference accounting and Codex history are unchanged. No upstream key is
+created by the migration; management requires explicit project configuration.
+
+For reviewed rollback, stop all workers, preserve a current verified snapshot,
+set `PRAGMA user_version=17` in a maintenance transaction and restore matching
+schema-17 binaries/gateway. **Retain every schema-18 table**, particularly the
+uncertain-operation fence and encrypted working keys. Do not restore an old
+database over newer accounting or rotate keys. Schema-17 binaries ignore the
+new tables; re-upgrade reuses them idempotently. Ordinary packaging updates must
+still reject schema mismatches instead of performing this migration implicitly.
+
+## Schema 19 upgrade and rollback
+
+Schema 18 → 19 adds `platform_routes` and `platform_route_health`. It does not
+rotate credentials, change the default Codex fallback policy or submit inference.
+Stop workers and take a verified private snapshot before upgrading. Route IDs are
+monotonic and must never be reset/reused: issued ownership proofs depend on them.
+
+Schema-18 binaries do not support Platform context proofs or API inference.
+Before rollback, stop all workers and preserve the current verified database.
+Retain both schema-19 tables and `sqlite_sequence`; only then set
+`PRAGMA user_version=18` in a maintenance transaction and restore matching binaries
+and gateway. Platform-owned sessions cannot continue on that older binary; clients
+must supply self-contained text/tool context for native routing. Do not discard
+checkpoints or silently replay them on Codex. Re-upgrade reuses retained route
+identities and accounting. One-click packaging must still reject a schema change.

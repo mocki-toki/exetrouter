@@ -15,7 +15,7 @@ SQLite currently uses schema 9. Migrations are transactional; versions 7, 8 and 
 | Inference HTTP JSON / incoming client WS message or frame | No router-defined byte ceiling; provider limits and host memory still apply |
 | Incoming upstream WS message/frame / individual SSE event | 1 MiB |
 | Outgoing upstream WS | Negotiated permessage-deflate; plain fallback uses 1 MiB continuation frames |
-| Control command / reply | 32 KiB / 1 MiB |
+| Control command / reply | 32 KiB / 8 MiB (including 90-day numeric histories) |
 | SSE queue / WS continuation IDs | 8 chunks / 1024 IDs per socket |
 | Translated output / output items / content parts | 1 MiB / 1024 / 1024 |
 | Control IO / gateway exchange / client SSH | 10 / 15 / 45 seconds |

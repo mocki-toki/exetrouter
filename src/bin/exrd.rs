@@ -84,6 +84,9 @@ enum Command {
         /// Allow client-requested Fast mode by default (tokens may override).
         #[arg(long, action = clap::ArgAction::Set)]
         fast_mode: Option<bool>,
+        /// Allow Codex catalog models to spend available Platform funds.
+        #[arg(long, action = clap::ArgAction::Set)]
+        platform_codex_fallback: Option<bool>,
         /// Permit a wildcard listener inside an isolated Docker network only.
         #[arg(long)]
         allow_container_listen: bool,
@@ -153,6 +156,17 @@ enum BackupCommand {
 
 #[derive(Subcommand)]
 enum OauthCommand {
+    /// Provision Platform credentials locally; never accepted over the gateway.
+    Platform {
+        #[command(subcommand)]
+        command: exetrouter::platform::Command,
+    },
+    /// Store billing day, plan price and optional API allowance for an account.
+    Subscription {
+        id: i64,
+        #[command(flatten)]
+        patch: exetrouter::subscription::Patch,
+    },
     /// Create the OAuth encryption key for an existing pre-OAuth installation.
     InitKey,
     /// Set reversible availability for everyone (OAuth must remain healthy).
@@ -235,6 +249,7 @@ async fn run() -> Result<()> {
         gateway_uid,
         listen,
         fast_mode,
+        platform_codex_fallback,
         ..
     } = &mut args.command
     {
@@ -243,6 +258,9 @@ async fn run() -> Result<()> {
         }
         if fast_mode.is_none() {
             *fast_mode = Some(saved.fast_mode);
+        }
+        if platform_codex_fallback.is_none() {
+            *platform_codex_fallback = saved.platform_codex_fallback;
         }
         if matches
             .subcommand_matches("serve")
@@ -320,8 +338,11 @@ async fn run() -> Result<()> {
             stream.write_all(&frame).await?;
             stream.shutdown().await?;
             let mut reply = Vec::new();
-            stream.take(1_048_577).read_to_end(&mut reply).await?;
-            if reply.len() > 1_048_576 {
+            stream
+                .take(server::CONTROL_REPLY_LIMIT as u64 + 1)
+                .read_to_end(&mut reply)
+                .await?;
+            if reply.len() > server::CONTROL_REPLY_LIMIT {
                 return Err("control reply too large".into());
             }
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(reply)
@@ -343,6 +364,7 @@ async fn run() -> Result<()> {
         listen,
         gateway_uid,
         fast_mode,
+        platform_codex_fallback,
         allow_container_listen,
         allow_same_uid_for_dev,
         generations_per_user,
@@ -372,6 +394,10 @@ async fn run() -> Result<()> {
             }
         };
         let db = Database::open(args.db).await?;
+        if let Some(enabled) = platform_codex_fallback {
+            db.call(move |conn| exetrouter::platform::set_codex_fallback(conn, enabled))
+                .await?;
+        }
         let config = upstream::Config::new(
             args.upstream_url,
             args.oauth_issuer,
@@ -440,6 +466,28 @@ async fn run() -> Result<()> {
             return Ok(());
         }
         match command {
+            OauthCommand::Platform { command } => {
+                let oauth_key = read_oauth_key(&args.oauth_key)?;
+                if oauth_key.as_slice() == key {
+                    return Err(
+                        "Credential encryption key must differ from the client-token HMAC key"
+                            .into(),
+                    );
+                }
+                let vault = Vault::new(oauth_key);
+                let value = exetrouter::platform::command(&db, vault, &command).await?;
+                if args.json {
+                    print_report("Platform configuration", &value, true)?;
+                } else {
+                    println!("{}", exetrouter::platform::render(&value));
+                }
+            }
+            OauthCommand::Subscription { id, patch } => print_report(
+                "Subscription metadata",
+                &db.call(move |conn| exetrouter::subscription::set(conn, id, &patch))
+                    .await?,
+                args.json,
+            )?,
             OauthCommand::List => {
                 let vault = Vault::new(read_oauth_key(&args.oauth_key)?);
                 print_report(
@@ -448,9 +496,17 @@ async fn run() -> Result<()> {
                         let mut rows = oauth::list_with_email(conn, &vault)?;
                         for row in &mut rows {
                             if let Some(id) = row["id"].as_i64() {
+                                if let Some(platform) = exetrouter::platform::snapshot(conn, id)? {
+                                    row["platform"] = serde_json::to_value(platform)?;
+                                }
                                 row["routing_policy"] = serde_json::to_value(
                                     exetrouter::account_preferences::effective(conn, id)?,
                                 )?;
+                                if let Some(subscription) =
+                                    exetrouter::subscription::snapshot(conn, id)?
+                                {
+                                    row["subscription"] = serde_json::to_value(subscription)?;
+                                }
                             }
                         }
                         Ok(rows)

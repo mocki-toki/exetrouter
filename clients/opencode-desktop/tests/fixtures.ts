@@ -33,6 +33,17 @@ export function doctor() {
   }
 }
 
+export function forecastReport(now = 1800000000) {
+  const report = doctor(), a = report.quota_accounts[0]
+  return { ...report, checked_at: now, quota_accounts: [{ ...a,
+    quota: { ...a.quota, windows: [{ ...a.quota.windows[0], observed_at: now, used_percent: 50, remaining_percent: 50, reset_at: now + 8 * 3600 }] },
+    quota_forecast: [{ kind: "primary", window_minutes: 480, observed_at: now, used_percent: 50, reset_at: now + 8 * 3600,
+      current: { percent_per_hour: 25, limit_at: now + 2 * 3600 }, usual: { percent_per_hour: 12.5, limit_at: now + 4 * 3600 },
+      warning: { rate_ratio: 2, limit_before_reset: true }, recent_seconds: 1800, historical_intervals: 24, historical_cycles: 3,
+    }],
+  }] }
+}
+
 export function usage() {
   return { period: "day", timezone: "UTC", from_utc: 1800000000, to_utc: 1800086400, rows: [
     { name: "test-reasoner", requests: 2, unknown_usage: 1, known_usage: 1, partial_usage: 0,
@@ -43,7 +54,7 @@ export function usage() {
 }
 
 export function tokenList() { return [{ id: "tok_synthetic", name: "Synthetic token", created_at: 1800000000, expires_at: 1900000000, revoked_at: null, last_used_at: null }] }
-export function modelList() { return { data: [{ id: "synthetic-model", display_name: "Synthetic model", exetrouter: { context_window: 100000 } }] } }
+export function modelList() { return { data: [{ id: "synthetic-model", display_name: "Synthetic model", capabilities: ["reasoning", "tools"], exetrouter: { context_window: 100000 } }] } }
 
 export function deferred<T>() {
   let resolve!: (value: T) => void

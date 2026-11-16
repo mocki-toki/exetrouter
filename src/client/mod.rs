@@ -109,6 +109,12 @@ enum CommandLine {
     },
     /// List models, or export client metadata with --json.
     Models {
+        /// Filter names and IDs without changing the technical model IDs.
+        #[arg(long)]
+        search: Option<String>,
+        /// Require each selected capability (repeat to match all).
+        #[arg(long = "capability", value_parser = ["reasoning", "tools", "image-input", "image-generation", "image-editing"])]
+        capabilities: Vec<String>,
         #[arg(long, value_enum)]
         format: Option<ModelFormat>,
         /// Override the configured API URL for this OpenCode export.
@@ -130,6 +136,17 @@ enum CommandLine {
 
 #[derive(Subcommand)]
 enum AccountCommand {
+    /// Provision Platform credentials locally (standalone owner only).
+    Platform {
+        #[command(subcommand)]
+        command: crate::platform::Command,
+    },
+    /// Store subscription billing metadata (standalone owner only).
+    Subscription {
+        id: i64,
+        #[command(flatten)]
+        patch: crate::subscription::Patch,
+    },
     /// List local accounts by email and state, without credentials.
     List,
     /// Sign in through a browser device-code flow.
@@ -271,6 +288,19 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
             "Account management belongs to standalone mode. Server operators use exrd admin oauth.",
         )?;
         let value = match command {
+            AccountCommand::Platform { command } => {
+                crate::platform::command(&local.db, local.vault.clone(), command).await?
+            }
+            AccountCommand::Subscription { id, patch } => {
+                let id = *id;
+                let patch = patch.clone();
+                serde_json::to_value(
+                    local
+                        .db
+                        .call(move |conn| crate::subscription::set(conn, id, &patch))
+                        .await?,
+                )?
+            }
             AccountCommand::Disable { id, yes } => {
                 if !yes {
                     config::confirm(
@@ -305,7 +335,16 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
         if args.json {
             println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
-            println!("{}", render::accounts(&value));
+            println!(
+                "{}",
+                if matches!(command, AccountCommand::Platform { .. }) {
+                    crate::platform::render(&value)
+                } else if matches!(command, AccountCommand::Subscription { .. }) {
+                    render::subscription(&value)
+                } else {
+                    render::accounts(&value)
+                }
+            );
         }
         return Ok(());
     }
@@ -341,6 +380,7 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
         format,
         base_url,
         model,
+        ..
     } = &args.command
     {
         if !args.json && format.is_some() {
@@ -469,8 +509,15 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
         format,
         base_url,
         model,
+        search,
+        capabilities,
     } = &args.command
     {
+        if let Some(rows) = result["data"].as_array_mut() {
+            rows.retain(|row| {
+                render::model_matches(row, search.as_deref().unwrap_or(""), capabilities)
+            });
+        }
         let format = format.unwrap_or(ModelFormat::Openai);
         if !matches!(format, ModelFormat::Openai) {
             let models: Vec<crate::catalog::Model> = serde_json::from_value(result["data"].clone())
@@ -653,7 +700,7 @@ async fn remote_request(
 
 async fn doctor(args: &Session) -> Result<()> {
     if let Some(local) = &args.connection.local {
-        let value = local.request(ControlRequest::Doctor).await?;
+        let value = ssh_request(args, ControlRequest::Doctor).await?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
@@ -754,8 +801,11 @@ async fn exchange(
         drop(stdin);
         let stdout = child.stdout.take().ok_or("SSH stdout unavailable")?;
         let mut reply = Vec::new();
-        stdout.take(1_048_577).read_to_end(&mut reply).await?;
-        if reply.len() > 1_048_576 {
+        stdout
+            .take(crate::server::CONTROL_REPLY_LIMIT as u64 + 1)
+            .read_to_end(&mut reply)
+            .await?;
+        if reply.len() > crate::server::CONTROL_REPLY_LIMIT {
             return Err("control reply too large".into());
         }
         let status = child.wait().await?;
@@ -859,5 +909,26 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.to_string(), "control reply too large");
         assert!(child.try_wait().unwrap().is_some());
+    }
+    #[tokio::test]
+    async fn history_sized_replies_are_not_truncated_at_the_former_megabyte_boundary() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let mut payload = vec![b' '; 2 * 1024 * 1024];
+        payload.extend_from_slice(br#"{"ok":true,"result":{"points":[]}}"#);
+        file.write_all(&payload).unwrap();
+        let mut child = Command::new("cat")
+            .arg(file.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let (status, reply) = exchange(&mut child, b"{}".to_vec(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(reply, payload);
+        assert_eq!(serde_json::from_slice::<Value>(&reply).unwrap()["ok"], true);
     }
 }

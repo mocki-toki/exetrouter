@@ -1,6 +1,28 @@
 # Model catalog and cache affinity
 
-Models and capabilities come from the account-visible upstream catalog. Export verification is recorded in [compatibility](compatibility.md#opencode-model-import); reviewed revisions are pinned in [protocol-sources.json](protocol-sources.json).
+Codex models and capabilities come from the account-visible upstream catalog. Export verification is recorded in [compatibility](compatibility.md#opencode-model-import); reviewed revisions are pinned in [protocol-sources.json](protocol-sources.json).
+
+Configured [Platform routes](platform-api.md#read-only-model-availability) add
+distinct working-key-visible IDs only when an explicit reviewed Responses
+descriptor exists. These follow Codex models with `source: "platform"`. Unknown
+API inventory entries are inspection-only, not guessed routable models. Shared
+Codex/API IDs keep their Codex metadata and limits; the larger API context window
+does not change a native descriptor. The spending policy may prevent an API-only
+entry when native catalog availability is unknown. Synthetic export tests do not
+extend the live/native-client compatibility matrix.
+
+Display names use spaces rather than hyphens; technical IDs and copied/requested
+model names remain unchanged. The ordinary model list also exposes `source` and
+an allowlisted `capabilities` array for UI/CLI filtering. Reasoning, tools and
+image-input badges require corresponding reported metadata; missing metadata is
+not a positive capability. Native image generation/editing follows its explicit
+adapter contract, not an inferred ability of a text model.
+
+```sh
+exr models --search sol --capability reasoning --capability tools
+```
+
+Repeated capabilities match all selected functions and combine with text search.
 
 ## Metadata
 
@@ -13,7 +35,7 @@ Schema 6 saves an allowlist of Codex ModelInfo fields: context/compaction limits
 | GET /v1/models/opencode-v1 | V1 `provider.exetrouter.models` configuration fragment. |
 | GET /v1/models/opencode-v2 | V2 `providers.exetrouter.models` configuration fragment. |
 
-Duplicate IDs use minimum numeric limits, intersected reasoning/modalities and positive capabilities enabled only when all accounts support them. Missing/false supports_experimental_context disables that shared capability. Incompatible instructions/tool modes or request-shaping fields reject client export with model_metadata_unavailable; the ordinary ID list remains accessible.
+Duplicate Codex IDs use minimum numeric limits, intersected reasoning/modalities and positive capabilities enabled only when all accounts support them. Missing/false supports_experimental_context disables that shared capability. Incompatible instructions/tool modes or request-shaping fields reject client export with model_metadata_unavailable; the ordinary ID list remains accessible.
 
 OpenCode receives reported context/input headroom, reasoning variants and modalities. Unreported output limits export as `output: 0`, its unknown-limit convention. Its output reserve is a heuristic; backend support for requested output caps is validated upstream. Public API prices are not inferred.
 

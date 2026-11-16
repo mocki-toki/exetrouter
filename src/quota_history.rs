@@ -26,6 +26,8 @@ pub struct History {
     pub to_utc: i64,
     pub interval_seconds: i64,
     pub points: Vec<Point>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<crate::platform::costs::History>,
 }
 
 pub(crate) fn prune(conn: &Connection, now: i64) -> Result<()> {
@@ -89,6 +91,7 @@ fn read_range(conn: &Connection, account: i64, from: i64, to: i64, now: i64) -> 
         to_utc: to,
         interval_seconds: INTERVAL,
         points,
+        platform: crate::platform::costs::history(conn, account, from, to.min(now), now)?,
     })
 }
 

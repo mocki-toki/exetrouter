@@ -11,8 +11,6 @@ pub struct ServerReport {
     pub schema_version: u8,
     pub version: String,
     pub checked_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capacity: Option<crate::capacity::Demand>,
     pub configuration_status: String,
     pub oauth: OAuthReport,
     pub catalog: CatalogReport,
@@ -30,7 +28,9 @@ pub struct ServerReport {
 #[derive(Serialize, Deserialize)]
 pub struct AccountQuota {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capacity: Option<crate::capacity::Profile>,
+    pub platform: Option<crate::platform::Status>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription: Option<crate::subscription::Subscription>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation_key: Option<String>,
     #[serde(default)]
@@ -55,6 +55,8 @@ pub struct AccountQuota {
     pub quota: crate::quota::Summary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_history: Option<crate::quota_history::History>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_forecast: Option<Vec<crate::quota_forecast::Forecast>>,
 }
 
 // These fields are appended by account_preferences::annotate after the core
@@ -169,10 +171,27 @@ pub(crate) fn snapshot(
             ))
         },
     )?;
-    let models = conn.query_row(
-        "SELECT COUNT(DISTINCT model) FROM oauth_models m JOIN oauth_accounts a ON a.id=m.account_id WHERE a.state='active'",
-        [], |row| row.get::<_, usize>(0),
-    )?;
+    let mut updated = updated;
+    let mut model_ids=conn.prepare("SELECT DISTINCT model FROM oauth_models m JOIN oauth_accounts a ON a.id=m.account_id WHERE a.state='active'")?.query_map([],|r|r.get::<_,String>(0))?.collect::<std::result::Result<std::collections::BTreeSet<_>,_>>()?;
+    let mut platform_ready = false;
+    let mut platform_catalog = false;
+    for owner in crate::platform::routes::owners(conn)? {
+        let observed = crate::platform::routes::observed(conn, owner, now)?;
+        if !observed.is_empty() {
+            let at = conn.query_row(
+                "SELECT observed_at FROM platform_routes WHERE id=?1",
+                [crate::platform::routes::route_id(owner)?],
+                |r| r.get::<_, i64>(0),
+            )?;
+            updated = Some(updated.map_or(at, |previous| previous.min(at)));
+        }
+        for model in observed {
+            platform_catalog = true;
+            model_ids.insert(model.id);
+        }
+        platform_ready |= configured && crate::platform::routes::available(conn, owner, now)?;
+    }
+    let models = model_ids.len();
     let mut pool = PoolReport::default();
     let mut quota_accounts = Vec::new();
     let mut current_catalogs = 0;
@@ -229,7 +248,8 @@ pub(crate) fn snapshot(
             pool.stale_quota_accounts += 1;
         }
         quota_accounts.push(AccountQuota {
-            capacity: None,
+            subscription: crate::subscription::snapshot(conn, id)?,
+            platform: crate::platform::snapshot(conn, id)?,
             observation_key: None,
             id,
             label: "Email unavailable".into(),
@@ -243,6 +263,7 @@ pub(crate) fn snapshot(
             weekly_activation: conn.query_row("SELECT CASE WHEN status='pending' AND attempted_at<=?3 THEN 'unknown' ELSE status END FROM quota_activation_attempts WHERE account_id=?1 AND attempted_at>?2 ORDER BY attempted_at DESC,id DESC LIMIT 1", rusqlite::params![id,now-604800,now-60], |row| row.get(0)).optional()?,
             quota,
             quota_history: Some(crate::quota_history::snapshot(conn, id, now)?),
+            quota_forecast: None,
         });
     }
     let oauth_status = if !configured {
@@ -260,7 +281,7 @@ pub(crate) fn snapshot(
     };
     let catalog_status = if active == 0 || !configured {
         "unavailable"
-    } else if current_catalogs > 0 {
+    } else if current_catalogs > 0 || platform_catalog {
         "current"
     } else if updated.is_none() {
         "not_loaded"
@@ -281,13 +302,12 @@ pub(crate) fn snapshot(
     } else {
         None
     };
-    let ready = pool.configured_accounts > 0;
+    let ready = pool.configured_accounts > 0 || platform_ready;
     Ok(ServerReport {
         capabilities: serde_json::Value::Null,
         schema_version: 1,
         version: env!("CARGO_PKG_VERSION").into(),
         checked_at: now,
-        capacity: None,
         configuration_status: if ready {
             "configured"
         } else {
@@ -347,12 +367,12 @@ mod tests {
         conn.execute("INSERT INTO oauth_accounts(account_id,state,encrypted_credentials,expires_at,catalog_updated_at,created_at) VALUES('synthetic-account','active',X'00',2000,1000,1000)",[]).unwrap();
         let mut value = serde_json::to_value(report(&conn, 1050)).unwrap();
         let account = &mut value["quota_accounts"][0];
-        account["capacity"] = serde_json::json!({"state":"available","short_window":false,"models":["synthetic"],"costs":[{"kind":"secondary","per_request":0.1,"from_utc":1000,"to_utc":1050,"requests":10}],"reset_eligible_until":null,"secret":"private-body-marker"});
+        account["subscription"] = serde_json::json!({"billing_day":8,"plan_usd":100,"api_budget_cents":null,"effective_api_budget_cents":10000,"secret":"private-body-marker"});
         account["routing"] = serde_json::json!({"reason":"short_window_first","best":true,"observed_at":1050,"valid_until":1110,"target_share_percent":75,"secret":"private-body-marker"});
         account["automatic_reset"] =
             serde_json::json!({"status":"waiting","payload":"private-body-marker"});
         account["clients"] = serde_json::json!({"count":3,"scope":"server","observed_at":1050,"truncated":true,"rows":[{"id":"client_alias","name":"Other user's client","owned":false,"in_flight":2,"last_request_at":1040,"secret":"private-body-marker"}]});
-        value["capacity"] = serde_json::json!({"last_hour":10,"previous_hour":8,"in_flight":0,"complete":true,"secret":"private-body-marker"});
+        account["quota_forecast"] = serde_json::json!([{"kind":"primary","window_minutes":480,"reset_at":20000,"observed_at":1050,"used_percent":50,"current":{"percent_per_hour":20,"limit_at":10050},"usual":{"percent_per_hour":5,"limit_at":null},"warning":{"rate_ratio":4,"limit_before_reset":true},"recent_seconds":1800,"historical_intervals":40,"historical_cycles":3,"secret":"private-body-marker"}]);
         let encoded =
             serde_json::to_value(serde_json::from_value::<ServerReport>(value).unwrap()).unwrap();
         let account = &encoded["quota_accounts"][0];
@@ -364,8 +384,12 @@ mod tests {
         assert_eq!(account["clients"]["count"], 3);
         assert_eq!(account["clients"]["rows"][0]["in_flight"], 2);
         assert_eq!(account["automatic_reset"]["status"], "waiting");
-        assert_eq!(account["capacity"]["costs"][0]["per_request"], 0.1);
-        assert_eq!(encoded["capacity"]["last_hour"], 10);
+        assert_eq!(account["quota_forecast"][0]["warning"]["rate_ratio"], 4.0);
+        assert_eq!(account["subscription"]["billing_day"], 8);
+        assert_eq!(
+            account["subscription"]["effective_api_budget_cents"],
+            10_000
+        );
         assert!(!encoded.to_string().contains("private-body-marker"));
         let unknown: AccountClients = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(

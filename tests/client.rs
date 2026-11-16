@@ -23,8 +23,9 @@ case "$request" in
   *'"action":"private_put"'*) printf '%s' '{"ok":true,"result":{"updated":true}}' ;;
   *'"action":"token_show"'*) printf '%s' '{"ok":true,"result":{"id":"tok_test","name":"Laptop"}}' ;;
   *'"action":"token_rename"'*) printf '%s' '{"ok":true,"result":{"updated":true}}' ;;
+  *'"action":"token_set_enabled"'*|*'"action":"token_fast_mode"'*) printf '%s' '{"ok":true,"result":{"updated":true}}' ;;
   *'"action":"token_list"'*) printf '%s' '{"ok":true,"result":[{"id":"tok_test","name":"Laptop","expires_at":2000000000,"revoked_at":null,"last_used_at":null}]}' ;;
-  *'"action":"models"'*) printf '%s' '{"ok":true,"result":{"data":[{"id":"gpt-test","object":"model","owned_by":"openai","display_name":"Test model","exetrouter":{"context_window":100000,"input_modalities":["text","image"],"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low"}},{"id":"gpt-other","object":"model","owned_by":"openai","display_name":"Other model","exetrouter":{"context_window":200000,"input_modalities":["text"],"supported_reasoning_levels":[{"effort":"high"}]}}]}}' ;;
+  *'"action":"models"'*) printf '%s' '{"ok":true,"result":{"data":[{"id":"gpt-test","object":"model","owned_by":"openai","display_name":"Test model","capabilities":["reasoning","tools"],"exetrouter":{"context_window":100000,"input_modalities":["text","image"],"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low"}},{"id":"gpt-other","object":"model","owned_by":"openai","display_name":"Other model","capabilities":["reasoning"],"exetrouter":{"context_window":200000,"input_modalities":["text"],"supported_reasoning_levels":[{"effort":"high"}]}}]}}' ;;
   *'"action":"doctor"'*|*'"action":"limits"'*) printf '%s' '{"ok":true,"result":{"capabilities":{"account_routing_rules":1},"quota_accounts":[{"id":1,"label":"test@example.com","preference":{"enabled":true,"priority":1,"locked":false,"rules":{"switch_at":null,"switch_at_short":null,"switch_at_weekly":null},"settings":{}},"reset_credits":{"available_count":2,"credits":[]},"quota":{"status":"current","windows":[{"kind":"primary","window_minutes":480,"used_percent":20,"remaining_percent":80,"status":"current"},{"kind":"secondary","window_minutes":10080,"used_percent":30,"remaining_percent":70,"status":"stale"}]}}]}}' ;;
   *'"action":"usage"'*'"by":"token"'*) printf '%s' '{"ok":true,"result":{"period":"day","timezone":"Europe/Moscow","rows":[{"name":"tok_test","display_name":"Laptop","requests":3,"input_tokens":10,"output_tokens":2}]}}' ;;
   *'"action":"usage"'*) printf '%s' '{"ok":true,"result":{"period":"day","timezone":"Europe/Moscow","rows":[]}}' ;;
@@ -104,6 +105,34 @@ cat > "$EXETROUTER_TEST_CLIPBOARD"
         client
     }
 }
+#[test]
+fn model_capability_filters_match_all_and_combine_with_search_without_changing_ids() {
+    let client = Client::configured();
+    let output = client.run(&[
+        "models",
+        "--capability",
+        "reasoning",
+        "--capability",
+        "tools",
+        "--json",
+    ]);
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"].as_array().unwrap().len(), 1);
+    assert_eq!(result["data"][0]["id"], "gpt-test");
+    let output = client.run(&[
+        "models",
+        "--search",
+        "other",
+        "--capability",
+        "tools",
+        "--json",
+    ]);
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(result["data"].as_array().unwrap().is_empty());
+}
+
 #[test]
 fn rolling_cli_preserves_exclusive_ends_and_keeps_latest_24h_compatible() {
     let client = Client::configured();
@@ -406,8 +435,8 @@ fn saved_connection_removes_identity_flags_and_json_is_explicit() {
 fn human_dates_follow_client_timezone_without_changing_machine_timestamps() {
     let client = Client::configured();
     for (zone, expected) in [
-        ("America/New_York", "Tuesday, May 17, 2033 · 23:33"),
-        ("Asia/Tokyo", "Wednesday, May 18, 2033 · 12:33"),
+        ("America/New_York", "Expires May 17, 2033"),
+        ("Asia/Tokyo", "Expires May 18, 2033"),
     ] {
         let output = client
             .command()
@@ -962,12 +991,104 @@ impl Drop for Dashboard {
 }
 
 #[test]
+fn dashboard_token_enable_and_fast_changes_require_confirmation_without_issuing_secrets() {
+    for (shortcut, action) in [
+        (b"d".as_slice(), "token_set_enabled"),
+        (b"fB".as_slice(), "token_fast_mode"),
+    ] {
+        let client = Client::configured();
+        let mut dashboard = Dashboard::start(client.command());
+        dashboard.wait("Details Enter");
+        dashboard.send(b"3");
+        dashboard.wait("Created Unknown");
+        dashboard.send(shortcut);
+        dashboard.wait("Change token policy");
+        assert!(!fs::read_to_string(client.dir.path().join("requests.log"))
+            .unwrap()
+            .contains(action));
+        dashboard.dismiss("Change token policy");
+        assert!(!fs::read_to_string(client.dir.path().join("requests.log"))
+            .unwrap()
+            .contains(action));
+        dashboard.send(shortcut);
+        dashboard.wait("Change token policy");
+        dashboard.send(b"y");
+        dashboard.wait("Token updated.");
+        dashboard.quit();
+        let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+        assert_eq!(
+            requests
+                .matches(&format!("\"action\":\"{action}\""))
+                .count(),
+            1
+        );
+        assert!(!requests.contains("token_create") && !requests.contains("token_rotate"));
+        assert!(!client.dir.path().join("clipboard").exists());
+    }
+}
+
+#[test]
+fn dashboard_search_targets_the_matching_token_and_usage_breakdown_is_passive() {
+    let client = Client::configured();
+    let path = client.dir.path().join("ssh");
+    let original = fs::read_to_string(&path).unwrap();
+    let old = r#"{"ok":true,"result":[{"id":"tok_test","name":"Laptop","expires_at":2000000000,"revoked_at":null,"last_used_at":null}]}"#;
+    let new = r#"{"ok":true,"result":[{"id":"tok_test","name":"Laptop","expires_at":2000000000,"revoked_at":null,"last_used_at":null},{"id":"tok_ci","name":"CI runner","expires_at":2000000000,"revoked_at":null,"last_used_at":null}]}"#;
+    assert!(original.contains(old));
+    fs::write(path, original.replace(old, new)).unwrap();
+    let mut dashboard = Dashboard::start(client.command());
+    dashboard.wait("Details Enter");
+    dashboard.send(b"3");
+    dashboard.wait("CI runner");
+    dashboard.send(b"s");
+    dashboard.wait("Search tokens");
+    dashboard.send(b"CI\r");
+    dashboard.wait("Search: CI");
+    dashboard.wait("1 match");
+    dashboard.send(b"c");
+    dashboard.wait("Copied tok_ci to clipboard.");
+    assert_eq!(
+        fs::read_to_string(client.dir.path().join("clipboard")).unwrap(),
+        "tok_ci"
+    );
+    dashboard.send(b"d");
+    dashboard.wait("Change token policy");
+    let before = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    assert!(!before.contains("token_set_enabled"));
+    dashboard.send(b"y");
+    dashboard.wait("Token updated.");
+    let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    let mutations = requests
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|request| request["action"] == "token_set_enabled")
+        .collect::<Vec<_>>();
+    assert_eq!(mutations.len(), 1);
+    assert_eq!(mutations[0]["id"], "tok_ci");
+    assert_eq!(mutations[0]["enabled"], false);
+    assert!(!requests.contains("token_create") && !requests.contains("token_rotate"));
+    dashboard.send(b"2");
+    dashboard.wait("No timeline available from this server.");
+    let before = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
+    dashboard.send(b"\r");
+    dashboard.wait("Usage breakdown");
+    dashboard.wait("No requests in this period.");
+    dashboard.send(b"\x1b[B\x1b[F\x1b[H");
+    dashboard.dismiss("Usage breakdown");
+    assert_eq!(
+        fs::read_to_string(client.dir.path().join("requests.log")).unwrap(),
+        before
+    );
+    dashboard.quit();
+}
+
+#[test]
 fn dashboard_renames_from_actions_and_cancels_or_rejects_empty_edits() {
     let client = Client::configured();
     let mut dashboard = Dashboard::start(client.command());
     dashboard.wait("Details Enter");
     dashboard.send(b"3");
-    dashboard.wait("TOKEN INFORMATION");
+    dashboard.wait("Created Unknown");
     dashboard.send(b"\r");
     dashboard.wait("Token actions");
     dashboard.send(b"\r");
@@ -989,8 +1110,8 @@ fn dashboard_renames_from_actions_and_cancels_or_rejects_empty_edits() {
     );
     dashboard.send("Личный ноутбук".as_bytes());
     dashboard.send(b"\r");
-    dashboard.wait("Token label saved.");
-    dashboard.wait("TOKEN INFORMATION");
+    dashboard.wait("Token updated.");
+    dashboard.wait("Created Unknown");
     dashboard.quit();
     let requests = fs::read_to_string(client.dir.path().join("requests.log")).unwrap();
     assert!(
@@ -1416,6 +1537,101 @@ fn opencode_exports_reuse_saved_api_url_and_select_only_catalog_models() {
         serde_json::from_slice(&fs::read(client.dir.path().join("config.json")).unwrap()).unwrap();
     assert_eq!(saved["host"], "localhost");
     assert_eq!(saved["api_url"], "https://api.example.com/v1");
+}
+
+#[test]
+fn standalone_doctor_decrypts_client_labels_with_the_profile_key_or_hides_them() {
+    use base64::Engine;
+    use chacha20poly1305::{
+        aead::{Aead, KeyInit, Payload},
+        XChaCha20Poly1305, XNonce,
+    };
+
+    let client = Client::new();
+    let state = client.dir.path().join("standalone");
+    let profile = client.dir.path().join("config.json");
+    let key_path = state.join("privacy.key");
+    fs::write(
+        &profile,
+        serde_json::to_vec(&serde_json::json!({
+            "mode":"standalone", "state_dir":state, "listen":"127.0.0.1:8787"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        client
+            .command()
+            .env("EXR_PRIVACY_KEY", &key_path)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["account", "list", "--json"]).status.success());
+    let conn = rusqlite::Connection::open(state.join("state.sqlite")).unwrap();
+    let vault = exetrouter::oauth::Vault::new(
+        fs::read(state.join("oauth.key"))
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    let account = exetrouter::oauth::save(
+        &conn,
+        &vault,
+        "synthetic-account",
+        &exetrouter::oauth::Credentials {
+            access_token: "synthetic-access".into(),
+            refresh_token: "synthetic-refresh".into(),
+        },
+        2_000_000_000,
+    )
+    .unwrap();
+    let nonce = [7; 24];
+    let encrypted = XChaCha20Poly1305::new((&[3; 32]).into())
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: b"Nix workstation",
+                aad: b"exetrouter/private/v1\0\"standalone\"\0token-name",
+            },
+        )
+        .unwrap();
+    let name = format!(
+        "exrp1:{}",
+        base64::engine::general_purpose::STANDARD_NO_PAD
+            .encode([nonce.to_vec(), encrypted].concat())
+    );
+    conn.execute("INSERT INTO access_tokens(id,user_id,name,digest,created_at,expires_at) SELECT 'tok_synthetic',id,?1,X'01',0,2000000000 FROM users", [&name]).unwrap();
+    conn.execute("INSERT INTO usage_events(at_utc,user_id,token_id,account_id,api_surface,model,status,request_id) SELECT strftime('%s','now'),id,'tok_synthetic',?1,'responses','synthetic','completed','synthetic-request' FROM users", [account]).unwrap();
+
+    for (key, mode, expected) in [
+        ([3; 32], 0o600, "Nix workstation"),
+        ([4; 32], 0o600, "Label unavailable"),
+        ([3; 32], 0o644, "Label unavailable"),
+    ] {
+        fs::write(&key_path, key).unwrap();
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(mode)).unwrap();
+        let json = run(&["doctor", "--json"]);
+        let report: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(
+            report["quota_accounts"][0]["clients"]["rows"][0]["name"],
+            expected
+        );
+        let human = run(&["doctor"]);
+        assert!(String::from_utf8_lossy(&human.stdout).contains("Standalone API:"));
+        for output in [&json, &human] {
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("exrp1:"));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("exrp1:"));
+        }
+    }
+    let stored: String = conn
+        .query_row("SELECT name FROM access_tokens", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        stored, name,
+        "diagnostics must not rewrite encrypted labels"
+    );
+    assert!(!client.dir.path().join("requests.log").exists());
 }
 
 #[test]

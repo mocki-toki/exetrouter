@@ -1,0 +1,806 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <title>ExetRouter · Terminal redesign</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #111111; --base: #181818; --surface: #1e1e1e; --raised: #252525;
+      --hover: #2b2b2b; --border: #343434; --text: #ededeb; --muted: #a09f9b;
+      --faint: #73736f; --green: #91bc91; --amber: #d9b572; --red: #df9690;
+      --blue: #88bac6; --purple: #aaa3e6; --api: #e3a975; --selection: #293438;
+      --green-bg: #253728; --amber-bg: #3b3020; --red-bg: #432b29; --tag-bg: #303030;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --page: #efeeeb; --base: #faf9f6; --surface: #f2f1ed; --raised: #e8e7e2;
+      --hover: #e2e1db; --border: #d6d5cf; --text: #272724; --muted: #73736b;
+      --faint: #82827a; --green: #426d49; --amber: #825d27; --red: #984540;
+      --blue: #437e8c; --purple: #7770b4; --api: #8b4f20; --selection: #e1e9e9;
+      --green-bg: #ddebdc; --amber-bg: #f0e3c9; --red-bg: #f1dcd7; --tag-bg: #e3e2dd;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--page); color: var(--text); font: 13px/1.6 var(--mono); }
+    button, input, select { font: inherit; color: inherit; }
+    button { cursor: pointer; border: 0; border-radius: 0; background: transparent; padding: 0 1ch; }
+    button:hover { background: var(--hover); }
+    button:disabled { opacity: .45; cursor: default; }
+    :focus-visible { outline: 1px solid var(--blue); outline-offset: 2px; }
+    input, select { min-width: 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; padding: 3px 1ch; background: var(--raised); }
+    input[type="range"] { appearance: none; width: 22ch; height: 1.2em; padding: 0; border: 0; background: transparent; vertical-align: middle; cursor: pointer; }
+    input[type="range"]::-webkit-slider-runnable-track { height: 2px; background: var(--border); }
+    input[type="range"]::-webkit-slider-thumb { appearance: none; width: 1ch; height: 12px; margin-top: -5px; background: var(--blue); border: 0; border-radius: 0; }
+    input[type="range"]::-moz-range-track { height: 2px; background: var(--border); }
+    input[type="range"]::-moz-range-thumb { width: 1ch; height: 12px; background: var(--blue); border: 0; border-radius: 0; }
+    h1, h2, h3, h4, p, dl { margin: 0; font-size: inherit; }
+    h1, h2, h3, h4, strong { font-weight: 600; }
+    code, kbd { font: inherit; }
+    .muted { color: var(--muted); } .faint { color: var(--faint); }
+    .green { color: var(--green); } .amber { color: var(--amber); }
+    .red { color: var(--red); } .blue { color: var(--blue); } .purple { color: var(--purple); }
+    .line { display: flex; align-items: center; gap: 1ch; min-width: 0; }
+    .wrap { flex-wrap: wrap; } .between { justify-content: space-between; }
+    .spacer { flex: 1; } .small { font-size: 11px; }
+    .preview { max-width: 1220px; margin: auto; padding: 24px 24px 16px; }
+    .preview h1 { font-size: 16px; }
+    .eyebrow { color: var(--muted); font-size: 10px; letter-spacing: .15em; text-transform: uppercase; }
+    .preview p { color: var(--muted); margin-top: 6px; font-size: 11px; max-width: 76ch; }
+    .preview-tools { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; align-items: center; font-size: 11px; }
+    .preview-tools button { background: var(--raised); }
+    .stage { padding: 0 24px; }
+    .terminal { container-type: inline-size; display: flex; flex-direction: column; width: 1172px; max-width: 100%; height: min(790px, calc(100dvh - 195px)); min-height: 520px; margin: auto; background: var(--base); border: 1px solid var(--border); box-shadow: 0 24px 90px #0003; }
+    body[data-narrow] .terminal { width: 660px; }
+    .terminal-header { padding: 18px 3ch 12px; flex-shrink: 0; }
+    .brand { white-space: nowrap; } .connection { color: var(--muted); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tabs { display: flex; gap: 1ch; margin: 14px -1ch 0; overflow: auto; scrollbar-width: none; }
+    .tabs button { white-space: nowrap; color: var(--muted); padding-inline: 1ch; }
+    .tabs button[aria-selected="true"] { background: var(--text); color: var(--base); }
+    .tabs .update { color: var(--amber); }
+    .tab-number { color: var(--faint); } [aria-selected="true"] .tab-number { color: inherit; }
+    .workspace { flex: 1; min-height: 0; overflow: auto; padding: 4px 3ch 22px; scrollbar-color: var(--border) transparent; }
+    .pane > .line:first-child { margin-bottom: 8px; }
+    .summary { color: var(--muted); margin-bottom: 18px; font-size: 12px; }
+    .summary strong { color: var(--text); font-weight: 400; }
+    .status-dot { color: var(--green); }
+    .notice { padding: 8px 1ch; margin: 10px 0; background: var(--surface); color: var(--amber); border-left: 2px solid var(--amber); }
+    .accounts { display: grid; gap: 10px; }
+    .account { position: relative; padding: 10px 2ch; background: var(--surface); border-left: 2px solid transparent; }
+    [data-row][data-selected="true"] { border-left-color: var(--blue); background: var(--selection); }
+    .row-trigger { text-align: left; display: block; width: 100%; padding: 0; background: transparent !important; }
+    .row-trigger::before { content: "›"; position: absolute; left: .35ch; color: var(--blue); opacity: 0; }
+    [data-selected="true"] > .row-trigger::before { opacity: 1; }
+    .identity { overflow-wrap: anywhere; }
+    .tag { display: inline-block; padding: 0 .75ch; color: var(--text); background: var(--tag-bg); white-space: nowrap; font-size: 11px; line-height: 1.6; }
+    .tag.green { color: var(--green); background: var(--green-bg); }
+    .tag.red { color: var(--red); background: var(--red-bg); }
+    .tag.amber { color: var(--amber); background: var(--amber-bg); }
+    .account-meta { margin-bottom: 8px; font-size: 11px; color: var(--muted); }
+    .quotas { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 5ch; }
+    .quota { min-width: 0; --tone: var(--green); }
+    .quotas[data-has-short="false"] > .quota-weekly { grid-column: 1 / -1; }
+    .quota .line { gap: 1ch; }
+    .quota strong { margin-left: auto; color: var(--tone); white-space: nowrap; }
+    .meter { width: 100%; min-width: 0; height: 3px; background: var(--border); margin: 5px 0; }
+    .meter > span { display: block; background: var(--tone); width: var(--fill); height: 100%; }
+    .quota-note { font-size: 10px; color: var(--muted); }
+    .quota-api { grid-column: 1 / -1; min-width: 0; }
+    .quota-api .line { flex-wrap: wrap; }
+    .quota-api strong { font-size: 11px; }
+    .account-footer { margin-top: 7px; font-size: 11px; color: var(--muted); }
+    .controls { flex-shrink: 0; border-top: 1px solid var(--border); padding: 9px 3ch 12px; font-size: 11px; }
+    .controls h2 { color: var(--muted); font-weight: 400; margin-bottom: 3px; }
+    .controls .commands { display: flex; flex-wrap: wrap; gap: 3px 2ch; }
+    kbd { color: var(--blue); } .controls button { padding: 0; }
+    .status-message { min-height: 1.6em; color: var(--green); margin-bottom: 2px; }
+    .search { display: flex; align-items: center; gap: 1ch; padding: 5px 1ch; background: var(--surface); margin: 12px 0; }
+    .search input { width: 100%; background: transparent; border: 0; padding: 0; }
+    .filters { display: flex; flex-wrap: wrap; gap: 4px 1ch; margin: 8px 0; font-size: 11px; }
+    .filters button { color: var(--muted); background: var(--surface); }
+    .filters button[aria-pressed="true"] { color: var(--blue); background: var(--selection); }
+    .group { margin-top: 18px; }
+    .group > h3 { margin-bottom: 6px; color: var(--muted); font-weight: 400; }
+    .list { background: var(--surface); }
+    .resource-row { position: relative; padding: 11px 2ch; border-left: 2px solid transparent; }
+    .resource-row + .resource-row { border-top: 1px solid var(--border); }
+    .capabilities { display: flex; flex-wrap: wrap; gap: 1ch; font-size: 10px; color: var(--muted); margin-top: 3px; }
+    .context { margin-left: auto; color: var(--muted); white-space: nowrap; font-size: 11px; }
+    .dates { white-space: nowrap; font-size: 11px; color: var(--muted); margin-top: 3px; overflow-x: auto; }
+    .dates time, .dates .never { color: var(--text); }
+    .empty { color: var(--muted); padding: 24px 1ch; text-align: center; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px 2ch; align-items: center; margin: 10px 0; }
+    .toolbar label { color: var(--muted); font-size: 11px; }
+    .toolbar select { color: var(--text); }
+    .stats { display: flex; flex-wrap: wrap; gap: 8px 5ch; margin: 18px 0 10px; }
+    .stats span { display: block; color: var(--muted); font-size: 11px; }
+    .stats strong { font-size: 17px; font-weight: 400; }
+    .chart { background: var(--surface); padding: 10px 2ch; margin: 10px 0; }
+    .chart svg { display: block; width: 100%; height: auto; }
+    .chart text { font: 10px var(--mono); fill: var(--muted); }
+    .chart line { stroke: var(--border); stroke-width: 1; }
+    .chart .cursor { stroke: var(--muted); stroke-dasharray: 3 3; }
+    .chart-readout { min-height: 1.6em; font-size: 11px; color: var(--muted); }
+    .plot { position: relative; }
+    .chart-tooltip { position: absolute; top: 12px; max-width: 48%; padding: 6px 1ch; background: var(--base); border: 1px solid var(--border); font-size: 10px; pointer-events: none; }
+    .chart-tooltip span { display: block; }
+    .compact-axis { display: none; justify-content: space-between; gap: 1ch; color: var(--muted); font-size: 10px; }
+    .breakdown-head { font-size: 10px; color: var(--muted); padding: 4px 2ch; }
+    .counter-grid { display: grid; grid-template-columns: 2fr repeat(5, 1fr); gap: 1ch; align-items: baseline; }
+    .counter-grid > :not(:first-child) { text-align: right; }
+    .breakdown-row { text-align: left; width: 100%; border-left: 2px solid transparent; padding: 9px 2ch; font-size: 11px; }
+    .setting-block { margin: 18px 0; background: var(--surface); padding: 10px 2ch; }
+    .setting-block h3 { color: var(--muted); font-weight: 400; margin-bottom: 8px; }
+    .setting-action { width: 100%; text-align: left; border-left: 2px solid transparent; padding: 5px 1ch; }
+    .setting-action strong { font-weight: 400; }
+    .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 3ch; }
+    .fields dt { color: var(--muted); font-size: 11px; }
+    .fields dd { margin: 0; overflow-wrap: anywhere; }
+    .footnote { max-width: 1172px; margin: 14px auto 22px; padding-inline: 24px; color: var(--faint); font-size: 10px; }
+    dialog { width: 850px; max-width: calc(100vw - 30px); max-height: calc(100dvh - 40px); padding: 0; border: 1px solid var(--border); background: var(--base); color: var(--text); font: 12px/1.65 var(--mono); box-shadow: 0 30px 100px #0007; }
+    dialog[open] { display: flex; flex-direction: column; }
+    dialog::backdrop { background: #0009; }
+    .dialog-header { padding: 13px 2ch; display: flex; gap: 2ch; border-bottom: 1px solid var(--border); }
+    .dialog-header h2 { overflow-wrap: anywhere; } .dialog-header button { margin-left: auto; align-self: start; }
+    .dialog-body { padding: 16px 2ch; overflow-y: auto; }
+    .dialog-footer { flex-shrink: 0; padding: 9px 2ch; border-top: 1px solid var(--border); }
+    .dialog-section { margin-top: 20px; } .dialog-section h3 { margin-bottom: 8px; }
+    .dialog-body .quota-note { margin-top: 4px; }
+    .form { display: grid; gap: 12px; }
+    .form label { display: grid; gap: 4px; color: var(--muted); }
+    .form input, .form select { color: var(--text); width: 100%; }
+    .form .fields { margin-top: 8px; }
+    .primary { background: var(--text); color: var(--base); }
+    .primary:hover { background: var(--muted); }
+    .error { color: var(--red); min-height: 1.6em; }
+    @container (max-width: 760px) {
+      .quotas { gap: 8px 2ch; } .counter-grid { grid-template-columns: 1.6fr repeat(5, 1fr); font-size: 10px; }
+      .terminal-header, .workspace, .controls { padding-left: 2ch; padding-right: 2ch; }
+      .tabs { gap: 0; font-size: 12px; } .tab-number { display: none; }
+    }
+    @container (max-width: 490px) {
+      .quotas { grid-template-columns: 1fr; } .connection { font-size: 10px; max-width: 19ch; }
+      .account { padding-inline: 1.5ch; } .account .identity { font-size: 11px; }
+      .counter-grid { grid-template-columns: 1.5fr 1fr 1fr; }
+      .counter-grid > :nth-child(3), .counter-grid > :nth-child(4), .counter-grid > :nth-child(5) { display: none; }
+      .tabs { font-size: 11px; } .tabs button { padding-inline: .75ch; }
+      .summary { font-size: 10px; } .stats { gap: 1ch 3ch; }
+    }
+    @media (max-width: 600px) {
+      .preview { padding: 16px 14px; } .stage { padding-inline: 8px; }
+      .terminal { height: 720px; min-height: 480px; } .fields { grid-template-columns: 1fr; }
+      dialog .quotas { grid-template-columns: 1fr; } .preview-tools { gap: 8px; }
+      .chart svg text { display: none; } .compact-axis { display: flex; }
+    }
+  </style>
+</head>
+<body>
+  <header class="preview">
+    <div class="eyebrow">Interface study / 02 · terminal</div>
+    <h1>All the detail. Still a terminal.</h1>
+    <p>Offline interactive preview. All identities, balances, dates and model metadata are synthetic.
+      Sign-in, token issuance, clipboard recovery and updates are simulated; no credentials, network or persistent account storage.</p>
+    <div class="preview-tools">
+      <label>Scenario <select id="scenario"><option value="ready">Ready</option><option value="fallback">API fallback active</option><option value="stale">Historical observations</option><option value="missing">API not connected</option><option value="urgent">Priority &amp; cooldown</option></select></label>
+      <button id="width-toggle" aria-pressed="false">Narrow terminal</button>
+      <button id="theme-toggle" aria-label="Switch to light theme">Light theme</button>
+      <span class="muted">Click the terminal, then try ← → / 1–5 / ↑ ↓ / Enter.</span>
+    </div>
+  </header>
+  <main class="stage">
+    <div class="terminal" id="terminal" tabindex="0" aria-label="Interactive ExetRouter terminal preview">
+      <header class="terminal-header">
+        <div class="line between"><strong class="brand">ExetRouter <span class="muted">0.0.0-preview</span></strong><span class="connection" id="connection">● remote · api.example.com</span></div>
+        <nav class="tabs" role="tablist" aria-label="ExetRouter views">
+          <button id="tab-overview" role="tab" aria-controls="overview" aria-selected="true">Overview <span class="tab-number">1</span></button>
+          <button id="tab-usage" role="tab" aria-controls="usage" aria-selected="false" tabindex="-1">Usage <span class="tab-number">2</span></button>
+          <button id="tab-tokens" role="tab" aria-controls="tokens" aria-selected="false" tabindex="-1">Tokens <span class="tab-number">3</span></button>
+          <button id="tab-models" role="tab" aria-controls="models" aria-selected="false" tabindex="-1">Models <span class="tab-number">4</span></button>
+          <button id="tab-settings" class="update" role="tab" aria-controls="settings" aria-selected="false" tabindex="-1">Settings ↑ <span class="tab-number">5</span></button>
+        </nav>
+      </header>
+      <div class="workspace" id="workspace">
+        <section class="pane" id="overview" role="tabpanel" aria-labelledby="tab-overview">
+          <div class="line between wrap"><h2><span class="status-dot">●</span> ExetRouter ready</h2><span class="muted small" id="snapshot">Nov 12, 2:30 PM · current</span></div>
+          <div class="summary">Per-user limit: Generations <strong>1 / 8</strong> • WebSockets <strong>1 / 8</strong><br><span id="server-summary">Server connected · OAuth 3 enabled · Catalog current</span></div>
+          <div id="scenario-notice" class="notice" hidden></div>
+          <div class="accounts" id="account-list"></div>
+        </section>
+        <section class="pane" id="usage" role="tabpanel" aria-labelledby="tab-usage" hidden>
+          <div class="line"><span class="small muted">Local time · synthetic snapshot</span></div>
+          <div class="toolbar">
+            <label>Period <select id="usage-period"><optgroup label="Rolling intervals"><option value="24h">24 hours</option><option value="7d" selected>7 days</option><option value="30d">30 days</option><option value="90d">90 days</option></optgroup><optgroup label="Calendar periods"><option value="day">Day</option><option value="week">Week</option><option value="month">Month</option><option value="year">Year</option></optgroup></select></label>
+            <button data-command="previous" aria-label="Previous usage interval">‹ Previous</button><button data-command="next" id="usage-next" disabled aria-label="Next usage interval">Next ›</button>
+            <label>Group <select id="usage-group"><option value="model">Model</option><option value="user">User</option><option value="token">Token</option><option value="account">Account</option><option value="total">Total</option></select></label>
+          </div>
+          <div class="line between wrap"><div class="filters" role="group" aria-label="Usage metric"><button data-metric="tokens" aria-pressed="true">Tokens</button><button data-metric="requests" aria-pressed="false">Requests</button><button data-metric="usd" aria-pressed="false">USD estimate</button></div><label class="small muted">Series <select id="usage-series" aria-label="Selected usage series"></select></label></div>
+          <div id="usage-content"></div>
+        </section>
+        <section class="pane" id="tokens" role="tabpanel" aria-labelledby="tab-tokens" hidden>
+          <div class="line"><span class="spacer"></span><button data-command="create"><kbd>n</kbd> Create token</button></div>
+          <div id="clipboard-notice" class="notice" hidden></div>
+          <label class="search"><span class="muted">/</span><input id="token-search" type="search" placeholder="Search tokens by name, ID or state" aria-label="Search tokens" autocomplete="off"></label>
+          <div id="token-list" class="list"></div>
+        </section>
+        <section class="pane" id="models" role="tabpanel" aria-labelledby="tab-models" hidden>
+          <div class="line"><span class="muted small">Illustrative metadata · preview</span></div>
+          <label class="search"><span class="muted">/</span><input id="model-search" type="search" placeholder="Search names, IDs or capabilities" aria-label="Search models" autocomplete="off"></label>
+          <div id="capability-filters" class="filters" role="group" aria-label="Model capability filters"></div>
+          <p id="model-count" class="muted small" role="status"></p><div id="model-list"></div>
+        </section>
+        <section class="pane" id="settings" role="tabpanel" aria-labelledby="tab-settings" hidden></section>
+      </div>
+      <footer class="controls"><div class="status-message" id="status" role="status" aria-live="polite"></div><h2>Controls</h2><div class="commands" id="commands"></div><p class="muted" id="navigation">← → tabs · 1–5 jump · ↑ ↓ select · PgUp PgDn scroll</p></footer>
+    </div>
+  </main>
+  <footer class="footnote">A proposed TUI, not a terminal emulator or a working client. Mouse controls mirror keyboard actions.
+    Model-ID copy is the only optional system clipboard write; tokens never exist in this preview. Reload resets the demo.</footer>
+  <dialog id="dialog" aria-labelledby="dialog-title">
+    <header class="dialog-header"><div><h2 id="dialog-title"></h2><p class="muted small" id="dialog-subtitle"></p></div><button data-command="close" aria-label="Close dialog">Esc ×</button></header>
+    <div class="dialog-body" id="dialog-body"></div><footer class="dialog-footer line between" id="dialog-footer"></footer>
+  </dialog>
+  <script>
+    "use strict";
+    // Everything except optional copying of a public model ID is an in-memory simulation.
+    const $ = (selector) => document.querySelector(selector);
+    const $$ = (selector) => [...document.querySelectorAll(selector)];
+    const escape = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+    const money = (value) => value == null ? "Unknown" : "$" + (Math.abs(value) >= 1000 ? new Intl.NumberFormat("en", {notation:"compact", maximumFractionDigits:1}).format(value).replace("K","k") : Number.isInteger(value) ? value : value.toFixed(2));
+    const number = (value) => value === null ? "Unknown" : value.toLocaleString("en-US");
+    const tabs = ["overview", "usage", "tokens", "models", "settings"];
+    const accounts = [
+      { id: "a", email: "north-studio@example.com", plan: "Pro $100", day: 8, ordinal: "8th", budget: 100, spent: 8.4, short: 68, weekly: 42, hours: 8, shortReset: "Nov 12, 6:20 PM", weeklyReset: "Nov 15, 9:00 AM", period: "Nov 8 – Dec 8", nextBilling: "Dec 8", resets: 2, clients: 2, enabled: true, locked: false },
+      { id: "b", email: "river-workshop@example.com", plan: "Pro $200", day: 6, ordinal: "6th", budget: 200, spent: 24.75, short: null, weekly: 78, hours: null, weeklyReset: "Nov 19, 11:30 AM", period: "Nov 6 – Dec 6", nextBilling: "Dec 6", resets: 1, clients: 1, enabled: true, locked: false },
+      { id: "c", email: "quiet-orbit@example.com", plan: "Plus $20", day: 1, ordinal: "1st", budget: null, spent: null, short: 91, weekly: 64, hours: 5, shortReset: "Nov 12, 5:10 PM", weeklyReset: "Nov 17, 2:00 PM", period: "Nov 1 – Dec 1", nextBilling: "Dec 1", resets: 0, clients: 0, enabled: true, locked: true }
+    ];
+    const models = [
+      { id: "gpt-6.1-sol", name: "GPT 6.1 Sol", source: "Codex", context: "400K", caps: ["Reasoning", "Tools", "Image input"], reserve: true },
+      { id: "gpt-6-astra", name: "GPT 6 Astra", source: "Codex", context: "400K", caps: ["Reasoning", "Tools", "Image input"], reserve: true },
+      { id: "gpt-5.6-sol", name: "GPT 5.6 Sol", source: "Codex", context: "400K", caps: ["Reasoning", "Tools", "Image input"] },
+      { id: "gpt-image-2", name: "GPT Image 2", source: "Codex", context: null, caps: ["Image generation", "Image editing"] },
+      { id: "gpt-5-mini", name: "GPT 5 Mini", source: "Platform", context: "400K", caps: ["Reasoning", "Tools", "Image input"] },
+      { id: "gpt-5-nano", name: "GPT 5 Nano", source: "Platform", context: "400K", caps: ["Reasoning", "Tools", "Image input"] },
+      { id: "gpt-4.1", name: "GPT 4.1", source: "Platform", context: "1M", caps: ["Tools", "Image input"] }
+    ];
+    const tokens = [
+      { id: "tok_demo_workstation", name: "Workstation", fast: null, state: "Active", created: "Nov 8", createdFull: "Nov 8, 2026, 9:15 AM", createdISO: "2026-11-08T09:15:00", expires: "Dec 8", expiresFull: "Dec 8, 2026, 9:15 AM", expiresISO: "2026-12-08T09:15:00", used: "2m ago", usedFull: "Nov 12, 2026, 2:28 PM", usedISO: "2026-11-12T14:28:00" },
+      { id: "tok_demo_ci_runner", name: "CI runner", fast: true, state: "Active", created: "Nov 6", createdFull: "Nov 6, 2026, 11:30 AM", createdISO: "2026-11-06T11:30:00", expires: "Feb 4", expiresFull: "Feb 4, 2027, 11:30 AM", expiresISO: "2027-02-04T11:30:00", used: "1h ago", usedFull: "Nov 12, 2026, 1:30 PM", usedISO: "2026-11-12T13:30:00" },
+      { id: "tok_demo_tablet", name: "Tablet", fast: false, state: "Disabled", created: "Nov 1", createdFull: "Nov 1, 2026, 6:00 PM", createdISO: "2026-11-01T18:00:00", expires: "Dec 1", expiresFull: "Dec 1, 2026, 6:00 PM", expiresISO: "2026-12-01T18:00:00", used: null },
+      { id: "tok_demo_archive", name: "Archive", fast: null, state: "Expired", created: "Oct 1", createdFull: "Oct 1, 2026, 10:00 AM", createdISO: "2026-10-01T10:00:00", expires: "Nov 1", expiresFull: "Nov 1, 2026, 10:00 AM", expiresISO: "2026-11-01T10:00:00", used: null }
+    ];
+    const state = { tab: "overview", metric: "tokens", selected: {}, capabilities: new Set(), interval: 0, bucket: 6, mode: "remote", update: "available", clipboard: false, modal: null, account: null, returnFocus: null };
+    const profile = { url: "https://api.example.com/v1", host: "api.example.com", port: "2222", user: "routercli", identity: "demo-identity", listen: "localhost:8080", state: "profile-state/demo" };
+    const historyStates = new Map();
+    const fixedNow = new Date(2026, 10, 12, 14, 30).getTime();
+    const rangeOptions = [["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"], ["90d", "90 days"]];
+    const dateText = (at, full = true) => new Date(at).toLocaleString("en-US", full ? { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric" });
+    const scenario = () => $("#scenario").value;
+    const connected = (a) => a.budget !== null && scenario() !== "missing";
+    const field = (label, value) => `<div><dt>${label}</dt><dd>${value}</dd></div>`;
+    const tag = (text, tone = "") => `<span class="tag ${tone}">${text}</span>`;
+    function say(message) { $("#status").textContent = message; }
+    function quota(label, remaining, reset) {
+      const value = remaining === null ? null : scenario() === "fallback" ? 0 : remaining;
+      const historical = scenario() === "stale";
+      const tone = historical || value === null ? "var(--faint)" : value <= 20 ? "var(--red)" : value <= 50 ? "var(--amber)" : "var(--green)";
+      return `<div class="quota${label === "Weekly" ? " quota-weekly" : ""}" style="--tone:${tone}"><div class="line"><span>${label}</span><strong>${value === null ? "Unknown" : value + "%"} <span class="muted small">left</span></strong></div>
+        <div class="meter" ${value === null ? 'role="img" aria-label="Quota unknown"' : `role="meter" aria-label="${label} quota remaining" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"`} style="--fill:${value === null ? 0 : value}%"><span></span></div>
+        <div class="quota-note">Resets ${reset || "Unknown"}${historical ? " · Historical" : ""}</div></div>`;
+    }
+    function apiReserve(a) {
+      if (!connected(a)) return "";
+      const remaining = a.budget - a.spent, percentage = remaining / a.budget * 100;
+      return `<div class="quota quota-api api-reserve" style="--tone:${scenario() === "stale" ? "var(--faint)" : "var(--green)"}"><div class="line"><span>Platform API ${tag("Reserve")}</span><strong>${money(remaining)} / ${money(a.budget)} left</strong></div>
+        <div class="meter" role="meter" aria-label="Estimated Platform API budget remaining" aria-valuemin="0" aria-valuemax="${a.budget}" aria-valuenow="${remaining}" aria-valuetext="${money(remaining)} of ${money(a.budget)} estimated remaining; ${percentage.toFixed(1)} percent" style="--fill:${percentage}%"><span></span></div>
+        <div class="quota-note">Estimated · ${scenario() === "stale" ? "Historical observation" : "current billing cycle"} · not a verified credit balance</div></div>`;
+    }
+    function quotaGrid(a) {
+      return `<div class="quotas" data-has-short="${a.short !== null}">${a.short !== null ? quota(a.hours + "-hour", a.short, a.shortReset) : ""}${quota("Weekly", a.weekly, a.weeklyReset)}${apiReserve(a)}</div>`;
+    }
+    function renderOverview() {
+      const s = scenario();
+      $("#snapshot").textContent = s === "stale" ? "Nov 11, 2:30 PM · historical" : "Nov 12, 2:30 PM · current";
+      $("#server-summary").textContent = `Server connected · OAuth ${accounts.filter((a) => a.enabled).length} enabled · Catalog ${s === "stale" ? "cached; refresh unavailable" : "current"}`;
+      $("#scenario-notice").hidden = !["fallback", "stale"].includes(s);
+      $("#scenario-notice").textContent = s === "fallback" ? "Using Platform API · GPT 6.1 Sol · All Codex quotas exhausted. Same-model reserve using available Platform funds." : "Historical observations · Refresh unavailable. Last percentages retained; Platform determines current fund availability, not the displayed cost estimate.";
+      $("#account-list").innerHTML = accounts.map((a) => `<article class="account" data-row="${a.id}">
+        <button class="row-trigger" data-open-account="${a.id}" aria-label="View ${a.email} details"><span class="line wrap"><strong class="identity">${a.email}</strong><span class="spacer"></span>${a.id === "a" && s !== "fallback" && s !== "stale" && a.enabled ? '<span title="Preferred candidate for new dialogs, not every session">' + tag("Best", "green") + '</span>' : ""}${s === "fallback" && a.id === "a" ? tag("API in use", "green") : ""}${s === "urgent" && a.id === "a" && a.enabled ? tag("Priority", "red") : ""}${!a.enabled ? tag("Deactivated") : ""}</span></button>
+        <div class="account-meta">${a.plan} · ${a.enabled ? "Enabled" : "Deactivated"}${a.locked ? " · Operator locked" : ""}${s === "fallback" ? " · Cooldown: subscription quota until next reset" : s === "urgent" && a.id === "c" ? " · Paused until Nov 12, 2:35 PM · Responses backoff" : s === "urgent" && a.id === "a" ? " · Priority deadline Nov 13, 2:30 PM" : " · Available"}</div>
+        ${quotaGrid(a)}
+        <div class="account-footer line between wrap"><span title="Credits observed Nov 12, 2:30 PM · Automatic reset: idle · Weekly activation: ${a.weekly === null ? "Unknown" : "completed"}">${a.resets === null ? "Resets Unknown" : a.resets + " " + (a.resets === 1 ? "reset" : "resets")}${a.resets ? " · expires " + (s === "urgent" && a.id === "a" ? "Nov 13, 2:30 PM" : "Nov 30") : ""} · automatic</span><span>${a.clients} ${a.clients === 1 ? "client" : "clients"}</span></div>
+      </article>`).join("");
+      selectRow(state.selected.overview || "a", false);
+    }
+    function historyChart(a) {
+      if (!historyStates.has(a.id)) historyStates.set(a.id, { period: "7d", interval: 0, selected: null });
+      return `<section class="dialog-section" data-section="history"><div class="line between wrap"><h3>Subscription history</h3><span class="muted small">10-minute observations · gaps retained</span></div>
+        <div class="filters" role="group" aria-label="Subscription history period">${rangeOptions.map(([value, label]) => `<button data-history-period="${value}" aria-pressed="false">${label}</button>`).join("")}</div>
+        <div class="line wrap small"><button data-command="history-previous" aria-label="Previous subscription history interval">‹ Previous [</button><button data-command="history-next" id="history-next" aria-label="Next subscription history interval">Next ] ›</button><span id="history-span" class="muted"></span></div>
+        <div id="history-content"></div></section>`;
+    }
+    function apiHistoryPoint(a, at, historyNow) {
+      // Independent synthetic organization-cost observations, not Codex quota samples.
+      // Each billing cycle has its own spend curve; only the latest cycle is anchored
+      // to the fixture's reported USD spend. Allowances are not verified grant balances.
+      const cycleStart = (time) => {
+        const start = new Date(time);
+        start.setDate(1); start.setHours(14, 30, 0, 0); start.setDate(a.day);
+        if (start.getTime() > time) start.setMonth(start.getMonth() - 1);
+        return start;
+      };
+      const start = cycleStart(at), next = new Date(start);
+      next.setMonth(next.getMonth() + 1);
+      const phase = (at - start.getTime()) / (next.getTime() - start.getTime());
+      const costCurve = (p) => .6 * p + .4 * p * p;
+      const currentStart = cycleStart(historyNow);
+      let spent;
+      if (start.getTime() === currentStart.getTime()) {
+        const nowPhase = (historyNow - start.getTime()) / (next.getTime() - start.getTime());
+        spent = a.spent * costCurve(phase) / Math.max(costCurve(nowPhase), .000001);
+      } else {
+        const utilization = .24 + ((start.getMonth() + a.day) % 5) * .05;
+        spent = a.budget * utilization * costCurve(phase);
+      }
+      const remaining = Math.round((a.budget - Math.min(a.budget, Math.max(0, spent))) * 100) / 100;
+      return { at, observedAt: Math.min(at + 240000, historyNow), remaining, allowance: a.budget, left: Math.round(remaining / a.budget * 1000) / 10 };
+    }
+    function renderHistory() {
+      const a = accounts.find((item) => item.id === state.account), h = historyStates.get(a.id);
+      const days = h.period === "24h" ? 1 : Number(h.period.slice(0, -1));
+      const historyNow = fixedNow - (scenario() === "stale" ? 86400000 : 0);
+      const end = historyNow + 600000 - h.interval * days * 86400000, from = end - days * 86400000;
+      const count = days * 144;
+      $$('[data-history-period]').forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.historyPeriod === h.period)));
+      $("#history-next").disabled = h.interval === 0;
+      $("#history-span").textContent = dateText(from) + " – " + dateText(end);
+      if (a.weekly === null) { $("#history-content").innerHTML = '<p class="empty">Unknown · no recorded observations for this new account.</p>'; state.historyData = null; return; }
+      const short = a.short === null ? [] : [{ kind: "short", label: a.hours + "-hour", base: a.short, cycle: a.hours * 3600000, color: "var(--blue)" }];
+      const api = connected(a) ? [{ kind: "api", label: "Platform API", color: "var(--api)" }] : [];
+      const series = [...short, { kind: "weekly", label: "Weekly", base: a.weekly, cycle: 7 * 86400000, color: "var(--purple)" }, ...api].map((series, source) => {
+        const values = Array.from({ length: count }, (_, i) => {
+          const at = from + i * 600000;
+          if (series.kind === "api") {
+            // API-only collection gaps are separate from missing Codex observations.
+            if ((i > count * .68 && i < count * .71) || i % 97 === 5 || i % 97 === 6) return null;
+            return apiHistoryPoint(a, at, historyNow);
+          }
+          // Both shared outages and per-window gaps; never bridge an absent observation.
+          if ((i > count * .46 && i < count * .51) || (i + source * 3) % 137 < 3) return null;
+          const base = scenario() === "fallback" ? 0 : series.base;
+          const phase = (base / 100 + (historyNow - at) / series.cycle) % 1;
+          return { at, observedAt: Math.min(at + 120000, historyNow), left: Math.round(phase * 1000) / 10 };
+        });
+        let pen = false;
+        const path = values.map((point, i) => { if (!point) { pen = false; return ""; } const p = `${pen ? "L" : "M"}${(38 + i / (count - 1) * 600).toFixed(1)},${(145 - point.left / 100 * 125).toFixed(1)}`; pen = true; return p; }).join(" ");
+        return { ...series, values, path };
+      });
+      state.historyData = { from, end, count, series };
+      const selectedIndex = h.selected === null ? count - 1 : Math.max(0, Math.min(count - 1, Math.round((h.selected - from) / 600000)));
+      const ticks = Array.from({ length: 8 }, (_, i) => Math.round(i / 7 * (count - 1)));
+      $("#history-content").innerHTML = `<div class="chart"><div class="line between wrap small"><span class="muted">Quota left · 0–100%</span><span>${series.map((s) => `<span data-history-legend="${s.kind}" style="color:${s.color}">${s.kind === "api" ? "┄" : "●"} ${s.label}</span>`).join(" · ")}</span></div>
+        <div class="plot"><svg id="history-chart" viewBox="0 0 680 185" tabindex="0" role="img" aria-label="Subscription${api.length ? " and estimated Platform API budget" : ""} quota history. Left and right inspect ten-minute samples; Home and End select first and latest; Escape clears the cursor.">${[0, 25, 50, 75, 100].map((v) => `<line x1="38" y1="${145 - v * 1.25}" x2="638" y2="${145 - v * 1.25}"/><text x="0" y="${149 - v * 1.25}">${v}%</text>`).join("")}${series.map((s) => `<path d="${s.path}" fill="none" stroke="${s.color}" stroke-width="1.4"${s.kind === "api" ? ' stroke-dasharray="5 3"' : ""} data-history-series="${s.label}"/>`).join("")}${ticks.map((i, n) => `<text x="${38 + i / (count - 1) * 600}" y="173" text-anchor="${n === 0 ? "start" : n === 7 ? "end" : "middle"}">${h.period === "24h" ? new Date(from + i * 600000).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : dateText(from + i * 600000, false)}</text>`).join("")}<g id="history-cursor"></g></svg><div id="history-tooltip" class="chart-tooltip" role="status" hidden></div></div>
+        <div class="compact-axis">${[0, Math.round((count - 1) / 2), count - 1].map((i) => `<span>${h.period === "24h" ? new Date(from + i * 600000).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : dateText(from + i * 600000, false)}</span>`).join("")}</div><label class="small muted">Inspect sample <input id="history-sample" type="range" min="0" max="${count - 1}" value="${selectedIndex}" aria-label="Subscription history sample"></label>
+        <p class="chart-readout" id="history-value"></p><p class="small muted">Latest observation · ${dateText(end - 600000)} · ${count.toLocaleString("en-US")} ten-minute intervals${api.length ? " · API: independent synthetic organization costs / configured USD allowance; estimated, not verified credit" : ""} · Hover / focus chart to inspect; h cycles range.</p></div>`;
+      updateHistoryCursor();
+    }
+    function updateHistoryCursor() {
+      const data = state.historyData; if (!data) return;
+      const h = historyStates.get(state.account), selected = h.selected;
+      const i = selected === null ? -1 : Math.round((selected - data.from) / 600000);
+      $("#history-tooltip").hidden = i < 0 || i >= data.count;
+      if (i < 0 || i >= data.count) { $("#history-cursor").innerHTML = ""; $("#history-value").textContent = "Missing observations stay gaps · select a sample for values and observed timestamps."; return; }
+      const x = 38 + i / (data.count - 1) * 600;
+      $("#history-sample").value = i;
+      $("#history-cursor").innerHTML = `<line class="cursor" x1="${x}" x2="${x}" y1="20" y2="145"/>` + data.series.map((s) => s.values[i] ? `<circle cx="${x}" cy="${145 - s.values[i].left * 1.25}" r="3" fill="${s.color}"/>` : "").join("");
+      const text = data.series.map((s) => {
+        const point = s.values[i];
+        if (!point) return `${s.label}: Not observed · Unknown`;
+        return `${s.label}: ${point.left}% left${s.kind === "api" ? " · " + money(point.remaining) + " / " + money(point.allowance) + " left · Estimated" + (scenario() === "stale" ? " · Historical" : "") : ""} · observed ${dateText(point.observedAt)}`;
+      });
+      $("#history-value").textContent = dateText(selected) + " · " + text.join(" · ");
+      $("#history-tooltip").innerHTML = `<strong>${dateText(selected)}</strong>` + text.map((t) => `<span>${t}</span>`).join("");
+      $("#history-tooltip").style.left = x <= 334 ? `calc(${x / 680 * 100}% + 24px)` : "auto";
+      $("#history-tooltip").style.right = x > 334 ? `calc(${100 - x / 680 * 100}% + 24px)` : "auto";
+    }
+    function openDialog(title, subtitle, body, footer = '<button data-command="close">Enter Done</button>', kind = "details") {
+      const d = $("#dialog");
+      if (!d.open) state.returnFocus = document.activeElement;
+      state.modal = kind;
+      $("#dialog-title").textContent = title; $("#dialog-subtitle").textContent = subtitle;
+      $("#dialog-body").innerHTML = body; $("#dialog-footer").innerHTML = `<span class="muted small">${kind === "account" ? "Read-only · ↑ ↓ scroll · Esc close" : "Demo only · Esc cancel"}</span>${footer}`;
+      if (!d.open) d.showModal();
+      $("#dialog-body").scrollTop = 0;
+      (d.querySelector("input, select, .setting-action, [data-reauth], #dialog-footer button") || d.querySelector("button")).focus();
+    }
+    function closeDialog() { $("#dialog").close(); }
+    function openAccount(id) {
+      const a = accounts.find((item) => item.id === id); state.account = id;
+      const api = connected(a);
+      const s = scenario();
+      openDialog(a.email, `${a.plan} · ${a.enabled ? "Enabled" : "Deactivated"}${a.locked ? " · Operator locked" : ""}${s === "fallback" ? " · Cooldown: subscription quota" : s === "urgent" && a.id === "c" ? " · Paused until Nov 12, 2:35 PM · Responses backoff" : s === "urgent" && a.id === "a" ? " · Priority: expiring reset · Nov 13, 2:30 PM" : " · Available"}`, `
+        <section data-section="quotas">${quotaGrid(a)}<p class="quota-note">Observed ${a.weekly === null ? "Unknown" : (s === "stale" ? "Nov 11" : "Nov 12") + ", 2:30 PM"} · ${a.weekly === null ? "Unknown" : s === "stale" ? "Historical" : "Current"} · Used ${a.weekly === null ? "Unknown" : (s === "fallback" ? "100" : 100 - a.weekly) + "%"} weekly</p></section>
+        ${historyChart(a)}
+        <section class="dialog-section" data-section="billing"><h3>Subscription &amp; billing</h3><dl class="fields">${field("Plan", a.plan)}${field("Billing day", a.ordinal ? a.ordinal + " of every month" : "Unknown")}${field("Next expected renewal", a.nextBilling)}${field("Billing source", "Set by server operator")}</dl><p class="muted small">Billing day is separate from Codex quota resets. Renewal is an expected date, not a confirmed charge.</p><p class="muted small">Reset credits: ${a.resets === null ? "Unknown" : a.resets}${a.resets ? " · next expiry " + (s === "urgent" && a.id === "a" ? "Nov 13, 2:30 PM" : "Nov 30") : ""} · Automatic reset: idle · Weekly activation: ${a.weekly === null ? "Unknown" : "completed"}. No manual redemption.</p></section>
+        ${api ? `<section class="dialog-section" data-section="api"><h3>Platform API ${tag(s === "stale" ? "Historical" : "Connected", s === "stale" ? "amber" : "green")}</h3><dl class="fields">${field("Monthly allowance", money(a.budget) + " · display reference")}${field("Estimated difference", money(a.budget - a.spent))}${field("Reported API spend", money(a.spent))}${field("Billing period", a.period)}${field("Display estimate", "Configured reference minus organization costs")}${field("Observation", (s === "stale" ? "Nov 11" : "Nov 12") + ", 2:30 PM")}${field("Spending policy", "All available Platform funds, free or purchased")}${field("Automatic use", s === "fallback" ? "In use · same model" : "Reserve after all Codex quotas")}</dl><p class="muted small">Display estimate, not a remaining balance or spending cap. Platform determines available funds and rejects requests when exhausted.</p></section>
+        <section class="dialog-section" data-section="access"><h3>Platform access</h3><dl class="fields">${field("Admin API Key", "Configured · server only")}${field("Project / service account", "exetrouter / exetrouter")}${field("Working API key", "exetrouter · Active")}${field("Key expires", "Dec 12, 2:30 PM · 30 day lifetime")}</dl><p class="muted small">Secret-free metadata. The server replaces expired working keys; this view cannot read or manage credentials.</p></section>` : ""}
+        <section class="dialog-section" data-section="clients"><h3>Clients · ${a.clients} <span class="muted small">all users’ recently active tokens</span></h3>
+        ${a.clients ? '<div class="resource-row line between wrap"><span>Workstation <span class="muted small">· tok_demo_workstation<br>Last request Nov 12, 2:28 PM · 2m ago</span></span>' + tag("1 running", "green") + '</div>' : '<p class="muted">No recent inference requests.</p>'}
+        ${a.clients > 1 ? '<div class="resource-row line between wrap"><span>Shared client 8D4A <span class="muted small">· anonymous alias<br>Last request Nov 12, 2:26 PM · 4m ago</span></span>' + tag("Idle") + '</div>' : ""}<p class="small muted">15 minute activity window; running requests remain visible. One token may represent several apps. Bounded to 128 rows, running first; this list is not truncated.</p></section>
+      `, '<button data-command="close">Done Enter</button>', "account");
+      renderHistory();
+    }
+    function tokenDates(t) {
+      const date = (key, label) => `<span>${label} <time tabindex="0" datetime="${t[key + "ISO"]}" title="${t[key + "Full"]}" aria-label="${label} ${t[key + "Full"]}">${t[key]}</time></span>`;
+      return `<div class="dates">${date("created", "Created")} · ${date("expires", "Expires")} · ${t.used ? date("used", "Used") : '<span>Used <span class="never" tabindex="0" title="This token has never been used">Never</span></span>'}</div>`;
+    }
+    function renderTokens() {
+      const query = $("#token-search").value.trim().toLowerCase();
+      const rows = tokens.filter((t) => t.state !== "Revoked" && `${t.name} ${t.id} ${t.state}`.toLowerCase().includes(query));
+      $("#token-list").innerHTML = rows.map((t) => `<article class="resource-row" data-row="${t.id}"><button class="row-trigger" data-open-token="${t.id}" aria-label="Actions for ${escape(t.name)}"><span class="line wrap"><strong>${escape(t.name)}</strong><span class="spacer"></span>${tag(t.state, t.state === "Active" ? "green" : "")}${t.fast === null ? "" : tag("Fast: " + (t.fast ? "Allow" : "Block"))}</span></button><code class="small muted">${t.id}</code>${tokenDates(t)}</article>`).join("") || '<p class="empty">No matching tokens.</p>';
+      $("#clipboard-notice").hidden = !state.clipboard;
+      $("#clipboard-notice").innerHTML = 'Simulated copy failure · Metadata created, copy pending. Do not issue again.<div class="line wrap"><button data-command="retry-copy"><kbd>c</kbd> Retry copying</button><button data-command="discard-copy">Discard pending copy</button></div><span class="small">No secret was generated, retained or copied in this preview.</span>';
+      selectRow(state.selected.tokens, false);
+    }
+    function openToken(id) {
+      const t = tokens.find((item) => item.id === id); state.token = id;
+      openDialog(t.name, t.id + " · " + t.state, `<dl class="fields">${field("Created", t.createdFull)}${field("Expires", t.expiresFull)}${field("Last used", t.usedFull || "Never")}${field("Fast mode", t.fast === null ? "Inherit server policy" : t.fast ? "Allow" : "Block")}</dl>
+        <div class="group list" role="group" aria-label="Token actions"><button class="setting-action" data-token-action="rename">Rename <kbd>l</kbd></button><button class="setting-action" data-token-action="fast">Fast mode → Default / Allow / Block</button><button class="setting-action" data-token-action="toggle" ${t.state === "Expired" ? "disabled" : ""}>${t.state === "Disabled" ? "Enable" : "Disable"} · reversible</button><button class="setting-action" data-token-action="rotate" ${state.clipboard ? "disabled" : ""}>Rotate · replaces old secret</button><button class="setting-action red" data-token-action="revoke">Revoke · permanent</button></div>`, '<button data-command="close">Close Esc</button>', "token");
+    }
+    function tokenForm(rename = false) {
+      const t = tokens.find((item) => item.id === state.token);
+      openDialog(rename ? "Rename token" : "Create token", "Local simulation · no bearer secret will be generated", `<form id="token-form" class="form"><label>Token name<input name="name" id="token-name" maxlength="80" required value="${rename ? escape(t.name) : ""}" placeholder="Demo laptop" autocomplete="off"></label>${rename ? "" : '<label>Expires in days<input name="days" id="token-days" type="number" min="1" max="365" value="90" required></label><label>Clipboard scenario<select id="copy-scenario"><option value="success">Available · copy succeeds</option><option value="failure">Available · copy fails after issuance</option><option value="unavailable">Unavailable · block issuance</option></select></label><p class="small muted">Support is checked before issuance. A failed copy is retried without reissuing.</p>'}<p class="error" id="form-error" role="alert"></p></form>`, `<button class="primary" type="submit" form="token-form">${rename ? "Save name" : "Create and copy"} Enter</button>`, rename ? "rename" : "create");
+    }
+    function confirm(title, description, action, callback) {
+      state.confirm = callback;
+      openDialog(title, "Explicit confirmation · simulated only", `<p>${description}</p>`, `<button data-command="close">Cancel Esc</button><button class="primary" data-command="confirm">${action} y</button>`, "confirm");
+    }
+    function tokenAction(action) {
+      const t = tokens.find((item) => item.id === state.token);
+      if (action === "rename") return tokenForm(true);
+      if (action === "fast") return openDialog("Fast mode", t.name + " · Default inherits server policy", `<div class="form"><label>Override<select id="fast-mode"><option value="default" ${t.fast === null ? "selected" : ""}>Default</option><option value="allow" ${t.fast === true ? "selected" : ""}>Allow</option><option value="block" ${t.fast === false ? "selected" : ""}>Block</option></select></label></div>`, '<button class="primary" data-command="save-fast">Save Enter</button>', "fast");
+      const descriptions = { rotate: "The old secret stops working immediately. A replacement would be copied directly, never rendered. This demo changes metadata only.", revoke: "This token will stop authorizing new requests permanently. It will be hidden from the list.", toggle: "Disable/Enable is reversible and preserves the token secret and usage." };
+      confirm(action === "toggle" ? (t.state === "Disabled" ? "Enable token?" : "Disable token?") : action === "rotate" ? "Rotate token?" : "Revoke token?", descriptions[action], "Confirm", () => {
+        if (action === "toggle") t.state = t.state === "Disabled" ? "Active" : "Disabled";
+        if (action === "revoke") t.state = "Revoked";
+        if (action === "rotate") state.clipboard = true;
+        renderTokens(); say(action === "rotate" ? "Simulated rotation · copy pending; retry with c, never reissue." : "Token metadata updated locally · simulation.");
+      });
+    }
+    function renderModels() {
+      const caps = ["Reasoning", "Tools", "Image input", "Image generation", "Image editing"];
+      $("#capability-filters").innerHTML = ["All", ...caps].map((c) => `<button data-capability="${c}" aria-pressed="${c === "All" ? state.capabilities.size === 0 : state.capabilities.has(c)}">${c}</button>`).join("");
+      const q = $("#model-search").value.trim().toLowerCase();
+      const rows = models.filter((m) => (scenario() !== "missing" || m.source !== "Platform") && `${m.id} ${m.name} ${m.caps.join(" ")}`.toLowerCase().includes(q) && [...state.capabilities].every((c) => m.caps.includes(c)));
+      $("#model-count").textContent = `${rows.length} models${state.capabilities.size ? " · " + [...state.capabilities].join(" + ") : ""}`;
+      $("#model-list").innerHTML = ["Codex", "Platform"].map((source) => {
+        const group = rows.filter((m) => m.source === source);
+        if (!group.length) return "";
+        return `<section class="group" aria-label="${source} models"><h3>${source === "Codex" ? "Codex models · subscription quotas first" : "Additional Platform models · explicit model selection"}</h3><div class="list">${group.map((m) => `<article class="resource-row" data-row="${m.id}"><button class="row-trigger" data-copy-model="${m.id}" aria-label="Copy ${m.name} model ID"><span class="line"><strong>${m.name}</strong><span class="context">${m.context === null ? "Context Unknown" : m.context + " context"} · ↵ copy</span></span></button><code class="muted small">${m.id}</code><div class="capabilities">${m.caps.map((c) => tag(c)).join("")}${m.reserve && scenario() !== "missing" ? tag("API reserve") : ""}</div></article>`).join("")}</div></section>`;
+      }).join("") || '<p class="empty">No models match all filters.</p>';
+      selectRow(state.selected.models, false);
+    }
+    // Nullable fixture counters are intentionally never converted to zero.
+    const usageFixtures = [
+      { requests: 148, input: 1840000, output: 248000, cached: 1100000, usd: 12.48, buckets: [8, 19, 14, null, 27, 16, 23] },
+      { requests: 76, input: 620000, output: 132000, cached: 310000, usd: 4.12, buckets: [4, 8, 12, 7, 9, 5, 12] },
+      { requests: 9, input: null, output: null, cached: null, usd: null, buckets: [null, null, null, null, null, null, null] }
+    ];
+    function usageRows() {
+      const by = $("#usage-group").value;
+      const names = { model: ["GPT 6.1 Sol", "GPT 6 Astra", "GPT Image 2"], user: ["You", "Shared user 7C2B", "Shared user 9E1F"], token: ["Workstation", "CI runner", "Tablet"], account: accounts.slice(0, 3).map((a) => a.email), total: ["All usage"] }[by];
+      const multiplier = { day: .4, week: 1, month: 4, year: 42, "24h": .5, "7d": 1, "30d": 4.2, "90d": 12.5 }[$("#usage-period").value] / (state.interval + 1);
+      if (by === "total") return [{ ...usageFixtures[2], name: names[0], key: "total-0", requests: Math.round(233 * multiplier) }];
+      return names.map((name, i) => {
+        const fixture = usageFixtures[i];
+        return { ...fixture, name, key: by + "-" + i, ...Object.fromEntries(["requests", "input", "output", "cached", "usd"].map((key) => [key, fixture[key] === null ? null : key === "usd" ? Math.round(fixture[key] * multiplier * 100) / 100 : Math.round(fixture[key] * multiplier)])), buckets: fixture.buckets.map((v) => v === null ? null : Math.round(v * multiplier)) };
+      });
+    }
+    function usageValue(row, metric = state.metric) { return metric === "requests" ? row.requests : metric === "usd" ? row.usd : row.input === null || row.output === null ? null : row.input + row.output; }
+    function usageBucket(row, index) {
+      const bucket = row.buckets[index], total = usageValue(row);
+      if (bucket === null || total === null) return null;
+      if (state.metric === "requests") return bucket;
+      const weight = row.buckets.reduce((sum, value) => sum + (value === null ? 0 : value), 0);
+      if (!weight) return null;
+      const value = total * bucket / weight;
+      return state.metric === "tokens" ? Math.round(value) : value;
+    }
+    function renderUsage(resetSeries = false) {
+      const rows = usageRows(); const select = $("#usage-series");
+      const previous = resetSeries ? "" : select.value;
+      select.innerHTML = '<option value="">All groups</option>' + rows.map((r) => `<option value="${r.key}">${r.name}</option>`).join("");
+      select.value = rows.some((r) => r.key === previous) ? previous : "";
+      const selected = rows.filter((r) => !select.value || r.key === select.value);
+      const sum = (key) => selected.some((r) => r[key] === null) ? null : selected.reduce((n, r) => n + r[key], 0);
+      const input = sum("input"), output = sum("output");
+      const total = input === null || output === null ? null : input + output;
+      const period = $("#usage-period").value;
+      const days = { day: 1, week: 7, month: 30, year: 365, "24h": 1, "7d": 7, "30d": 30, "90d": 90 }[period];
+      let end = fixedNow - state.interval * days * 86400000;
+      let from = end - days * 86400000;
+      if (["day", "week", "month", "year"].includes(period)) {
+        const start = new Date(end);
+        start.setHours(0, 0, 0, 0);
+        if (period === "week") start.setDate(start.getDate() - (start.getDay() + 6) % 7);
+        if (period === "month") start.setDate(1);
+        if (period === "year") start.setMonth(0, 1);
+        from = start.getTime();
+      }
+      const range = dateText(from) + " – " + dateText(end);
+      const colors = ["var(--blue)", "var(--purple)", "var(--amber)"];
+      const maximum = Math.max(1, ...selected.flatMap((row) => row.buckets.map((_, i) => usageBucket(row, i))).filter((v) => v !== null));
+      const paths = selected.map((row) => {
+        const index = rows.indexOf(row); let pen = false;
+        const path = row.buckets.map((_, i) => {
+          const v = usageBucket(row, i);
+          if (v === null) { pen = false; return ""; }
+          const point = `${pen ? "L" : "M"}${38 + i * 100},${(145 - v / maximum * 120).toFixed(1)}`; pen = true; return point;
+        }).join(" ");
+        return `<path d="${path}" fill="none" stroke="${colors[index]}" stroke-width="1.8"/>` + row.buckets.map((_, i) => { const v = usageBucket(row, i); return v === null ? "" : `<circle cx="${38 + i * 100}" cy="${145 - v / maximum * 120}" r="2" fill="${colors[index]}"/>`; }).join("");
+      }).join("");
+      const labels = Array.from({ length: 7 }, (_, i) => {
+        const at = from + (end - from) * i / 6;
+        return period === "day" || period === "24h" ? new Date(at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : dateText(at, false);
+      });
+      $("#usage-next").disabled = state.interval === 0;
+      $$('[data-metric]').forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.metric === state.metric)));
+      $("#usage-content").innerHTML = `<p class="small muted">${state.interval ? "Earlier interval " + state.interval + " · " : ""}${range} · ${select.value ? "Selected series" : "All groups"}</p>
+        <div class="stats"><div><span>Requests</span><strong>${number(sum("requests"))}</strong></div><div><span>Reported tokens</span><strong>${number(total)}</strong></div><div><span>Standard API equivalent</span><strong>${money(sum("usd"))}</strong></div></div>
+        <div class="chart"><div class="line between wrap"><strong>${state.metric === "usd" ? "Standard API equivalent (USD)" : state.metric === "tokens" ? "Reported tokens" : "Requests"}</strong><span class="small muted">${selected.map((r) => `<span style="color:${colors[rows.indexOf(r)]}">● ${r.name}</span>`).join(" · ")}</span></div>
+          <div class="plot"><svg id="usage-chart" viewBox="0 0 680 185" role="img" aria-label="Illustrative usage chart. Use the sample slider below for interval values."><line x1="38" y1="25" x2="638" y2="25"/><line x1="38" y1="85" x2="638" y2="85"/><line x1="38" y1="145" x2="638" y2="145"/>
+          <text x="0" y="28">${state.metric === "usd" ? money(maximum) : new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(maximum)}</text><text x="0" y="148">${state.metric === "usd" ? "$0" : "0"}</text>${paths}<line class="cursor" x1="${38 + state.bucket * 100}" x2="${38 + state.bucket * 100}" y1="20" y2="145"/>${labels.map((l, i) => `<text x="${38 + i * 100}" y="173" text-anchor="${i === 0 ? "start" : i === 6 ? "end" : "middle"}">${l}</text>`).join("")}</svg><div class="chart-tooltip" id="usage-tooltip" role="status"></div></div>
+          <div class="compact-axis"><span>${labels[0]}</span><span>${labels[3]}</span><span>${labels[6]}</span></div><label class="small muted">Inspect interval <input id="usage-sample" type="range" min="0" max="6" value="${state.bucket}" aria-label="Usage chart sample"></label><div class="chart-readout" id="usage-readout"></div>
+        </div><p class="small muted">USD is a standard API equivalent, not a subscription bill. Unknown or unpriced counters remain Unknown, not $0. Illustrative per-model rates; gaps are missing observations.</p>
+        <section class="group"><h3>Breakdown${$("#usage-group").value === "token" ? " · your tokens only" : ""}</h3><div class="counter-grid breakdown-head"><span>Series</span><span>Requests</span><span>Input</span><span>Output</span><span>Cached</span><span>${state.metric === "usd" ? "USD equiv." : "Total"}</span></div><div class="list">${rows.map((r) => `<button class="counter-grid breakdown-row" data-row="${r.key}" data-usage-series="${r.key}"><span>${r.name}</span><span>${number(r.requests)}</span><span>${number(r.input)}</span><span>${number(r.output)}</span><span>${number(r.cached)}</span><span>${state.metric === "usd" ? money(r.usd) : number(usageValue(r, "tokens"))}</span></button>`).join("")}</div></section>`;
+      state.usageLabels = labels; updateUsageReadout(); selectRow(state.selected.usage, false);
+    }
+    function updateUsageReadout() {
+      const rows = usageRows().filter((r) => !$("#usage-series").value || r.key === $("#usage-series").value);
+      $("#usage-readout").textContent = state.usageLabels[state.bucket] + " · " + rows.map((r) => {
+        const value = usageBucket(r, state.bucket);
+        return r.name + ": " + (state.metric === "usd" ? money(value) : number(value));
+      }).join(" · ");
+      $("#usage-tooltip").innerHTML = `<strong>${state.usageLabels[state.bucket]}</strong>` + rows.map((r) => `<span>${r.name}: ${state.metric === "usd" ? money(usageBucket(r, state.bucket)) : number(usageBucket(r, state.bucket))}</span>`).join("");
+      $("#usage-tooltip").style.left = state.bucket <= 3 ? `calc(${(38 + state.bucket * 100) / 680 * 100}% + 24px)` : "auto";
+      $("#usage-tooltip").style.right = state.bucket > 3 ? `calc(${100 - (38 + state.bucket * 100) / 680 * 100}% + 24px)` : "auto";
+      const cursor = $("#usage-chart .cursor"); if (cursor) for (const key of ["x1", "x2"]) cursor.setAttribute(key, 38 + state.bucket * 100);
+    }
+    function renderSettings() {
+      const standalone = state.mode === "standalone";
+      $("#connection").textContent = standalone ? "● standalone · local profile" : "● remote · " + profile.host;
+      $("#tab-settings").classList.toggle("update", state.update === "available");
+      $("#settings").innerHTML = `<section class="setting-block"><h3>Client updates</h3><p class="line wrap">${tag(state.update === "installed" ? "Reopen dashboard" : "Update available", "amber")}<span>exr 0.0.0-preview → 0.0.1-preview</span></p><p class="small muted">${state.update === "installed" ? "Installation simulated. Settings, accounts and keys preserved." : "Preview versions only · remote server updates belong to the operator."}</p><button class="setting-action" data-row="check" data-command="check-update">Check updates <kbd>v</kbd></button><button class="setting-action" data-row="install" data-command="install-update" ${state.update === "installed" ? "disabled" : ""}>Install client update <kbd>U</kbd></button></section>
+        <section class="setting-block"><div class="line between"><h3>Connection</h3><button data-command="configure"><kbd>e</kbd> Configure</button></div><dl class="fields">${field("Mode", standalone ? "Standalone · attached to embedded API" : "Remote · restricted SSH gateway")}${field("API URL", escape(standalone ? "http://" + profile.listen + "/v1" : profile.url))}${standalone ? field("Listen", escape(profile.listen)) + field("Private state", escape(profile.state)) : field("SSH destination", escape(profile.user + "@" + profile.host + ":" + profile.port)) + field("Identity file", escape(profile.identity) + " · path only, never key material")}</dl><button class="setting-action" data-row="configure" data-command="configure">Configure connection →</button></section>
+        ${standalone ? `<section class="setting-block"><div class="line between"><h3>Local accounts</h3><button data-command="add-account"><kbd>a</kbd> Add account</button></div>${accounts.map((a) => `<button class="setting-action line between wrap" data-row="local-${a.id}" data-local-account="${a.id}"><strong>${a.email}</strong>${tag(a.enabled ? "Ready" : "Disabled")}</button>`).join("")}<p class="small muted">Add / same-account reauthorize / disable. Deactivation retains OAuth state; reauthorization enables again. The embedded API follows its owning process.</p></section>` : ""}
+        <section class="setting-block"><h3>Operator-owned access</h3><p class="small muted">OAuth credentials and signing keys: private runtime only. SSH host verification: required. No public administration surface.</p>${scenario() !== "missing" ? '<p class="small muted">Platform Admin API Keys: configured on server · working keys maintained automatically. View secret-free metadata in account details.</p>' : ""}</section>`;
+      selectRow(state.selected.settings, false);
+    }
+    function configure() {
+      openDialog("Configure connection", "Demo profile only · no SSH check, network request or file write", `<form id="connection-form" class="form"><label>Connection type<select id="connection-mode"><option value="remote" ${state.mode === "remote" ? "selected" : ""}>Remote</option><option value="standalone" ${state.mode === "standalone" ? "selected" : ""}>Standalone</option></select></label><div id="connection-fields"></div><p class="error" id="form-error" role="alert"></p></form>`, '<button class="primary" type="submit" form="connection-form">Save demo profile Enter</button>', "configure");
+      connectionFields();
+    }
+    function connectionFields() {
+      const local = $("#connection-mode").value === "standalone";
+      const input = (label, name, type = "text") => `<label>${label}<input name="${name}" value="${escape(profile[name])}" type="${type}" required ${type === "number" ? 'min="1" max="65535"' : ""}></label>`;
+      $("#connection-fields").innerHTML = `<div class="form">${local ? input("Loopback listen address", "listen") + input("Private state directory", "state") : input("HTTP API URL", "url") + input("SSH host", "host") + input("SSH port", "port", "number") + input("SSH username", "user") + input("Private key path (not its contents)", "identity")}</div><p class="muted small">${local ? "Private state and existing credentials are preserved." : "Verify the host key and register a public key with the operator before a real connection."}</p>`;
+    }
+    function login(id) {
+      const a = accounts.find((item) => item.id === id);
+      state.loginAccount = id;
+      openDialog(a ? "Reauthorize account" : "Add account", a ? a.email + " · sign in to the same account" : "Standalone account sign-in · preview-lab@example.com", '<div class="notice">Simulated browser sign-in · no page will open and no code is generated.</div><p>Browser authorization → pending → account verified</p><p class="small muted">Complete this offline step to preview the success state. Cancel leaves the account unchanged. New accounts begin with Unknown quotas until observed.</p>', '<button data-command="close">Cancel Esc</button><button class="primary" data-command="complete-login">Simulate verified sign-in Enter</button>', "login");
+    }
+    function localAccount(id) {
+      const a = accounts.find((item) => item.id === id);
+      openDialog(a.email, "Standalone account actions · local simulation", `<div class="form"><button data-reauth="${id}">Reauthorize same account</button><button data-disable-account="${id}" ${!a.enabled || a.locked ? "disabled" : ""}>Disable account</button><p class="muted small">${a.locked ? "Operator lock retained; availability cannot be changed here." : "Disable prevents new work and retains OAuth state. Existing responses can finish."}</p></div>`, '<button data-command="close">Close Esc</button>', "local-account");
+    }
+    function rows() { return $$(`#${state.tab} [data-row]`); }
+    function selectRow(id, scroll = true) {
+      const list = rows().filter((row) => !row.matches(":disabled")); if (!list.length) return;
+      const target = list.find((r) => r.dataset.row === id) || list[0];
+      state.selected[state.tab] = target.dataset.row;
+      list.forEach((r) => { r.dataset.selected = String(r === target); });
+      if (scroll && target.scrollIntoView) target.scrollIntoView({ block: "nearest" });
+    }
+    function moveRow(delta) {
+      const list = rows().filter((row) => !row.matches(":disabled")); if (!list.length) return;
+      const index = list.findIndex((r) => r.dataset.row === state.selected[state.tab]);
+      selectRow(list[Math.max(0, Math.min(list.length - 1, index + delta))].dataset.row);
+    }
+    function activateRow() {
+      const row = rows().find((r) => r.dataset.row === state.selected[state.tab]);
+      if (row) (row.matches("button") ? row : row.querySelector("button"))?.click();
+    }
+    function controls() {
+      const actions = {
+        overview: [["Enter", "Account details", "activate"]],
+        usage: [["p", "Period", "period"], ["b", "Group", "group"], ["m", "Metric", "metric"], ["Enter", "Select series", "activate"]],
+        tokens: [["Enter", "Token actions", "activate"], ["n", "Create token", "create"], ...(state.clipboard ? [["c", "Retry copy", "retry-copy"]] : [])],
+        models: [["Enter", "Copy model ID", "activate"], ["f", "Search", "search"]],
+        settings: [["Enter", "Open action", "activate"], ["e", "Configure", "configure"], ["v", "Check updates", "check-update"]]
+      }[state.tab];
+      $("#commands").innerHTML = [...actions, ["r", "Refresh", "refresh"], ["?", "Help", "help"], ["q", "Quit", "quit"]].map(([key, label, command]) => `<button data-command="${command}"><kbd>${key}</kbd> ${label}</button>`).join("");
+    }
+    function selectTab(tab, focus = false) {
+      state.tab = tab;
+      tabs.forEach((name) => { $("#" + name).hidden = name !== tab; $("#tab-" + name).setAttribute("aria-selected", String(name === tab)); $("#tab-" + name).tabIndex = name === tab ? 0 : -1; });
+      $("#workspace").scrollTop = 0; say(""); controls(); selectRow(state.selected[tab], false);
+      if (focus) $("#tab-" + tab).focus();
+    }
+    function cycle(selector) {
+      const s = $(selector); s.selectedIndex = (s.selectedIndex + 1) % s.options.length; s.dispatchEvent(new Event("change"));
+    }
+    async function copyModel(id) {
+      selectRow(id, false);
+      try { if (!navigator.clipboard) throw new Error("unavailable"); await navigator.clipboard.writeText(id); say("Model ID copied · " + id); }
+      catch { say("Clipboard unavailable · select the visible model ID and copy manually."); }
+    }
+    function command(name) {
+      if (name === "close") return closeDialog();
+      if (name === "activate") return activateRow();
+      if (name === "create" && !state.clipboard) return tokenForm();
+      if (name === "create") return say("Copy pending · retry or discard before issuing another token.");
+      if (name === "configure") return configure();
+      if (name === "add-account") return login(null);
+      if (name === "complete-login") {
+        const a = accounts.find((item) => item.id === state.loginAccount);
+        if (a) a.enabled = true;
+        else if (!accounts.some((item) => item.id === "d")) accounts.push({ id: "d", email: "preview-lab@example.com", plan: "Plan Unknown", day: null, ordinal: null, budget: null, spent: null, short: null, weekly: null, hours: null, weeklyReset: null, nextBilling: "Unknown", resets: null, clients: 0, enabled: true, locked: false });
+        closeDialog(); renderSettings(); renderOverview(); say(a ? "Same-account reauthorization simulated · enabled." : "Synthetic account added · quotas Unknown; duplicate identity is never inserted twice."); return;
+      }
+      if (name === "check-update") { say("Demo release checked · 0.0.1-preview available · no network used."); return; }
+      if (name === "install-update") return confirm("Install client update?", "Preserve installation method, prefix, settings, keys and accounts. Reopen the dashboard afterward. This demo does not download or replace anything.", "Simulate install", () => { state.update = "installed"; renderSettings(); say("Update installation simulated · reopen dashboard in the real client."); });
+      if (name === "confirm") { const action = state.confirm; closeDialog(); state.confirm = null; action?.(); return; }
+      if (name === "save-fast") { const t = tokens.find((item) => item.id === state.token); t.fast = $("#fast-mode").value === "default" ? null : $("#fast-mode").value === "allow"; closeDialog(); renderTokens(); say("Fast mode saved locally · simulation."); return; }
+      if (name.startsWith("history-")) {
+        const h = historyStates.get(state.account);
+        h.interval = Math.max(0, h.interval + (name === "history-previous" ? 1 : -1)); renderHistory(); return;
+      }
+      if (name === "retry-copy") { state.clipboard = false; renderTokens(); controls(); say("Copy retry simulated successfully · same issuance; no secret or clipboard write."); return; }
+      if (name === "discard-copy") return confirm("Discard pending copy?", "In the real client an uncopied secret cannot be retrieved afterward. Rotate later to replace it.", "Discard", () => { state.clipboard = false; renderTokens(); controls(); say("Pending demo copy discarded."); });
+      if (name === "previous" || name === "next") { state.interval = Math.max(0, state.interval + (name === "previous" ? 1 : -1)); renderUsage(); return; }
+      if (name === "period") return cycle("#usage-period");
+      if (name === "group") return cycle("#usage-group");
+      if (name === "metric") { state.metric = ["tokens", "requests", "usd"][(["tokens", "requests", "usd"].indexOf(state.metric) + 1) % 3]; renderUsage(); return; }
+      if (name === "search") { $(state.tab === "tokens" ? "#token-search" : "#model-search").focus(); return; }
+      if (name === "refresh") { say("Demo snapshot refreshed · observation timestamps unchanged · no inference or network."); return; }
+      if (name === "help") return openDialog("Keyboard reference", "Terminal conventions · mouse is optional", `<dl class="fields">${field("← → / 1–5", "Switch tabs; input editing keeps its own keys")}${field("↑ ↓ / Enter", "Select an item / open details or action")}${field("PgUp / PgDn", "Scroll the active view")}${field("Esc", "Close dialog or leave a search field")}${field("Usage: p / b / m", "Cycle period / grouping / metric")}${field("Tokens: n / l / c", "Create / rename selected / retry pending copy")}${field("Models: f", "Focus model search; select multiple capability filters")}${field("Settings: e / v / U", "Connection / check update / install confirmation")}${field("r / ? or / / q", "Refresh / help / quit preview")}${field("Forms", "Tab to move, Enter to submit, Ctrl-U to clear")}</dl><p class="muted small">Charts expose sample sliders. EN/RU command keys work outside text fields. No inference, real sign-in or updates.</p>`, '<button data-command="close">Done Enter</button>', "help");
+      if (name === "quit") return openDialog("Preview paused", "No process or service was stopped", '<p>This is a standalone design artifact. Close the browser tab to leave, or resume the terminal.</p>', '<button data-command="close">Resume Enter</button>', "paused");
+    }
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest("button"); if (!button || button.disabled) return;
+      const d = button.dataset;
+      const row = button.closest("[data-row]"); if (row) selectRow(row.dataset.row, false);
+      if (d.command) command(d.command);
+      if (d.openAccount) openAccount(d.openAccount);
+      if (d.openToken) openToken(d.openToken);
+      if (d.tokenAction) tokenAction(d.tokenAction);
+      if (d.copyModel) void copyModel(d.copyModel);
+      if (d.metric) { state.metric = d.metric; renderUsage(); }
+      if (d.usageSeries) { $("#usage-series").value = $("#usage-series").value === d.usageSeries ? "" : d.usageSeries; renderUsage(); }
+      if (d.capability) { if (d.capability === "All") state.capabilities.clear(); else if (!state.capabilities.delete(d.capability)) state.capabilities.add(d.capability); renderModels(); }
+      if (d.localAccount) localAccount(d.localAccount);
+      if (d.historyPeriod) { const h = historyStates.get(state.account); h.period = d.historyPeriod; h.interval = 0; renderHistory(); }
+      if (d.reauth) login(d.reauth);
+      if (d.disableAccount) confirm("Disable account?", "New work will stop using this account. Existing responses can finish. OAuth state and lock metadata are retained; reauthorize to enable again.", "Disable", () => { accounts.find((a) => a.id === d.disableAccount).enabled = false; renderSettings(); renderOverview(); say("Account deactivation simulated."); });
+    });
+    document.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (event.target.id === "token-form") {
+        const name = $("#token-name").value.trim();
+        if (!name || new TextEncoder().encode(name).length > 80 || /[\u0000-\u001f\u007f]/.test(name)) { $("#form-error").textContent = "Use 1–80 bytes without control characters."; return; }
+        if (state.modal === "rename") tokens.find((t) => t.id === state.token).name = name;
+        else {
+          const days = Number($("#token-days").value);
+          if (!Number.isInteger(days) || days < 1 || days > 365) { $("#form-error").textContent = "Expiry must be 1–365 days."; return; }
+          if ($("#copy-scenario").value === "unavailable") { $("#form-error").textContent = "Clipboard helper unavailable. Token was not issued."; return; }
+          const expiry = new Date(2026, 10, 12, 14, 30); expiry.setDate(expiry.getDate() + days);
+          const expiresFull = expiry.toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+          tokens.push({ ...tokens[0], id: "tok_demo_new_" + tokens.length, name, fast: null, state: "Active", used: null, usedFull: null, created: "Nov 12", createdFull: "Nov 12, 2026, 2:30 PM", createdISO: "2026-11-12T14:30:00", expires: expiry.toLocaleString("en-US", { month: "short", day: "numeric" }), expiresFull, expiresISO: expiry.toISOString() });
+          state.clipboard = $("#copy-scenario").value === "failure";
+        }
+        closeDialog(); renderTokens(); controls(); say(state.clipboard ? "Metadata created · simulated copy failure; c retries without reissuing." : "Token metadata saved locally · no secret generated or copied.");
+      }
+      if (event.target.id === "connection-form") {
+        const values = new FormData(event.target); const local = $("#connection-mode").value === "standalone";
+        const valid = local ? /^(localhost|127\.0\.0\.1):\d+$/.test(values.get("listen")) : /^https?:\/\/[^\s]+\/v1$/.test(values.get("url")) && Number(values.get("port")) >= 1 && Number(values.get("port")) <= 65535;
+        if (!valid) { $("#form-error").textContent = "Use a loopback listen address or an HTTP(S) API URL ending in /v1 and a valid SSH port."; return; }
+        state.mode = $("#connection-mode").value; for (const [key, value] of values) profile[key] = value; closeDialog(); renderSettings(); say("Demo connection fields saved in memory only · no connection attempted.");
+      }
+    });
+    $("#dialog").addEventListener("close", () => { state.modal = null; if (state.returnFocus?.isConnected && !state.returnFocus.closest("[hidden]")) state.returnFocus.focus(); else $("#terminal").focus(); controls(); });
+    $("#dialog").addEventListener("cancel", (event) => { event.preventDefault(); closeDialog(); });
+    $("#dialog-body").addEventListener("input", (event) => {
+      if (event.target.id === "history-sample") {
+        if (!state.historyData) return;
+        historyStates.get(state.account).selected = state.historyData.from + Number(event.target.value) * 600000; updateHistoryCursor();
+      }
+    });
+    $("#dialog-body").addEventListener("pointermove", (event) => {
+      const svg = event.target.closest("#history-chart"); if (!svg || !state.historyData) return;
+      const rect = svg.getBoundingClientRect(); if (!rect.width) return;
+      const index = Math.max(0, Math.min(state.historyData.count - 1, Math.round(((event.clientX - rect.left) / rect.width * 680 - 38) / 600 * (state.historyData.count - 1))));
+      historyStates.get(state.account).selected = state.historyData.from + index * 600000; updateHistoryCursor();
+    });
+    $("#dialog-body").addEventListener("change", (event) => { if (event.target.id === "connection-mode") connectionFields(); });
+    $("#token-search").addEventListener("input", renderTokens); $("#model-search").addEventListener("input", renderModels);
+    $("#usage-period").addEventListener("change", () => { state.interval = 0; renderUsage(); });
+    $("#usage-group").addEventListener("change", () => renderUsage(true)); $("#usage-series").addEventListener("change", () => renderUsage());
+    $("#usage-content").addEventListener("input", (event) => { if (event.target.id === "usage-sample") { state.bucket = Number(event.target.value); updateUsageReadout(); } });
+    $("#usage-content").addEventListener("pointermove", (event) => {
+      const svg = event.target.closest("#usage-chart"); if (!svg) return;
+      const r = svg.getBoundingClientRect(); if (!r.width) return;
+      state.bucket = Math.max(0, Math.min(6, Math.round(((event.clientX - r.left) / r.width * 680 - 38) / 100))); $("#usage-sample").value = state.bucket; updateUsageReadout();
+    });
+    tabs.forEach((tab) => $("#tab-" + tab).addEventListener("click", () => selectTab(tab)));
+    $("#scenario").addEventListener("change", () => { renderOverview(); renderModels(); renderSettings(); if (state.modal === "account") openAccount(state.account); say("Synthetic scenario changed · no network."); });
+    $("#width-toggle").addEventListener("click", () => { const narrow = document.body.toggleAttribute("data-narrow"); $("#width-toggle").setAttribute("aria-pressed", String(narrow)); });
+    $("#theme-toggle").addEventListener("click", () => { const light = document.documentElement.dataset.theme !== "light"; document.documentElement.dataset.theme = light ? "light" : "dark"; $("#theme-toggle").textContent = light ? "Dark theme" : "Light theme"; $("#theme-toggle").setAttribute("aria-label", "Switch to " + (light ? "dark" : "light") + " theme"); });
+    document.addEventListener("keydown", (event) => {
+      if (event.isComposing || event.metaKey || event.altKey) return;
+      const editing = event.target.matches("input, select, textarea");
+      if (editing) {
+        if (event.ctrlKey && event.key.toLowerCase() === "u" && event.target.matches("input:not([type=range])")) { event.preventDefault(); event.target.value = ""; event.target.dispatchEvent(new Event("input", { bubbles: true })); }
+        if (event.key === "Escape") { event.preventDefault(); if (state.modal) closeDialog(); else $("#terminal").focus(); }
+        return;
+      }
+      if (event.ctrlKey) return;
+      let key = event.key;
+      const russian = "йцукенгшщзхъфывапролджэячсмитьбюё", english = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
+      const ri = russian.indexOf(key.toLowerCase()); if (ri >= 0) key = key === key.toUpperCase() ? english[ri].toUpperCase() : english[ri];
+      if (state.modal) {
+        if (event.target.id === "history-chart" && ["ArrowLeft", "ArrowRight", "Home", "End", "Escape"].includes(key)) {
+          event.preventDefault(); const h = historyStates.get(state.account), data = state.historyData;
+          if (!data) return;
+          if (key === "Escape" && h.selected === null) { closeDialog(); return; }
+          const i = h.selected === null ? data.count - 1 : (h.selected - data.from) / 600000;
+          h.selected = key === "Escape" ? null : data.from + (key === "Home" ? 0 : key === "End" ? data.count - 1 : Math.max(0, Math.min(data.count - 1, i + (key === "ArrowLeft" ? -1 : 1)))) * 600000;
+          updateHistoryCursor(); return;
+        }
+        if (state.modal === "account" && ["h", "[", "]"].includes(key)) {
+          event.preventDefault(); const h = historyStates.get(state.account);
+          if (key === "h") { h.period = rangeOptions[(rangeOptions.findIndex(([value]) => value === h.period) + 1) % 4][0]; h.interval = 0; renderHistory(); }
+          else command(key === "[" ? "history-previous" : "history-next");
+          return;
+        }
+        if (key === "Escape") { event.preventDefault(); closeDialog(); }
+        else if (state.modal === "confirm" && key === "y") { event.preventDefault(); command("confirm"); }
+        else if (state.modal === "token" && key === "l") { event.preventDefault(); tokenForm(true); }
+        else if (["ArrowUp", "ArrowDown"].includes(key) && ["token", "local-account"].includes(state.modal)) {
+          event.preventDefault(); const buttons = $$('#dialog-body .setting-action:not(:disabled), #dialog-body [data-reauth], #dialog-body [data-disable-account]:not(:disabled)');
+          const index = buttons.indexOf(document.activeElement), next = buttons[Math.max(0, Math.min(buttons.length - 1, index + (key === "ArrowDown" ? 1 : -1)))]; next?.focus();
+        }
+        else if (["ArrowUp", "ArrowDown", "PageUp", "PageDown"].includes(key)) { event.preventDefault(); $("#dialog-body").scrollTop += key.includes("Up") ? -100 : 100; }
+        else if (key === "Enter" && !event.target.matches("button") && ["account", "help", "paused"].includes(state.modal)) { event.preventDefault(); closeDialog(); }
+        return;
+      }
+      if (!$("#terminal").contains(event.target)) return;
+      if (key === "ArrowLeft" || key === "ArrowRight") { event.preventDefault(); selectTab(tabs[(tabs.indexOf(state.tab) + (key === "ArrowRight" ? 1 : 4)) % 5], true); }
+      else if (/^[1-5]$/.test(key)) { event.preventDefault(); selectTab(tabs[Number(key) - 1], true); }
+      else if (key === "ArrowUp" || key === "ArrowDown") { event.preventDefault(); $("#terminal").focus(); moveRow(key === "ArrowUp" ? -1 : 1); }
+      else if (key === "PageUp" || key === "PageDown") { event.preventDefault(); $("#workspace").scrollTop += (key === "PageUp" ? -1 : 1) * 250; }
+      else if (key === "Enter" && !event.target.matches("button")) { event.preventDefault(); activateRow(); }
+      else if (key === "Enter" && event.target.matches('[role="tab"]')) { event.preventDefault(); activateRow(); }
+      else {
+        const map = { r: "refresh", "?": "help", "/": "help", ".": "help", ",": "help", q: "quit" };
+        if (state.tab === "usage") Object.assign(map, { p: "period", b: "group", m: "metric" });
+        if (state.tab === "tokens") Object.assign(map, { n: "create", c: "retry-copy" });
+        if (state.tab === "models") map.f = "search";
+        if (state.tab === "settings") Object.assign(map, { e: "configure", v: "check-update", U: "install-update", ...(state.mode === "standalone" ? { a: "add-account" } : {}) });
+        if (state.tab === "tokens" && key === "l" && state.selected.tokens) { event.preventDefault(); state.token = state.selected.tokens; tokenForm(true); }
+        else if (map[key]) { event.preventDefault(); command(map[key]); }
+      }
+    });
+    renderOverview(); renderTokens(); renderModels(); renderUsage(); renderSettings(); selectTab("overview");
+    // Review-only deep links; no location data is sent or persisted.
+    const initial = new URLSearchParams(location.hash.slice(1));
+    if (initial.get("theme") === "light") $("#theme-toggle").click();
+    if (initial.get("narrow") === "1") $("#width-toggle").click();
+    if (["ready", "fallback", "stale", "missing", "urgent"].includes(initial.get("scenario"))) { $("#scenario").value = initial.get("scenario"); $("#scenario").dispatchEvent(new Event("change")); }
+    if (tabs.includes(initial.get("screen"))) selectTab(initial.get("screen"));
+    if (initial.get("screen") === "account") openAccount(["a", "b", "c"].includes(initial.get("account")) ? initial.get("account") : "a");
+  </script>
+</body>
+</html>

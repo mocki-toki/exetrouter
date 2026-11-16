@@ -20,6 +20,10 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/014_quota_history.sql"),
     include_str!("migrations/015_fast_mode.sql"),
     include_str!("migrations/016_ten_minute_quota_history.sql"),
+    include_str!("migrations/017_subscription_metadata.sql"),
+    include_str!("migrations/018_platform_observations.sql"),
+    include_str!("migrations/019_platform_routes.sql"),
+    include_str!("migrations/020_platform_manual_balance.sql"),
 ];
 pub const SCHEMA_VERSION: usize = MIGRATIONS.len();
 const QUEUE_CAPACITY: usize = 32;
@@ -40,6 +44,7 @@ pub fn init(conn: &Connection) -> Result<()> {
     tx.execute("UPDATE quota_activation_attempts SET status='unknown' WHERE status='pending' AND attempted_at<=?1", [chrono::Utc::now().timestamp()-60])?;
     tx.execute("UPDATE automatic_reset_attempts SET status='unknown' WHERE status='submitted' AND attempted_at<=?1", [chrono::Utc::now().timestamp()-120])?;
     crate::quota_history::prune(&tx, chrono::Utc::now().timestamp())?;
+    crate::platform::prune(&tx, chrono::Utc::now().timestamp())?;
     tx.commit()?;
     Ok(())
 }
