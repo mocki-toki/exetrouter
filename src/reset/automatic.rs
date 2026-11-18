@@ -167,7 +167,10 @@ impl Upstream {
             self.resets.lock().await.pending.remove(&id);
             return Ok(());
         }
-        let Some(attempt) = self.reset_attempt(&current, now).await? else {
+        let Some(attempt) = self
+            .reset_attempt(&current, now, eligible(&current, now))
+            .await?
+        else {
             self.resets.lock().await.pending.remove(&id);
             return Ok(());
         };
@@ -196,8 +199,9 @@ impl Upstream {
         // Re-read AFTER the randomized delay, not from the round that scheduled it.
         let fresh = self.live_limits(id).await?;
         let now = Utc::now().timestamp();
+        let credit = eligible(&fresh, now);
         let Some(attempt) = self
-            .reset_attempt(&fresh, now)
+            .reset_attempt(&fresh, now, credit)
             .await?
             .filter(|a| a.credit == hash && a.cycle == cycle)
         else {
@@ -206,22 +210,43 @@ impl Upstream {
         if fresh.account.info.generation != generation {
             return Ok(());
         }
-        let order = fresh.order;
-        if !self
-            .db
-            .call(move |conn| ledger::claim(conn, id, generation, order, now, attempt))
-            .await?
-        {
+        if !self.claim_reset(&fresh, now, attempt).await? {
             return Ok(());
         }
-        let outcome = self
-            .consume_automatic(
-                &fresh.account,
-                &eligible(&fresh, now).expect("verified eligibility").id,
-                &cycle,
-            )
-            .await;
-        let status = outcome.unwrap_or("unknown");
+        let status = self
+            .submit_reset(&fresh.account, credit.expect("verified eligibility"), cycle)
+            .await?;
+        tracing::info!(event = "automatic_reset_finished", account = id, status);
+        // A successful POST is not proof of observed quota recovery. Persist
+        // recovery/inventory evidence before allowing any subsequent credit.
+        if let Ok(current) = self.live_limits(id).await {
+            self.observe_reset(&current, Utc::now().timestamp()).await?;
+        }
+        Ok(())
+    }
+    pub(super) async fn claim_reset(
+        &self,
+        current: &Live,
+        now: i64,
+        attempt: ledger::Attempt,
+    ) -> Result<bool> {
+        let id = current.account.info.id;
+        let generation = current.account.info.generation;
+        let order = current.order;
+        self.db
+            .call(move |conn| ledger::claim(conn, id, generation, order, now, attempt))
+            .await
+    }
+    pub(super) async fn submit_reset(
+        &self,
+        account: &Account,
+        credit: &Credit,
+        cycle: [u8; 32],
+    ) -> Result<&'static str> {
+        let status = self
+            .consume_reset(account, &credit.id, &cycle)
+            .await
+            .unwrap_or("unknown");
         self.db
             .call(move |conn| {
                 conn.execute(
@@ -231,15 +256,13 @@ impl Upstream {
                 Ok(())
             })
             .await?;
-        tracing::info!(event = "automatic_reset_finished", account = id, status);
-        // A successful POST is not proof of observed quota recovery. Persist
-        // recovery/inventory evidence before allowing any subsequent credit.
-        if let Ok(current) = self.live_limits(id).await {
-            let _ = self.reset_attempt(&current, Utc::now().timestamp()).await?;
-        }
-        Ok(())
+        Ok(status)
     }
-    async fn reset_attempt(&self, current: &Live, now: i64) -> Result<Option<ledger::Attempt>> {
+    pub(super) async fn observe_reset(
+        &self,
+        current: &Live,
+        now: i64,
+    ) -> Result<Option<(ledger::Gate, i64)>> {
         let Some(observation) = ledger::Observation::live(current, now) else {
             return Ok(None);
         };
@@ -250,13 +273,24 @@ impl Upstream {
             .db
             .call(move |conn| ledger::observe(conn, id, order, observation, now))
             .await?;
+        Ok(Some((gate, salvage_until)))
+    }
+    pub(super) async fn reset_attempt(
+        &self,
+        current: &Live,
+        now: i64,
+        credit: Option<&Credit>,
+    ) -> Result<Option<ledger::Attempt>> {
+        let Some((gate, salvage_until)) = self.observe_reset(current, now).await? else {
+            return Ok(None);
+        };
         if gate.waiting
             || (gate.salvage_until > now
                 && !weekly(&current.quota).is_some_and(|w| w.remaining_percent <= 1.0))
         {
             return Ok(None);
         }
-        let Some(credit) = eligible(current, now) else {
+        let Some(credit) = credit else {
             return Ok(None);
         };
         let Some(cycle) = ledger::cycle(current, now) else {
@@ -272,27 +306,33 @@ impl Upstream {
             .call(move |conn| Ok(ledger::available(conn, &attempt, now)?.then_some(attempt)))
             .await
     }
-    async fn consume_automatic(
+    async fn consume_reset(
         &self,
         account: &Account,
         credit: &str,
         hash: &[u8; 32],
     ) -> Result<&'static str> {
-        let response = self
-            .client
+        // Redemption is not a read. Never follow redirects or even transport
+        // retries here; the upstream key protects independent operators, not replay.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .user_agent(concat!("exetrouter/", env!("CARGO_PKG_VERSION")))
+            .build()?;
+        let response = client
             .post(self.limits_url("rate-limit-reset-credits/consume"))
             .headers(account_headers(account)?)
             .timeout(Duration::from_secs(10))
             .json(&json!({"redeem_request_id":request_id(hash),"credit_id":credit}))
             .send()
             .await
-            .map_err(|_| "Automatic reset outcome unknown")?;
+            .map_err(|_| "Reset outcome unknown")?;
         if !response.status().is_success() {
             return Ok(
-                if response.status().is_server_error() || response.status().as_u16() == 408 {
-                    "unknown"
-                } else {
+                if response.status().is_client_error() && response.status().as_u16() != 408 {
                     "rejected"
+                } else {
+                    "unknown"
                 },
             );
         }
@@ -476,6 +516,171 @@ mod tests {
             self.schedule().await;
         }
     }
+    #[tokio::test]
+    async fn manual_reset_selects_one_strategic_credit_and_verifies_recovery() {
+        let f = Fixture::new().await;
+        let now = Utc::now().timestamp();
+        f.mock.usage.lock().unwrap()["rate_limit"]["secondary_window"]["used_percent"] = json!(95);
+        f.mock.details.lock().unwrap()["credits"][1]["expires_at"] = json!(expiry(now + 10 * DAY));
+        f.consume().await;
+        let preview = f.upstream.preview_manual_reset("1").await.unwrap();
+        assert!(f.mock.bodies.lock().unwrap().is_empty());
+        let current = f.upstream.live_limits(1).await.unwrap();
+        let cycle = ledger::cycle(&current, now).unwrap();
+        let result = f.upstream.confirm_manual_reset(preview).await.unwrap();
+        assert_eq!(result.status, "reset");
+        assert!(result.verified);
+        assert_eq!(
+            *f.mock.bodies.lock().unwrap(),
+            vec![json!({"redeem_request_id":request_id(&cycle),"credit_id":"synthetic-earlier"})],
+        );
+        assert!(f.mock.activation_bodies.lock().unwrap().is_empty());
+        let (status, recovered): (String, bool) = f
+            .upstream
+            .db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT status,recovered_at IS NOT NULL FROM automatic_reset_attempts",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!((status.as_str(), recovered), ("reset", true));
+    }
+
+    #[tokio::test]
+    async fn manual_confirmation_rejects_expiry_cycle_inventory_and_health_changes() {
+        let f = Fixture::new().await;
+        let mut preview = f.upstream.preview_manual_reset("1").await.unwrap();
+        preview.deadline = std::time::Instant::now();
+        assert!(f.upstream.confirm_manual_reset(preview).await.is_err());
+
+        let preview = f.upstream.preview_manual_reset("1").await.unwrap();
+        f.mock.usage.lock().unwrap()["rate_limit"]["secondary_window"]["reset_at"] =
+            json!(Utc::now().timestamp() + 4 * DAY);
+        assert!(f.upstream.confirm_manual_reset(preview).await.is_err());
+
+        let preview = f.upstream.preview_manual_reset("1").await.unwrap();
+        // Even a changed non-selected credit invalidates this confirmation.
+        f.mock.details.lock().unwrap()["credits"][0]["id"] = json!("synthetic-new");
+        assert!(f.upstream.confirm_manual_reset(preview).await.is_err());
+
+        let preview = f.upstream.preview_manual_reset("1").await;
+        // A disappeared, still-valid credit fences the account until recovery.
+        assert!(preview.is_err());
+        assert!(f.mock.bodies.lock().unwrap().is_empty());
+
+        let f = Fixture::new().await;
+        let preview = f.upstream.preview_manual_reset("1").await.unwrap();
+        f.upstream
+            .db
+            .call(|conn| {
+                crate::account_preferences::set_policy(conn, 1, Some(false), None, None)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(f.upstream.confirm_manual_reset(preview).await.is_err());
+        assert!(f.upstream.preview_manual_reset("1").await.is_err());
+        assert!(f.mock.bodies.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn manual_reset_uses_exact_email_and_weekly_quota_and_requires_complete_inventory() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let f = Fixture::new().await;
+        let email = "owner@example.test";
+        let jwt = format!(
+            "e30.{}.synthetic",
+            URL_SAFE_NO_PAD.encode(json!({"email":email}).to_string())
+        );
+        f.upstream
+            .db
+            .call(move |conn| {
+                let vault = oauth::Vault::new([2; 32]);
+                oauth::save(
+                    conn,
+                    &vault,
+                    "synthetic-account",
+                    &oauth::Credentials {
+                        access_token: jwt.clone(),
+                        refresh_token: "synthetic-refresh".into(),
+                    },
+                    Utc::now().timestamp() + 3600,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(f.upstream.preview_manual_reset(email).await.is_ok());
+        assert!(f.upstream.preview_manual_reset("owner").await.is_err());
+        f.mock.usage.lock().unwrap()["rate_limit"]["primary_window"]["used_percent"] = json!(100);
+        f.mock.usage.lock().unwrap()["rate_limit"]["secondary_window"]["used_percent"] =
+            json!(94.99);
+        assert!(f.upstream.preview_manual_reset(email).await.is_err());
+        f.mock.usage.lock().unwrap()["rate_limit"]["secondary_window"]["used_percent"] = json!(95);
+        f.mock.details.lock().unwrap()["available_count"] = json!(3);
+        assert!(f.upstream.preview_manual_reset(email).await.is_err());
+        let vault = f.upstream.vault.clone();
+        f.upstream
+            .db
+            .call(move |conn| {
+                let account = oauth::load(conn, &vault, 1)?;
+                oauth::save(
+                    conn,
+                    &vault,
+                    "synthetic-other",
+                    &account.credentials,
+                    Utc::now().timestamp() + 3600,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            f.upstream
+                .preview_manual_reset(email)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "More than one OAuth account has that email; use a local account ID"
+        );
+        assert!(f.mock.bodies.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn manual_and_automatic_resets_share_the_claim_and_unknown_outcome_fence() {
+        let f = Fixture::new().await;
+        f.mock.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let first = f.upstream.preview_manual_reset("1").await.unwrap();
+        let second = f.upstream.preview_manual_reset("1").await.unwrap();
+        f.schedule().await;
+        Fixture::due(&f.upstream).await;
+        let result = f.upstream.confirm_manual_reset(first).await.unwrap();
+        assert_eq!(result.status, "unknown");
+        assert!(!result.verified);
+        assert!(f.upstream.confirm_manual_reset(second).await.is_err());
+        f.schedule().await;
+        assert_eq!(f.mock.bodies.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn claimed_success_does_not_prove_manual_recovery_or_open_the_next_credit() {
+        let f = Fixture::new().await;
+        f.mock
+            .defer_recovery
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let preview = f.upstream.preview_manual_reset("1").await.unwrap();
+        let result = f.upstream.confirm_manual_reset(preview).await.unwrap();
+        assert_eq!(result.status, "reset");
+        assert!(!result.verified);
+        assert!(f.upstream.preview_manual_reset("1").await.is_err());
+        assert_eq!(f.mock.bodies.lock().unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn exact_thresholds_preserve_strategic_resets_and_only_spend_expiring_ones() {
         let f = Fixture::new().await;

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add interactive local reset-credit redemption through `exrd admin oauth reset` and standalone `exr account reset`. Require fresh weekly depletion and explicit confirmation, share automatic recovery fences, and leave automatic policy and remote management unchanged.
+
 ## 0.11.0
 
 - Update Codex catalog discovery to client version 0.169.0 so account-visible GPT-6.2 Sol and Astra models are discovered without hardcoded model IDs. Existing catalogs expire within 15 minutes; this is not a renewed native-client inference compatibility claim.

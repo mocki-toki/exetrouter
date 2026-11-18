@@ -46,6 +46,7 @@ Without saved config, local development defaults to files in the working directo
 | `admin oauth add --device` | Browser sign-in; save encrypted upstream credentials |
 | `admin oauth reauth ID --device` | Reauthorize the same upstream account |
 | `admin oauth list` | Show account email and state without tokens (`email` is null when unavailable in the saved credentials) |
+| `admin oauth reset ACCOUNT` | Inspect and confirm one reset credit by local account ID or exact email (interactive only) |
 | `admin oauth policy ID --enabled false` | Reversibly deactivate routing for all users |
 | `admin oauth policy ID --enabled true` | Activate routing (OAuth must remain healthy) |
 | `admin oauth policy ID --locked true` | Preserve the operator lock marker for older clients and rollback; personal availability changes are no longer supported |
@@ -61,7 +62,9 @@ Reports use readable text by default and `--json` for scripts. Secrets and OAuth
 
 `serve --gateway-uid` is required unless saved in config. Service/gateway UIDs must differ; same-UID mode is only for local tests. Wildcard listening is rejected unless `--allow-container-listen` is explicitly selected for an isolated container with loopback-published ingress. Never expose it directly to the Internet.
 
-Account policy controls availability and activation locks only. Priorities, switching thresholds and expiring-reset redemption are automatic; old manual routing/redemption mutations fail explicitly. Read [automatic selection](account-pool.md#ranking-and-switching) and the explicit [schema 11 to 12 migration](automatic-routing-migration.md) before deployment. Historical routing overrides remain stored only for rollback.
+Account policy controls availability and activation locks only. Priorities, switching thresholds and routine expiring-reset redemption are automatic; old manual routing/redemption mutations through management still fail explicitly. Read [automatic selection](account-pool.md#ranking-and-switching) and the explicit [schema 11 to 12 migration](automatic-routing-migration.md) before deployment. Historical routing overrides remain stored only for rollback.
+
+For an [interactive local reset](cli.md#interactive-local-reset), run `sudo -u exetrouter exrd admin oauth reset ACCOUNT` with access to the configured state in a native deployment, or `sudo docker compose exec exrd exrd admin oauth reset ACCOUNT` from the deployment directory. Do not pass `-T` to Compose: confirmation requires terminal stdin and stdout. The optional Docker host launcher supports `exrd admin oauth reset ACCOUNT` from an interactive terminal. This action is not available through the restricted SSH gateway.
 
 The separate [routing resources policy](platform-api.md#select-routing-resources)
 applies server-wide and leaves account availability and credentials intact. With

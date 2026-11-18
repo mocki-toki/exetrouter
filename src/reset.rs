@@ -1,6 +1,7 @@
-//! Bounded live subscription metadata and automatic, idempotent reset redemption.
+//! Bounded live subscription metadata and idempotent reset redemption.
 mod automatic;
 mod ledger;
+mod manual;
 use crate::{
     doctor::ServerReport,
     oauth::{self, Account},
@@ -9,6 +10,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::{stream, StreamExt};
+pub use manual::{command, require_terminal};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, time::Duration};
@@ -37,6 +39,7 @@ struct Live {
     order: i64,
     quota: crate::quota::Summary,
     credits: Option<Credits>,
+    inventory: Option<Vec<[u8; 32]>>,
     allowed: Option<bool>,
 }
 
@@ -180,6 +183,29 @@ impl Upstream {
             .limits_get(&account, "rate-limit-reset-credits", 3)
             .await
             .ok();
+        let inventory = details.as_ref().and_then(|value| {
+            let count = value["available_count"].as_i64()?;
+            let mut inventory: Vec<_> = value["credits"]
+                .as_array()?
+                .iter()
+                .filter(|c| c["status"] == "available")
+                .map(|c| {
+                    if c["reset_type"] == "codex_rate_limits" && !c["expires_at"].is_null() {
+                        DateTime::parse_from_rfc3339(c["expires_at"].as_str()?).ok()?;
+                    }
+                    c["id"]
+                        .as_str()
+                        .filter(|s| !s.is_empty() && s.len() <= 512)
+                        .map(automatic::digest)
+                })
+                .collect::<Option<_>>()?;
+            if usize::try_from(count).ok()? != inventory.len() {
+                return None;
+            }
+            inventory.sort_unstable();
+            inventory.dedup();
+            (usize::try_from(count).ok()? == inventory.len()).then_some(inventory)
+        });
         let credits = parse_credits(&usage, details.as_ref(), now);
         // An explicit, well-formed live weekly-only payload proves absence of a short window.
         let valid_week = quota
@@ -211,6 +237,7 @@ impl Upstream {
             order,
             quota,
             credits,
+            inventory,
             allowed: usage["rate_limit"]["allowed"].as_bool(),
         })
     }
