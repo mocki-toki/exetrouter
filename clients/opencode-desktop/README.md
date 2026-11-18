@@ -63,8 +63,8 @@ For a checkout with no local changes, update to the reviewed release and rebuild
 
 ```sh
 cd /absolute/path/to/exetrouter
-git fetch origin tag v0.10.0
-git switch --detach v0.10.0
+git fetch origin tag v0.11.0
+git switch --detach v0.11.0
 cd clients/opencode-desktop
 npm ci --ignore-scripts --no-audit --no-fund
 npm run typecheck
@@ -76,7 +76,8 @@ Use the installation method's update command for Homebrew or Nix clients instead
 of `exr update`. If the checkout has local changes, preserve it and use a separate
 clone at the release tag, then change only this plugin's `package` path in global
 OpenCode configuration. Keep existing connection options and credentials. The
-plugin 0.5.0 and native `exr` 0.10.0 include Platform metadata and the 0.9.2 history
+plugin 0.6.0 and native `exr` 0.11.0 include history-based quota forecasts,
+Platform metadata and the 0.9.2 history
 compatibility fixes. Update **both**: a 0.9.2 native client can still show Codex
 accounts but drops newer Platform/billing fields, so rebuilding only the GUI
 cannot show their balances. The GUI reloads when its local bundle is rebuilt;

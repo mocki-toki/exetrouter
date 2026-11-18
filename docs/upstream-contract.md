@@ -16,7 +16,7 @@ Reviewed client revisions live in [protocol-sources.json](protocol-sources.json)
 | Operation | Upstream behavior |
 | --- | --- |
 | OAuth | `https://auth.openai.com`, public client ID `app_EMoamEEZ73f0CkXaXp7hrann`; device usercode/token flow, PKCE `/oauth/token` exchange and refresh-token grant. Credentials use a separate AEAD key. |
-| Catalog | `/models?client_version=0.159.3`, selected bearer and `chatgpt-account-id`; 15-minute cache and allowlisted metadata. |
+| Catalog | `/models?client_version=0.169.0`, selected bearer and `chatgpt-account-id`; 15-minute cache and allowlisted metadata. |
 | Responses | `/responses` over HTTP SSE or native WS. `store` defaults false; explicit options pass through for backend validation. |
 | Native WS | `OpenAI-Beta: responses_websockets=2026-02-06`; sequential `response.create`, including `generate=false` warmup; service ping/pong, bound pre-response peer silence to 90 seconds and retire recoverable idle sockets after 30 seconds/five minutes of age before a new submission on the same account. |
 | Compaction | One Responses SSE request ending with `compaction_trigger`; project exactly one opaque checkpoint as `response.compaction`. No separate upstream `/responses/compact`. |
@@ -26,6 +26,14 @@ Reviewed client revisions live in [protocol-sources.json](protocol-sources.json)
 | Standalone search | Unary JSON `/alpha/search`, user-scoped session ID and durable account pinning; no migration of backend references. |
 
 Redirects are disabled. Mock upstream requires explicitly enabled literal loopback HTTP. Server-owned headers never forward the client bearer, arbitrary account selection or an arbitrary upstream URL.
+
+The November 18 catalog-only review inspected Codex 0.169.0's
+[`ModelsClient`](https://github.com/openai/codex/blob/d32063f96c2dff1dc96af839b3952abb6acfeda4/codex-rs/codex-api/src/endpoint/models.rs):
+discovery still uses GET `models` with the `client_version` query parameter and
+decodes a `models` array. Fresh requests on the same OAuth account with identical
+headers returned `gpt-6.2-sol` and `gpt-6.2-astra` for 0.169.0 but omitted both
+for 0.159.3. This updates catalog discovery only, not the verified native-client
+inference matrix. Existing cached catalogs expire normally within 15 minutes.
 
 Fast (`service_tier: "priority"`) is stripped from transient inference payloads unless permitted by the global/token policy, before transport selection or upstream submission. It is not a quota-reset or account-routing control. See [Fast-mode policy](server-cli.md).
 

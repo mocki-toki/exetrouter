@@ -1190,6 +1190,8 @@ fn account_ranges(value: &Value, width: u16) -> Vec<(u16, u16)> {
                     chrono::Utc::now().timestamp(),
                 )) + u16::from(account["refresh_error"].is_string())
                     + u16::from(render::weekly_activation(account).is_some())
+                    + super::quota_forecast::notes(account, chrono::Utc::now().timestamp()).len()
+                        as u16
                     + if account["platform"].is_object() {
                         3
                     } else {
@@ -2037,7 +2039,16 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
         ]
         .into_iter()
         .flatten()
-        {
+        .chain(
+            super::quota_forecast::notes(&account, chrono::Utc::now().timestamp())
+                .into_iter()
+                .map(|(text, warning)| {
+                    Line::styled(
+                        text,
+                        Style::default().fg(if warning { Color::Yellow } else { Color::Gray }),
+                    )
+                }),
+        ) {
             if y >= inner.y as i32 && y < end {
                 frame.render_widget(
                     Paragraph::new(line),
@@ -2074,9 +2085,8 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
                     || window["observed_at"]
                         .as_i64()
                         .is_some_and(|at| at > now || now - at >= 60);
-                let forecast = account["id"]
-                    .as_i64()
-                    .and_then(|id| state.forecasts.label(id, window, now));
+                let forecast =
+                    super::quota_forecast::label(&account, window, now, &state.forecasts);
                 if y >= inner.y as i32 && y < end {
                     let label = format!(
                         "{}  ·  {}{}{}",
@@ -4946,6 +4956,74 @@ mod tests {
         assert!(text.contains("Resets"));
         assert!(!text.contains("remaining"));
         assert!(!text.contains("Updated"));
+    }
+    #[test]
+    fn overview_uses_shared_forecasts_immediately_and_hides_failed_refresh_estimates() {
+        let now = chrono::Utc::now().timestamp();
+        let value = serde_json::json!({"quota_accounts":[{"id":1,"label":"account@example.com","quota":{"windows":[{"kind":"primary","used_percent":50,"remaining_percent":50,"window_minutes":480,"reset_at":now+28800,"observed_at":now,"status":"current"}]},"quota_forecast":[{"kind":"primary","window_minutes":480,"reset_at":now+28800,"observed_at":now,"used_percent":50,"current":{"percent_per_hour":25,"limit_at":now+7200},"usual":{"percent_per_hour":12.5,"limit_at":now+14400},"warning":{"rate_ratio":2,"limit_before_reset":true},"recent_seconds":1800,"historical_intervals":24,"historical_cycles":3}]}]});
+        let mut state = State::default();
+        state.values[OVERVIEW] = Some(value.clone());
+        let mut terminal = Terminal::new(TestBackend::new(150, 35)).unwrap();
+        terminal
+            .draw(|f| render(f, &state, &Connection::default(), false))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("~2h 0m to limit"));
+        assert!(text.contains("Historical pace: ~4h 0m to limit"));
+        assert!(text.contains("Usage above usual · ~2.0x normal"));
+        let cli = super::super::render::limits(&value);
+        assert!(cli.contains("Historical pace:"));
+        assert!(cli.contains("may run out before reset"));
+        let mut failed = value.clone();
+        failed["quota_accounts"][0]["refresh_error"] = "Live metadata unavailable".into();
+        let success_height = account_ranges(&value, 150)[0].1;
+        assert_eq!(success_height - account_ranges(&failed, 150)[0].1, 1);
+        state.values[OVERVIEW] = Some(failed);
+        terminal
+            .draw(|f| render(f, &state, &Connection::default(), false))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(!text.contains("Historical pace:"));
+        assert!(!text.contains("Usage above usual"));
+        assert!(!text.contains("to limit"));
+    }
+
+    #[test]
+    fn overview_describes_moving_reset_and_idle_estimates_instead_of_inventing_an_eta() {
+        let now = chrono::Utc::now().timestamp();
+        let mut value = serde_json::json!({"quota_accounts":[{"id":1,"label":"account@example.com","quota":{"windows":[{"kind":"primary","used_percent":0,"remaining_percent":100,"window_minutes":300,"reset_at":now+18000,"observed_at":now,"status":"current"}]},"quota_forecast":[{"kind":"primary","window_minutes":300,"reset_at":now+18000,"observed_at":now,"used_percent":0,"current":null,"usual":null,"warning":null,"current_status":"reset_time_moving","recent_seconds":0,"historical_intervals":0,"historical_cycles":0}]}]});
+        let mut state = State::default();
+        state.values[OVERVIEW] = Some(value.clone());
+        let mut terminal = Terminal::new(TestBackend::new(150, 35)).unwrap();
+        terminal
+            .draw(|f| render(f, &state, &Connection::default(), false))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("Reset time moving; no pace yet"));
+        assert!(!text.contains("to limit"));
+        value["quota_accounts"][0]["quota_forecast"][0]["current_status"] =
+            "quota_unchanged".into();
+        let cli = super::super::render::limits(&value);
+        assert!(cli.contains("Pace unavailable: quota unchanged"));
+        assert!(!cli.contains("to limit"));
     }
     #[test]
     fn usage_uses_the_same_rolling_ranges_as_desktop() {

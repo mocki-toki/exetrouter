@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.0
+
+- Update Codex catalog discovery to client version 0.169.0 so account-visible GPT-6.2 Sol and Astra models are discovered without hardcoded model IDs. Existing catalogs expire within 15 minutes; this is not a renewed native-client inference compatibility claim.
+- Add shared read-only, history-based quota depletion estimates to CLI, TUI and Desktop, comparing current and usual consumption and warning on sustained acceleration. Retain unknown and stale observations; these estimates do not change routing, polling or reset-credit rules.
+- Include conditional weekly estimates with repeated short-window exhaustion pauses when fresh, aligned observations support both rates. Label unadjusted fallbacks and expire current pace when quota stops increasing without extending predictions on unchanged observations.
+- Add private passive quota-history export and causal offline replay of the Rust forecast implementation, with chronological validation and explicit sparse-history and calibration limitations.
+- Publish matching OpenCode Desktop plugin 0.6.0, preserving Platform metadata, ten-minute and legacy history compatibility, bounded history replies and reload-safe charts from 0.10.0. No database schema change: schema 20 installations use the same-schema update path.
+
 ## 0.10.0
 
 - Prepare native 0.10.0 and OpenCode Desktop plugin 0.5.0 together. Older native clients omit Platform metadata even when the GUI is new. Retain the 0.9.2 history compatibility fixes and both public and pre-release normalized IPC interval shapes.

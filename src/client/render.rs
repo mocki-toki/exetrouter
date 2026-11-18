@@ -467,6 +467,20 @@ pub(super) fn limits(v: &Value) -> String {
                 date(&w["reset_at"]),
                 date(&w["observed_at"])
             ));
+            let now = chrono::Utc::now().timestamp();
+            if let Some(f) = super::quota_forecast::historical(account, w, now) {
+                for label in [
+                    f.current_label(now)
+                        .or_else(|| f.status_label(now).map(str::to_owned)),
+                    f.usual_label(now),
+                    f.warning_label(now),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    text.push_str(&format!("           {label}\n"));
+                }
+            }
         }
         if let Some(until) = q["cooldown_until"].as_i64() {
             text.push_str(&format!(
@@ -561,6 +575,25 @@ fn routing_current(account: &Value, now: i64) -> bool {
 pub(super) fn account_details(account: &Value, now: i64) -> String {
     let label = &account["label"];
     let mut text = format!("{}\n\n", safe(label.as_str().unwrap_or("Account")));
+    for window in account["quota"]["windows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(2)
+    {
+        if let Some(f) = super::quota_forecast::historical(account, window, now) {
+            if let Some(label) = f
+                .current_label(now)
+                .or_else(|| f.status_label(now).map(str::to_owned))
+            {
+                text.push_str(&format!("{} · {label}\n", window_label(window)));
+            }
+        }
+    }
+    for (line, _) in super::quota_forecast::notes(account, now) {
+        text.push_str(&line);
+        text.push('\n');
+    }
     if account["platform"].is_object() {
         text.push_str(&crate::platform::render(&account["platform"]));
         text.push_str("\n\n");

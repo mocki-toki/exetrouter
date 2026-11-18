@@ -4,7 +4,7 @@ import { constants } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import type { Options } from "./options"
-import type { Snapshot, Usage, UsageInput, HistoryInput, Profile, Tokens, Models, Update, QuotaHistory, PlatformHistory } from "./schemas"
+import type { Snapshot, Usage, UsageInput, HistoryInput, Profile, Tokens, Models, Update, QuotaHistory, PlatformHistory, QuotaForecast } from "./schemas"
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid exr report.")
@@ -58,6 +58,48 @@ export function platformHistory(value: unknown): PlatformHistory {
     return {from:start,to:end,observedAt,usd:nanos/1e9}
   }).sort((a,b)=>a.from-b.from)
   return {from,to,points}
+}
+
+function quotaForecasts(value: unknown): QuotaForecast[] {
+  const seen = new Set<string>()
+  return list(value, 2).map((entry) => {
+    const f = record(entry), kind = text(f.kind, 16), minutes = number(f.window_minutes), resetAt = number(f.reset_at), observedAt = number(f.observed_at), used = number(f.used_percent)
+    if (!["primary", "secondary"].includes(kind) || seen.has(kind) || !Number.isSafeInteger(minutes) || minutes <= 0 || resetAt <= observedAt || used >= 100) throw new Error("Invalid quota forecast.")
+    seen.add(kind)
+    const projection = (value: unknown) => {
+      if (value == null) return null
+      const p = record(value), percentPerHour = number(p.percent_per_hour), limitAt = nullable(p.limit_at)
+      if (limitAt !== null && (!Number.isSafeInteger(limitAt) || limitAt <= observedAt || limitAt >= resetAt || percentPerHour <= 0)) throw new Error("Invalid quota forecast.")
+      return { percentPerHour, limitAt }
+    }
+    const current = projection(f.current), usual = projection(f.usual)
+    const currentStatus = f.current_status == null ? undefined : text(f.current_status, 32) as NonNullable<QuotaForecast["currentStatus"]>
+    const currentValidUntil = f.current_valid_until == null ? undefined : number(f.current_valid_until)
+    if (currentStatus !== undefined && !["recent_pace", "insufficient_history", "quota_unchanged", "reset_changed", "reset_time_moving"].includes(currentStatus)
+      || currentValidUntil !== undefined && (!Number.isSafeInteger(currentValidUntil) || currentValidUntil > resetAt || current !== null && currentValidUntil <= observedAt)
+      || currentStatus !== undefined && (currentStatus === "recent_pace") !== (current !== null)) throw new Error("Invalid quota forecast.")
+    const calendar = f.calendar == null ? undefined : (() => {
+      const c = record(f.calendar), projected = projection(c.current), validUntil = nullable(c.valid_until), pauses = number(c.pauses)
+      const short = c.short == null ? null : (() => {
+        const s = record(c.short), sk = text(s.kind,16), sm = nullable(s.window_minutes), sr = nullable(s.reset_at), so = number(s.observed_at), su = number(s.used_percent), remaining = number(s.remaining_percent), status = text(s.status,32)
+        if (!["primary","secondary"].includes(sk) || sk === kind || su > 100 || remaining > 100 || Math.abs(remaining-(100-su)) > 1e-9 || sm !== null && (!Number.isSafeInteger(sm) || sm <= 0)) throw new Error("Invalid quota calendar.")
+        return {kind:sk, minutes:sm, resetAt:sr, observedAt:so, used:su, remaining, status}
+      })()
+      if (minutes < 10080 || !Number.isSafeInteger(pauses) || validUntil !== null && (!Number.isSafeInteger(validUntil) || validUntil > resetAt)
+        || projected && (!current || projected.percentPerHour <= 0 || validUntil === null || validUntil <= observedAt || currentValidUntil !== undefined && validUntil > currentValidUntil || short && (short.minutes === null || short.minutes >= 10080 || short.observedAt !== observedAt || short.resetAt === null || short.resetAt <= observedAt || short.resetAt-observedAt > short.minutes*60 || validUntil > short.resetAt || short.used >= 100 || short.status !== "current"))
+        || !projected && (pauses !== 0 || validUntil !== null) || !short && pauses !== 0) throw new Error("Invalid quota calendar.")
+      return {short,current:projected,validUntil,pauses}
+    })()
+    const warning = f.warning == null ? null : (() => {
+      const w = record(f.warning), rateRatio = nullable(w.rate_ratio)
+      if (typeof w.limit_before_reset !== "boolean" || !current || !usual || rateRatio !== null && rateRatio <= 0 || w.limit_before_reset !== (current.limitAt !== null)) throw new Error("Invalid quota forecast.")
+      return { rateRatio, limitBeforeReset: w.limit_before_reset }
+    })()
+    const recentSeconds = number(f.recent_seconds), historicalIntervals = number(f.historical_intervals), historicalCycles = number(f.historical_cycles)
+    if (![recentSeconds, historicalIntervals, historicalCycles].every(Number.isSafeInteger) || historicalIntervals > 8642 || historicalCycles > historicalIntervals || recentSeconds > 86400 || current && recentSeconds <= 0 || usual && (historicalIntervals < 12 || historicalCycles < 2)) throw new Error("Invalid quota forecast.")
+    return { kind, minutes, resetAt, observedAt, used, current, usual, warning, recentSeconds, historicalIntervals, historicalCycles,
+      ...(currentStatus === undefined ? {} : { currentStatus }), ...(currentValidUntil === undefined ? {} : { currentValidUntil }), ...(calendar === undefined ? {} : { calendar }) }
+  })
 }
 
 export function snapshot(value: unknown): Snapshot {
@@ -130,6 +172,7 @@ export function snapshot(value: unknown): Snapshot {
         cooldownUntil: nullable(quota.cooldown_until),
         quotaStatus: string(quota.status), cooldownSource: string(quota.cooldown_source, "Not reported"),
         history: optionalQuotaHistory(account.quota_history),
+        ...(account.quota_forecast == null ? {} : { forecasts: quotaForecasts(account.quota_forecast) }),
         routing: { reason: string(routing.reason, "unknown"), best: routing.best === true, observedAt: nullable(routing.observed_at), validUntil: nullable(routing.valid_until), deadline: nullable(routing.deadline), targetShare: nullable(routing.target_share_percent) },
         credits: { count: nullable(credits.available_count), observedAt: nullable(credits.observed_at), expiries: list(credits.credits ?? [], 4096).map((entry) => nullable(record(entry).expires_at)).filter((at): at is number => at !== null) },
         automaticReset: string(object(account.automatic_reset).status, "idle"),

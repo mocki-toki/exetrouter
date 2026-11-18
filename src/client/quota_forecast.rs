@@ -1,4 +1,4 @@
-//! Bounded, session-local estimates from fresh quota observations, not token counts.
+//! Shared runtime forecasts with a session-local fallback for insufficient history.
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -6,6 +6,120 @@ const MAX_WINDOWS: usize = 128;
 const MAX_SAMPLES: usize = 256;
 const MIN_SPAN: i64 = 60;
 const FRESH_SECONDS: i64 = 60;
+
+pub(super) fn historical(
+    account: &Value,
+    window: &Value,
+    now: i64,
+) -> Option<crate::quota_forecast::Forecast> {
+    if account["refresh_error"].is_string() {
+        return None;
+    }
+    let window: crate::quota::Window = serde_json::from_value(window.clone()).ok()?;
+    account["quota_forecast"]
+        .as_array()?
+        .iter()
+        .take(2)
+        .find_map(|value| {
+            let mut forecast: crate::quota_forecast::Forecast =
+                serde_json::from_value(value.clone()).ok()?;
+            if let Some(calendar) = &forecast.calendar {
+                let windows: Vec<crate::quota::Window> =
+                    serde_json::from_value(account["quota"]["windows"].clone()).ok()?;
+                if !calendar.matches(&windows, now) {
+                    forecast.calendar = None;
+                }
+            }
+            forecast.matches(&window, now).then_some(forecast)
+        })
+}
+
+pub(super) fn notes(account: &Value, now: i64) -> Vec<(String, bool)> {
+    account["quota"]["windows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(2)
+        .flat_map(|window| {
+            let Some(f) = historical(account, window, now) else {
+                return Vec::new();
+            };
+            let name = super::render::window_label(window);
+            let mut lines = Vec::new();
+            if let Some(label) = f.usual_label(now) {
+                lines.push((format!("{name} · {label}"), false));
+            }
+            if let Some(label) = f.warning_label(now) {
+                lines.push((format!("{name} · {label}"), true));
+            }
+            lines
+        })
+        .collect()
+}
+
+pub(super) fn label(
+    account: &Value,
+    window: &Value,
+    now: i64,
+    fallback: &Forecasts,
+) -> Option<String> {
+    if account["refresh_error"].is_string() {
+        return None;
+    }
+    let id = account["id"].as_i64();
+    if window["window_minutes"]
+        .as_i64()
+        .is_some_and(|m| m >= 10080)
+        && sample(window, now).is_some_and(|(p, _, _)| p.used < 100.0)
+        && account["quota"]["windows"]
+            .as_array()
+            .is_some_and(|windows| {
+                windows.iter().any(|w| {
+                    w["kind"] != window["kind"]
+                        && w["kind"]
+                            .as_str()
+                            .is_some_and(|k| matches!(k, "primary" | "secondary"))
+                        && sample(w, now).is_some_and(|(p, m, _)| m < 10080 && p.used >= 100.0)
+                })
+            })
+    {
+        return Some("Weekly pace paused: short window exhausted".into());
+    }
+    let runtime = historical(account, window, now);
+    if let Some(text) = runtime.as_ref().and_then(|f| f.current_label(now)) {
+        if text == "Weekly pace paused: short window exhausted" {
+            return Some(text);
+        }
+    }
+    if id.is_some_and(|id| fallback.is_idle(id, window, now)) {
+        return Some("Pace unavailable: quota unchanged".into());
+    }
+    if let Some(text) = runtime.as_ref().and_then(|f| f.blocked_current_label(now)) {
+        return Some(text.into());
+    }
+    runtime
+        .as_ref()
+        .and_then(|f| f.current_label(now))
+        .or_else(|| {
+            id.and_then(|id| fallback.label(id, window, now))
+                .map(|label| {
+                    if window["window_minutes"]
+                        .as_i64()
+                        .is_some_and(|m| m >= 10080)
+                    {
+                        format!("Without future pauses: {label}")
+                    } else {
+                        format!("At this pace: {label}")
+                    }
+                })
+        })
+        .or_else(|| {
+            runtime
+                .as_ref()
+                .and_then(|f| f.status_label(now))
+                .map(str::to_owned)
+        })
+}
 
 #[derive(Clone, Copy)]
 struct Sample {
@@ -23,11 +137,7 @@ pub(super) struct Forecasts {
     windows: BTreeMap<(i64, String), Trend>,
 }
 fn idle_timeout(minutes: i64) -> i64 {
-    if minutes >= 10080 {
-        1800
-    } else {
-        300
-    }
+    crate::quota_forecast::idle_timeout(minutes)
 }
 fn sample(window: &Value, now: i64) -> Option<(Sample, i64, i64)> {
     let at = window["observed_at"].as_i64()?;
@@ -46,6 +156,36 @@ fn sample(window: &Value, now: i64) -> Option<(Sample, i64, i64)> {
         .then_some((Sample { at, used }, minutes, reset))
 }
 impl Forecasts {
+    pub(super) fn is_idle(&self, account: i64, window: &Value, now: i64) -> bool {
+        let Some((point, minutes, reset)) = sample(window, now) else {
+            return false;
+        };
+        if point.used >= 100.0 {
+            return false;
+        }
+        let Some(trend) = window["kind"]
+            .as_str()
+            .and_then(|kind| self.windows.get(&(account, kind.to_owned())))
+        else {
+            return false;
+        };
+        let Some(last) = trend.samples.back() else {
+            return false;
+        };
+        if trend.minutes != minutes
+            || trend.reset != reset
+            || point.at != last.at
+            || point.used != last.used
+        {
+            return false;
+        }
+        trend
+            .last_change
+            .is_some_and(|at| now - at >= idle_timeout(minutes))
+            || trend.samples.front().is_some_and(|first| {
+                first.used == last.used && last.at - first.at >= idle_timeout(minutes)
+            })
+    }
     pub(super) fn observe(&mut self, report: &Value, now: i64) {
         let mut present = BTreeSet::new();
         for account in report["quota_accounts"].as_array().into_iter().flatten() {
@@ -155,7 +295,7 @@ mod tests {
     use serde_json::json;
     const BASE: i64 = 1_800_000_000;
     fn report(at: i64, used: f64, minutes: i64) -> Value {
-        json!({"quota_accounts":[{"id":1,"quota":{"windows":[{"kind":"primary","used_percent":used,"observed_at":at,"window_minutes":minutes,"reset_at":BASE+604800,"status":"current"}]}}]})
+        json!({"quota_accounts":[{"id":1,"quota":{"windows":[{"kind":"primary","used_percent":used,"remaining_percent":100.0-used,"observed_at":at,"window_minutes":minutes,"reset_at":BASE+604800,"status":"current"}]}}]})
     }
     fn window(report: &Value) -> &Value {
         &report["quota_accounts"][0]["quota"]["windows"][0]
@@ -243,5 +383,70 @@ mod tests {
         failed["quota_accounts"][0]["refresh_error"] = json!("Live usage unavailable");
         forecasts.observe(&failed, BASE + 1000);
         assert!(forecasts.windows.is_empty());
+    }
+
+    #[test]
+    fn fine_idle_evidence_overrides_coarse_runtime_pace_without_resurrecting_fallbacks() {
+        for minutes in [300, 10080] {
+            let mut forecasts = Forecasts::default();
+            forecasts.observe(&report(BASE, 10.0, minutes), BASE);
+            forecasts.observe(&report(BASE + 60, 12.0, minutes), BASE + 60);
+            let until = BASE + 60 + idle_timeout(minutes);
+            let mut latest = report(BASE + 60, 12.0, minutes);
+            for at in (BASE + 90..=until).step_by(30) {
+                latest = report(at, 12.0, minutes);
+                forecasts.observe(&latest, at);
+            }
+            let w = window(&latest).clone();
+            let account = &mut latest["quota_accounts"][0];
+            account["quota_forecast"] = serde_json::json!([{"kind":"primary","window_minutes":minutes,"observed_at":until,"used_percent":12,"reset_at":BASE+604800,"current":{"percent_per_hour":88,"limit_at":until+3600},"usual":null,"warning":null,"recent_seconds":1800,"historical_intervals":0,"historical_cycles":0,"current_status":"recent_pace","current_valid_until":until+1000}]);
+            assert!(historical(account, &w, until)
+                .unwrap()
+                .current_label(until)
+                .is_some());
+            assert_eq!(
+                label(account, &w, until, &forecasts).as_deref(),
+                Some("Pace unavailable: quota unchanged")
+            );
+            assert!(!forecasts.is_idle(2, &w, until));
+            let mut changed = w.clone();
+            changed["reset_at"] = serde_json::json!(BASE + 604801);
+            assert!(!forecasts.is_idle(1, &changed, until));
+        }
+    }
+    #[test]
+    fn weekly_fallback_is_unadjusted_and_calendar_requires_the_exact_companion() {
+        let mut forecasts = Forecasts::default();
+        forecasts.observe(&report(BASE, 10.0, 10080), BASE);
+        let mut latest = report(BASE + 60, 12.0, 10080);
+        forecasts.observe(&latest, BASE + 60);
+        let w = window(&latest).clone();
+        let account = &mut latest["quota_accounts"][0];
+        assert_eq!(
+            label(account, &w, BASE + 60, &forecasts).as_deref(),
+            Some("Without future pauses: ~44m to limit")
+        );
+        let short = json!({"kind":"secondary","used_percent":50,"remaining_percent":50,"window_minutes":300,"observed_at":BASE+60,"reset_at":BASE+18000,"status":"current"});
+        account["quota"]["windows"]
+            .as_array_mut()
+            .unwrap()
+            .push(short.clone());
+        account["quota_forecast"] = json!([{"kind":"primary","window_minutes":10080,"observed_at":BASE+60,"used_percent":12,"reset_at":BASE+604800,"current":{"percent_per_hour":88,"limit_at":BASE+3660},"usual":null,"warning":null,"recent_seconds":7200,"historical_intervals":0,"historical_cycles":0,"calendar":{"short":short,"current":{"percent_per_hour":88,"limit_at":BASE+21660},"valid_until":BASE+100,"pauses":1}}]);
+        assert!(label(account, &w, BASE + 60, &forecasts)
+            .unwrap()
+            .contains("incl. short-window pauses"));
+        account["quota"]["windows"][1]["reset_at"] = json!(BASE + 18001);
+        assert_eq!(
+            label(account, &w, BASE + 60, &forecasts).as_deref(),
+            Some("Without future pauses: ~1h 0m to limit")
+        );
+        account["quota"]["windows"][1]["used_percent"] = json!(100);
+        assert_eq!(
+            label(account, &w, BASE + 60, &forecasts).as_deref(),
+            Some("Weekly pace paused: short window exhausted")
+        );
+        let mut exhausted = w.clone();
+        exhausted["used_percent"] = json!(100);
+        assert!(label(account, &exhausted, BASE + 60, &forecasts).is_none());
     }
 }

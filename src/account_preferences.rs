@@ -116,6 +116,7 @@ fn annotate_at(
     value["capabilities"]["global_account_clients"] = serde_json::json!(1);
     value["capabilities"]["hourly_quota_history"] = serde_json::json!(1);
     value["capabilities"]["ten_minute_quota_history"] = serde_json::json!(1);
+    value["capabilities"]["historical_quota_forecast"] = serde_json::json!(1);
     if let Some(rows) = value["quota_accounts"].as_array_mut() {
         let mut candidates = Vec::new();
         // Scan activity once per snapshot, not once per account.
@@ -131,6 +132,15 @@ fn annotate_at(
                 row["observation_key"] = observation_key(key, user, id).into();
                 let preference = effective(conn, id)?;
                 let quota = crate::quota::summary(conn, id, now)?;
+                let displayed =
+                    serde_json::from_value::<crate::quota::Summary>(row["quota"].clone())
+                        .unwrap_or_else(|_| quota.clone());
+                row["quota_forecast"] =
+                    serde_json::to_value(if row["refresh_error"].is_string() {
+                        Vec::new()
+                    } else {
+                        crate::quota_forecast::snapshot(conn, id, &displayed.windows, now)?
+                    })?;
                 row["preference"] = serde_json::to_value(&preference)?;
                 let routing = crate::routing::decision(conn, id, now)?;
                 let reached = routing.reached(&quota);
@@ -191,6 +201,36 @@ fn annotate_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn forecasts_follow_displayed_windows_and_refresh_errors_not_paged_chart_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::store::init(&conn).unwrap();
+        let user = crate::create_user(&conn, "synthetic").unwrap();
+        let now = 1_800_000_000;
+        conn.execute("INSERT INTO oauth_accounts(account_id,state,encrypted_credentials,expires_at,created_at) VALUES('synthetic','active',X'00',9999999999,0)", []).unwrap();
+        for n in 0..=6 {
+            let at = now - (6 - n) * 600;
+            conn.execute("INSERT INTO oauth_quota_history(account_id,kind,hour,observed_at,used_percent,window_minutes,reset_at,request_order) VALUES(1,'primary',?1,?1,?2,480,?3,0)",params![at,10.0+n as f64*2.0,now+28800]).unwrap();
+        }
+        conn.execute("INSERT INTO oauth_quota_windows(account_id,kind,used_percent,window_minutes,reset_at,observed_at,request_order) VALUES(1,'primary',22,480,?1,?2,0)",params![now+28800,now]).unwrap();
+        let quota = crate::quota::summary(&conn, 1, now).unwrap();
+        let mut value = serde_json::json!({"quota_accounts":[{"id":1,"quota":quota,"quota_history":{"points":[]}}]});
+        annotate_at(&conn, &[1; 32], user, &mut value, now).unwrap();
+        assert_eq!(value["capabilities"]["historical_quota_forecast"], 1);
+        assert_eq!(
+            value["quota_accounts"][0]["quota_forecast"][0]["current"]["percent_per_hour"],
+            12.0
+        );
+        value["quota_accounts"][0]["quota"]["windows"][0]["reset_at"] = (now + 604800).into();
+        annotate_at(&conn, &[1; 32], user, &mut value, now).unwrap();
+        assert!(value["quota_accounts"][0]["quota_forecast"][0]["current"].is_null());
+        value["quota_accounts"][0]["refresh_error"] = "Unavailable".into();
+        annotate_at(&conn, &[1; 32], user, &mut value, now).unwrap();
+        assert_eq!(
+            value["quota_accounts"][0]["quota_forecast"],
+            serde_json::json!([])
+        );
+    }
     #[test]
     fn best_and_shares_are_global_and_follow_fresh_capacity_and_operator_availability() {
         let mut conn = Connection::open_in_memory().unwrap();
