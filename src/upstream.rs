@@ -28,7 +28,8 @@ use std::{
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
-pub const CODEX_CLIENT_VERSION: &str = "0.159.3";
+// Catalog discovery revision; this does not claim full native-client compatibility.
+pub const CODEX_CLIENT_VERSION: &str = "0.169.0";
 pub const BACKEND: &str = "https://chatgpt.com/backend-api/codex";
 pub struct UpstreamSocket {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
