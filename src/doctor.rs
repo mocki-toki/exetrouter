@@ -55,6 +55,8 @@ pub struct AccountQuota {
     pub quota: crate::quota::Summary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_history: Option<crate::quota_history::History>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_forecast: Option<Vec<crate::quota_forecast::Forecast>>,
 }
 
 // These fields are appended by account_preferences::annotate after the core
@@ -261,6 +263,7 @@ pub(crate) fn snapshot(
             weekly_activation: conn.query_row("SELECT CASE WHEN status='pending' AND attempted_at<=?3 THEN 'unknown' ELSE status END FROM quota_activation_attempts WHERE account_id=?1 AND attempted_at>?2 ORDER BY attempted_at DESC,id DESC LIMIT 1", rusqlite::params![id,now-604800,now-60], |row| row.get(0)).optional()?,
             quota,
             quota_history: Some(crate::quota_history::snapshot(conn, id, now)?),
+            quota_forecast: None,
         });
     }
     let oauth_status = if !configured {
@@ -369,6 +372,7 @@ mod tests {
         account["automatic_reset"] =
             serde_json::json!({"status":"waiting","payload":"private-body-marker"});
         account["clients"] = serde_json::json!({"count":3,"scope":"server","observed_at":1050,"truncated":true,"rows":[{"id":"client_alias","name":"Other user's client","owned":false,"in_flight":2,"last_request_at":1040,"secret":"private-body-marker"}]});
+        account["quota_forecast"] = serde_json::json!([{"kind":"primary","window_minutes":480,"reset_at":20000,"observed_at":1050,"used_percent":50,"current":{"percent_per_hour":20,"limit_at":10050},"usual":{"percent_per_hour":5,"limit_at":null},"warning":{"rate_ratio":4,"limit_before_reset":true},"recent_seconds":1800,"historical_intervals":40,"historical_cycles":3,"secret":"private-body-marker"}]);
         let encoded =
             serde_json::to_value(serde_json::from_value::<ServerReport>(value).unwrap()).unwrap();
         let account = &encoded["quota_accounts"][0];
@@ -380,6 +384,7 @@ mod tests {
         assert_eq!(account["clients"]["count"], 3);
         assert_eq!(account["clients"]["rows"][0]["in_flight"], 2);
         assert_eq!(account["automatic_reset"]["status"], "waiting");
+        assert_eq!(account["quota_forecast"][0]["warning"]["rate_ratio"], 4.0);
         assert_eq!(account["subscription"]["billing_day"], 8);
         assert_eq!(
             account["subscription"]["effective_api_budget_cents"],

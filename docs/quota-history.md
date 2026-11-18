@@ -2,8 +2,8 @@
 
 Account details in the native TUI and OpenCode Desktop show short and weekly
 subscription windows together, with separate colors, a shared 0–100% quota-left
-axis. Both native TUI and OpenCode Desktop offer rolling **24 hours,
-7 days, 30 days and 90 days**, with earlier/later interval paging. The web chart
+axis. The native TUI shows seven days; OpenCode Desktop offers rolling **24 hours,
+7 days, 30 days and 90 days**, with arrows to earlier/later intervals. The web chart
 supports pointer/keyboard selection; TUI details use Left/Right and Home/End, with Up/Down for scrolling.
 Lines and cursor values show only the remaining percentage: a full window is
 100%, an exhausted window is 0%, and quota recovery moves the line upward.
@@ -40,15 +40,6 @@ contents or credentials are retained in history. Capability
 `hourly_quota_history: 1` collection flag is retained. Ordinary CLI reports
 remain text-only; JSON is the automation interface.
 
-OpenCode Desktop also accepts ten-minute (`interval_seconds: 600`) reports from
-compatible routers. It preserves their bucket alignment, observation times and
-gaps, labels the reported interval, and permits ten-minute-aligned paging ends.
-Both resolutions are bounded to 90 days and two window kinds (at most 25,920
-ten-minute points); Doctor and explicit history reads have an 8 MiB output bound
-in plugin 0.4.1 and native client 0.9.2. Other plugin reads retain a 1 MiB bound. Unsupported
-or malformed optional snapshot history is shown as unavailable without hiding
-current account details. Explicit history reads still reject invalid reports.
-
 `exr quota-history ACCOUNT --period 90d --json` reads a wider interval through the
 authenticated management channel, without refreshing upstream. `--before UNIX`
 sets its exclusive, ten-minute-aligned end; subtract the selected duration to page back.
@@ -59,6 +50,229 @@ account/window. Previously pruned observations cannot be recovered; retention ex
 only as new observations arrive. Rolling windows have fixed durations even
 across DST. Collection still uses the existing roughly 30-second passive worker;
 changing bucket size adds no polls.
+
+## History-based depletion forecasts
+
+The shared runtime derives optional `quota_accounts[].quota_forecast` metadata
+for TUI, Desktop and human-readable Limits. This predicts **quota depletion**,
+not the expiry or renewal of a paid subscription. It is display-only: ranking,
+affinity, admission and automatic reset-credit eligibility do not read it.
+No schema migration, extra upstream poll, inference or persistent forecast state
+is introduced. The existing account-scoped history query reads at most 8,642
+numeric points over the previous 30 days; it does not send that wider history
+to clients. Browsing an older chart interval does not change the forecast.
+
+Two estimates remain distinct:
+
+- **Current pace** uses a contiguous recent run: approximately 30 minutes for a
+  short window, two hours for weekly-or-longer windows. At least three points
+  covering two thirds of that horizon are required. The live observation replaces
+  its mutable ten-minute bucket, never counting as another elapsed interval.
+  Confirmed acceleration switches the weekly smoother to the fresh 30-minute
+  horizon until the warning clears, so normal smoothing cannot conceal it.
+  A fresh snapshot is not evidence of fresh consumption: unchanged updates do
+  not renew the activity deadline. The coarse estimate expires at the end of the
+  last bucket with an observed increase plus five minutes (short) or 30 minutes
+  (weekly), capped by reset. A bucket-end bound is not an exact activity time.
+  Continuous session-local observations can establish unchanged quota sooner
+  and override the coarse estimate; gaps or reset changes invalidate that proof.
+- **Usual pace** uses fully observed, non-overlapping blocks of the same horizon,
+  excluding the most recent 24 hours. Rates are time-weighted within each quota
+  reported reset-deadline group; the median group rate is the reference. This retains observed idle time
+  and avoids mistaking regular bursts separated by idle time for zero usage.
+  For an even number of groups, the upper middle rate is used as a conservative
+  depletion reference; sparse history is not a calibrated confidence statement.
+  At least 12 blocks, two reported reset deadlines and three observed UTC dates
+  are required. The legacy wire field `historical_cycles` counts distinct
+  reported reset timestamps, not verified independent quota cycles; the UI says
+  `reported reset times` rather than presenting that count as confidence.
+
+Both estimates start from the currently reported remaining percentage. A
+depletion timestamp is returned only when depletion would precede the reported
+reset; otherwise the UI says `At this pace: reset first` or `Historical pace:
+reset first`. A depletion timestamp is anchored to the quota observation, not
+the later Doctor/display time: rereading the same observation cannot postpone
+its prediction. Durations are rounded rather than presented as minute-exact promises.
+Insufficient recent history falls back to the existing session-local estimate;
+insufficient ordinary history does not invent a usual pace or warning. Older
+routers continue to use the session-local estimate.
+
+Missing buckets, unknown durations/reset times, percentage decreases, duration
+changes, resets and saturated (100%-used) intervals break continuity. Missing or
+exhausted time is never counted as idle. Different accounts and window kinds are
+never pooled. All displayed forecasts must match the exact current quota's kind,
+duration, reset, percentage and observation time; observations aged 60 seconds,
+elapsed resets and failed refreshes suppress them.
+
+The header/event/live-usage parsers preserve upstream absolute `reset_at`
+values; the router does not round or re-anchor them. The reviewed native parser
+also reads the absolute integer directly. Small timestamp differences therefore
+cannot be attributed to a local rounding rule. Retained history does not record
+which upstream metadata source supplied a sample, so it cannot establish the
+cause of upstream jitter or prove that nearby deadlines identify the same cycle.
+Forecast continuity remains **exact**, even for a one-second change. Reported
+quota, storage, routing and credit-cycle identities are never normalized.
+
+Optional `current_status` and `current_valid_until` explain the current estimate:
+`recent_pace`, `insufficient_history`, `quota_unchanged`, `reset_changed` or
+`reset_time_moving`. The moving-reset description requires consecutive zero-used
+observations whose deadlines move with observation time while their remaining
+duration stays near the full reported window; it does not prove an unstarted
+window or merge cycles. The UI distinguishes building history, a changed/moving
+reset, and unchanged quota, rather than inventing a depletion time. Unchanged
+percentage does not prove zero token usage or an idle application.
+
+The current label explicitly says `At this pace`; the separate historical label
+says `Historical pace`. Neither forecasts future workload or billing expiry.
+An activity-expired estimate and warning stay hidden even if a local fallback
+still retains an older trend. An already elapsed conditional depletion deadline
+is shown as needing fresh quota, never reissued as a future countdown. Historical
+pace remains separate when recent pace is unavailable. Older metadata without
+the optional status/deadline fields remains readable.
+
+### Weekly calendar time and short-window pauses
+
+The weekly window's raw `current` projection remains inspectable and independent
+of the short window. It is **not** by itself a wall-clock depletion forecast.
+The optional weekly `calendar` object supplies a separate current projection,
+the exact companion `short` observation, `valid_until` and a bounded `pauses`
+count. Updated clients verify **both** observations, not just the weekly one.
+Unknown calendar metadata is not inferred from the chart or another account.
+
+For an account reporting both windows, a calendar estimate requires fresh,
+same-time observations and a contiguous, paired run of both windows with exact
+reset and duration continuity. Both rates use the same endpoints and the weekly
+recent horizon/evidence requirements. Any missing, exhausted, decreased,
+reset-changed or unaligned short-window interval breaks that run. In particular,
+a weekly rate averaged over an observed short-window block is not slowed again
+by adding that same block. The short rate must be positive and recently active;
+calendar validity is bounded by both activity deadlines and the reported short
+reset. Different primary/secondary order and actual short durations are supported.
+
+The conditional scenario spends both percentages at those paired rates until
+the first short exhaustion or reported reset. If the short budget expires first,
+weekly consumption pauses until that reset. The scenario then repeats full
+short-window capacity and its reported duration, resuming immediately each time.
+Subsequent modeled reset times are **assumptions**, not upstream observations;
+they are never persisted as quota, used for routing or used for reset credits.
+The calculation is closed-form rather than an unbounded loop over future windows.
+Depletion at or after the weekly reset is shown as reset-first, not exhaustion.
+
+The UI adds `incl. short-window pauses` when the scenario includes such pauses.
+A currently exhausted short window shows `Weekly pace paused: short window
+exhausted`, rather than inventing a rate after recovery. If paired evidence is
+unavailable, including immediately after a short reset, the weekly raw or legacy
+session-local fallback is explicitly labeled `Without future pauses`; it is not
+presented as a pause-adjusted calendar ETA. A weekly-only snapshot needs no short
+adjustment. Older routers without `calendar` remain readable, but their weekly
+estimates get the same unadjusted label in updated clients. Updated server and
+clients are required for calendar-aware display; this is not a release claim.
+
+Historical `usual` projections remain separate and unchanged: their observed
+rates may already include idle or blocked time. Do not add a second pause schedule
+to those rates. An acceleration warning can still describe unusually high
+consumption, but its weekly before-reset phrase requires a valid calendar
+projection predicting depletion before reset; the raw warning flag retains its
+single-window meaning for compatibility. The scenario does not predict future
+workload, changes in model mix, routing, provider accounting, extra reset credits
+or whether users will resume work immediately. It is not calibrated accuracy or
+a guarantee that the upstream will enforce the same future windows.
+
+`Usage above usual` requires a recent rate above both 1.5 times the usual pace
+and 1.1 times the historical 30-minute block-rate 90th percentile, with at least one
+percentage point consumed over the recent run. Three consecutive **closed**
+bucket observations must each show new consumption faster than 1.5 times usual.
+Detection uses the recent 30-minute run for both short and weekly windows.
+Two observations with no new consumption, or with a recent rate below the larger
+of 1.2 times usual and the historical 75th percentile, clear the warning. Closed
+buckets are replayed after restart, so repeated dashboard refreshes cannot
+confirm an alert. A separate warning phrase identifies projected depletion
+before reset. Zero ordinary usage gives an unknown ratio, not infinity.
+
+These are conditional estimates, not statistical confidence intervals. Thresholds
+have offline synthetic walk-forward, burst, idle, gap, reset, freshness and
+restart coverage; accuracy and false-positive rates on real workloads have not
+been calibrated. Day-of-week seasonality and future workload/routing changes are
+not modeled. A change in workload, plan or provider accounting can invalidate
+historical expectations; the estimate does not diagnose its cause.
+
+### Private offline evaluation
+
+The offline tools replay the **actual Rust estimator**, not a Python copy of its
+algorithm. Collection uses only passive Doctor and QuotaHistory management reads
+through the existing saved `exr` profile. It never invokes Limits, refreshes
+upstream, submits inference or redeems a credit. Only allowlisted numeric quota
+points and run-local `account-NNN` aliases are exported; account IDs, email
+labels, credentials, clients and Platform data are discarded. Aliases need not
+identify the same account across separate exports if the pool changed.
+
+Keep exports and reports outside the checkout. Choose a new private directory;
+output files are created exclusively with mode 0600, never overwritten:
+
+```sh
+WORK=/path/to/private/analysis
+mkdir -m 700 "$WORK"
+python3 scripts/collect-quota-history.py --exr target/debug/exr --output "$WORK/history.json"
+cargo run --locked --example quota-forecast-replay -- --input "$WORK/history.json" --output "$WORK/replay.jsonl"
+python3 scripts/evaluate-quota-forecast.py --replay "$WORK/replay.jsonl" --output "$WORK/report.json"
+```
+
+Replay excludes mutable current buckets and supplies only observations available
+at each simulated time, retaining at most the estimator's 30-day lookback.
+Companion windows at the same timestamp become available together; later
+companion observations are never borrowed. `runtime_current` retains the raw
+single-window comparison, while `runtime_calendar` separately scores calendar
+depletion ETAs and availability. Its paired active rate is not treated as a
+linear wall-clock consumption predictor at 10/30/60/120-minute horizons.
+Evaluation reserves the last third of **observed UTC buckets** as validation;
+it is not a split by two thirds of elapsed calendar time. Validation forecasts
+may use earlier training history, but training outcome labels stop before the
+boundary. Missing hourly-era observations are never backfilled into ten-minute
+samples. The collector can select accounts with repeated `--account ID` options
+and reads at most 90 days per account, without paging a running service.
+
+The report separates short/weekly windows and training/validation periods. It
+includes forecast availability, percentage-point error at 10/30/60/120-minute
+horizons, depletion-time error, deadline jumps and observed warning counts.
+Current-versus-proxy comparisons also use identical paired observations, so
+coverage differences cannot masquerade as improved precision. Per-event macro
+errors and actual event counts expose repeated correlated predictions of one
+depletion. An event is recognized only when contiguous observations bracket a
+transition from below 100% to exhaustion before reset; resets, disappearance and
+already-exhausted initial samples are not successful depletion labels. ETA error
+is distance to that observation interval, not to an invented exact timestamp.
+
+The interval-linear comparator is explicitly a **downsampled proxy**, not the old
+session-local predictor: ten-minute history cannot reconstruct its sub-minute
+freshness and idle checks. Scores cover the runtime estimator, not the complete
+displayed forecast when a client falls back to that unavailable fine-grained
+session history. Outcome grouping permits up to 60 seconds of reset
+timestamp jitter around a fixed episode anchor, independently of any estimator
+candidate. Large changes, percentage decreases, duration changes and missing
+buckets still split episodes. This labeling tolerance does not change runtime
+reset handling or authorize routing/account/reset-credit actions.
+
+Interpretation limits:
+
+- Better near-term consumption error does not establish a better depletion ETA.
+- Zero warnings with no supported usual-pace estimates do not prove a low
+  false-positive rate. Warning continuation is not an objective false-alarm label.
+- Observations and overlapping forecast horizons are correlated. A single
+  depletion event is not many independent validation examples.
+- Sparse ten-minute history, timestamp jitter and floating unused-window resets
+  are reported as data-quality limitations, not silently repaired.
+- Tune on training data only and validate on later independent cycles. Do not
+  lower evidence requirements just to make forecasts or warnings appear.
+- Reusing an already reviewed export is a regression comparison, not a new
+  independent holdout. Report estimate availability as well as paired errors;
+  hiding an unsupported idle estimate is not proof of improved ETA accuracy.
+
+Synthetic tool checks:
+
+```sh
+python3 scripts/test-quota-forecast-evaluation.py
+cargo test --locked --example quota-forecast-replay
+```
 
 ## Schema 15 to 16: ten-minute buckets
 

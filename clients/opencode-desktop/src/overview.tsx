@@ -1,15 +1,15 @@
 import { For, Show, type Accessor } from "solid-js"
 import type { Context } from "@opencode/plugin/gui"
-import { best, fresh, priority, routingFresh, routingReason, visibleWindows, type Forecasts } from "./dashboard"
+import { best, fresh, priority, routingFresh, routingReason, visibleWindows, historicalForecast, currentForecast, usualForecast, forecastWarning, forecastStatus, quotaForecastLabel, type Forecasts } from "./dashboard"
 import { count, date, dollars, duration, freshness, lastUsed, percent, requestAge, shortDate, subscriptionPlan } from "./format"
-import type { Account, DashboardState, Window } from "./schemas"
+import type { Account, DashboardState, Window, QuotaForecast } from "./schemas"
 import { Badge, EmptyState, Fields, List, Notice, Row, Section, useDashboardState, useDialog, useHost } from "./ui"
 import { QuotaHistoryView } from "./quota-history-view"
 
-function AccountDetails(props: { account: Account; now: number }) {
+function AccountDetails(props: { account: Account; now: number; historical?: boolean; forecasts?: Forecasts }) {
   const a = () => props.account
   return <div class="exr exr-dialog-content">
-    <div class="exr-detail-quotas"><For each={visibleWindows(a())}>{(window) => <div class="exr-detail-quota"><Quota window={window} historical={props.account.refreshError || freshness(window, props.now) !== "current"} /></div>}</For><Show when={a().platform}>{(platform)=><div class="exr-detail-quota exr-platform"><PlatformStatus platform={platform()} now={props.now} details /></div>}</Show></div>
+    <div class="exr-detail-quotas"><For each={visibleWindows(a())}>{(window) => <div class="exr-detail-quota"><Quota window={window} historical={!!props.historical || props.account.refreshError || freshness(window, props.now) !== "current"} forecast={props.forecasts ? quotaForecastLabel(a(), window, props.now, props.forecasts) : undefined} outlook={historicalForecast(a(), window, props.now)} now={props.now} /></div>}</For><Show when={a().platform}>{(platform)=><div class="exr-detail-quota exr-platform"><PlatformStatus platform={platform()} now={props.now} details /></div>}</Show></div>
     <QuotaHistoryView account={a()} />
     <Show when={a().subscription}>{(subscription) => <Section title="Subscription & billing">
       <Fields rows={[
@@ -32,18 +32,18 @@ function AccountDetails(props: { account: Account; now: number }) {
   </div>
 }
 
-export function openAccount(ctx: Context, open: Context["dialogs"]["open"], id: number, now: Accessor<number>, state: Accessor<DashboardState | undefined>) {
+export function openAccount(ctx: Context, open: Context["dialogs"]["open"], id: number, now: Accessor<number>, state: Accessor<DashboardState | undefined>, forecasts?: Forecasts) {
   const ui = ctx.ui
   open((dialog) => {
     const account = () => state()?.snapshot?.accounts.find((a) => a.id === id)
     return <ui.Dialog title={account()?.label ?? "Account details"} description="Subscription history and account details" size="large"
       footer={<ui.Button onClick={dialog.close}>Done</ui.Button>}>
-      <Show when={account()} fallback={<div class="exr exr-dialog-content"><Notice>This account is no longer in the current snapshot.</Notice></div>}>{(a) => <AccountDetails account={a()} now={now()} />}</Show>
+      <Show when={account()} fallback={<div class="exr exr-dialog-content"><Notice>This account is no longer in the current snapshot.</Notice></div>}>{(a) => <AccountDetails account={a()} now={now()} historical={!!state()?.error} forecasts={forecasts} />}</Show>
     </ui.Dialog>
   })
 }
 
-function Quota(props: { window: Window; historical: boolean; forecast?: string }) {
+function Quota(props: { window: Window; historical: boolean; forecast?: string; outlook?: QuotaForecast; now: number }) {
   const ui = useHost().ui
   const remaining = () => props.window.remaining
   const tone = () => remaining() === null || props.historical ? "neutral" : remaining()! <= 20 ? "danger" : remaining()! <= 50 ? "warning" : "success"
@@ -53,7 +53,10 @@ function Quota(props: { window: Window; historical: boolean; forecast?: string }
       <Show when={remaining() !== null}><span style={{ width: `${remaining()}%` }} /></Show>
     </div>
     <div class="exr-inline exr-caption"><ui.Tooltip value={`Resets ${date(props.window.resetAt)} · observed ${date(props.window.observedAt)}`}><span>Resets {date(props.window.resetAt)}</span></ui.Tooltip>
-      <span>{props.historical ? "Historical" : props.forecast}</span></div>
+      <span title={props.window.minutes !== null && props.window.minutes >= 10080 ? "Calendar estimates include short-window pauses only with aligned, fresh observations of both windows. They assume the same consumption rates, immediate resumption at reset, and unchanged short-window capacity and duration. Without that evidence, the pace label excludes future pauses; it is not a calendar prediction. Historical pace is separate and may already include past pauses." : undefined}>{props.historical ? "Historical" : props.forecast ?? currentForecast(props.outlook, props.now) ?? forecastStatus(props.outlook, props.now)}</span></div>
+    <Show when={!props.historical && usualForecast(props.outlook, props.now)}>{(label) => <p class="exr-caption">{label()}</p>}</Show>
+    <Show when={!props.historical && forecastWarning(props.outlook, props.now)}>{(label) => <Notice tone="warning">{label()}</Notice>}</Show>
+    <Show when={!props.historical && props.outlook?.usual}><p class="exr-caption" title="Observed consumption over the previous 30 days, excluding the most recent day. Reset timestamps are not proof of independent cycles. Missing and exhausted intervals are excluded. These conditional estimates do not predict future workload or paid subscription expiry.">History-based estimate · {props.outlook!.historicalCycles} reported reset times</p></Show>
   </div>
 }
 
@@ -92,9 +95,9 @@ function AccountCard(props: { account: Account; now: number; historical: boolean
       <Show when={priority(a())}><ui.Tooltip value={`${routingReason(a())}${!routingFresh(a(), props.now) ? " · historical" : ""}`}><span><Badge tone="danger">Priority</Badge></span></ui.Tooltip></Show>
       <Show when={a().locked}><ui.Tooltip value="Operator locked"><span class="exr-caption"><ui.Icon name="lock" size="small" /></span></ui.Tooltip></Show>
       <Show when={subscriptionPlan(a().subscription?.planUSD)}>{(plan) => <span class="exr-caption exr-account-plan">{plan()}</span>}</Show>
-    </div></div><ui.Tooltip value="Account details"><ui.IconButton icon="chevron-right" label={`View ${a().label} details`} onClick={() => openAccount(ctx, open, a().id, () => props.now, state)} /></ui.Tooltip></header>
+    </div></div><ui.Tooltip value="Account details"><ui.IconButton icon="chevron-right" label={`View ${a().label} details`} onClick={() => openAccount(ctx, open, a().id, () => props.now, state, props.forecasts)} /></ui.Tooltip></header>
     <div class="exr-quota-area" data-paused={a().cooldownUntil !== null ? "" : undefined}><div class="exr-quota-grid"><For each={visibleWindows(a())} fallback={<p class="exr-caption">Limits not reported · {a().quotaStatus}</p>}>{(window) =>
-      <Quota window={window} historical={props.historical || a().refreshError || freshness(window, props.now) !== "current"} forecast={props.forecasts.label(a().id, window, props.now)} />
+      <Quota window={window} historical={props.historical || a().refreshError || freshness(window, props.now) !== "current"} forecast={quotaForecastLabel(a(), window, props.now, props.forecasts)} outlook={historicalForecast(a(), window, props.now)} now={props.now} />
     }</For></div><Show when={a().cooldownUntil !== null}><ui.Tooltip value={`Cooldown source: ${a().cooldownSource}`}><span class="exr-quota-pause">Paused until {date(a().cooldownUntil)}</span></ui.Tooltip></Show></div>
     <Show when={a().platform}>{platform=><div class="exr-platform"><PlatformStatus platform={platform()} now={props.now} /></div>}</Show>
     <footer class="exr-account-footer">

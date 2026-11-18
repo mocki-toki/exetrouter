@@ -63,6 +63,7 @@ fn usage_observation(value: &Value, now: i64) -> crate::quota::Observation {
             .collect(),
     )
 }
+
 fn parse_credits(usage: &Value, details: Option<&Value>, now: i64) -> Option<Credits> {
     let count = details
         .and_then(|v| v["available_count"].as_i64())
@@ -244,6 +245,29 @@ impl Upstream {
         }
         if live && report.quota_accounts.len() == 1 {
             report.quota = Some(report.quota_accounts[0].quota.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[test]
+    fn live_usage_preserves_absolute_deadlines_without_rounding_or_reanchoring() {
+        let base = 1_800_000_000;
+        for (now, reset) in [
+            (base, base + 18000),
+            (base + 601, base + 18001),
+            (base + 1200, base + 19200),
+        ] {
+            let input = json!({"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":reset},"secondary_window":null}});
+            let headers = usage_observation(&input, now).response_headers();
+            assert_eq!(
+                headers["x-codex-primary-reset-at"].to_str().unwrap(),
+                reset.to_string()
+            );
+            assert_eq!(headers["x-codex-primary-window-minutes"], "300");
+            assert_eq!(headers["x-codex-primary-used-percent"], "0");
         }
     }
 }

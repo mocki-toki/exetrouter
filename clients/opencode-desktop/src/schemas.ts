@@ -22,6 +22,18 @@ export const Window = Schema.Struct({
 })
 export type Window = typeof Window.Type
 
+const QuotaProjection = Schema.Struct({ percentPerHour: Schema.Number, limitAt: Schema.NullOr(Schema.Number) })
+export const QuotaForecast = Schema.Struct({
+  kind: Schema.String, minutes: Schema.Number, resetAt: Schema.Number, observedAt: Schema.Number, used: Schema.Number,
+  current: Schema.NullOr(QuotaProjection), usual: Schema.NullOr(QuotaProjection),
+  currentStatus: Schema.optionalKey(Schema.Literals(["recent_pace", "insufficient_history", "quota_unchanged", "reset_changed", "reset_time_moving"])),
+  currentValidUntil: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  calendar: Schema.optionalKey(Schema.Struct({ short: Schema.NullOr(Window), current: Schema.NullOr(QuotaProjection), validUntil: Schema.NullOr(Schema.Number), pauses: Schema.Number })),
+  warning: Schema.NullOr(Schema.Struct({ rateRatio: Schema.NullOr(Schema.Number), limitBeforeReset: Schema.Boolean })),
+  recentSeconds: Schema.Number, historicalIntervals: Schema.Number, historicalCycles: Schema.Number,
+})
+export type QuotaForecast = typeof QuotaForecast.Type
+
 export const PlatformHistory = Schema.Struct({ from: Schema.Number, to: Schema.Number, points: Schema.Array(Schema.Struct({ from: Schema.Number, to: Schema.Number, observedAt: Schema.Number, usd: Schema.Number })) })
 export type PlatformHistory = typeof PlatformHistory.Type
 export const PlatformCosts = Schema.Struct({ from: Schema.Number, to: Schema.Number, observedAt: Schema.NullOr(Schema.Number), spentUSD: Schema.NullOr(Schema.Number), budgetUSD: Schema.NullOr(Schema.Number), complete: Schema.Boolean, basis: Schema.String })
@@ -53,6 +65,7 @@ export const Account = Schema.Struct({
   id: Schema.Number, label: Schema.String, enabled: Schema.NullOr(Schema.Boolean), locked: Schema.Boolean,
   windows: Schema.Array(Window), quotaStatus: Schema.String, cooldownSource: Schema.String, cooldownUntil: Schema.NullOr(Schema.Number),
   history: Schema.NullOr(QuotaHistory),
+  forecasts: Schema.optionalKey(Schema.Array(QuotaForecast)),
   routing: Schema.Struct({ reason: Schema.String, best: Schema.Boolean, observedAt: Schema.NullOr(Schema.Number), validUntil: Schema.NullOr(Schema.Number), deadline: Schema.NullOr(Schema.Number), targetShare: Schema.NullOr(Schema.Number) }),
   credits: Schema.Struct({ count: Schema.NullOr(Schema.Number), observedAt: Schema.NullOr(Schema.Number), expiries: Schema.Array(Schema.Number) }),
   automaticReset: Schema.String, activation: Schema.NullOr(Schema.String), refreshError: Schema.Boolean,

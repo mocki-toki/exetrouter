@@ -10,7 +10,7 @@ import { Window } from "happy-dom"
 import type { Plugin } from "@opencode/plugin/gui"
 import { Rpc } from "@opencode/plugin/rpc"
 import * as Effect from "effect"
-import { doctor, usage } from "./fixtures"
+import { doctor, usage, forecastReport } from "./fixtures"
 import { modelList, tokenList } from "./fixtures"
 import { snapshot, usage as normalizeUsage, models, tokens } from "../src/native"
 
@@ -251,6 +251,39 @@ test("rendered panel has five native web views, account details, usage graph, to
       tab.dispatchEvent(new window.MouseEvent("click", { bubbles: true })); await delay(10)
       assert.equal(root.querySelector('[role="tabpanel"]:not([hidden])')?.getAttribute("aria-labelledby"), tab.id)
     }
+    const historical = snapshot(forecastReport(Math.floor(Date.now() / 1000) - 5)).accounts[0]
+    setState((old) => ({ ...old, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => ({ ...a, windows: historical.windows, forecasts: historical.forecasts })) } }))
+    assert.match(root.textContent, /~2h 0m to limit/)
+    assert.match(root.textContent, /Historical pace: ~4h 0m to limit/)
+    assert.match(root.textContent, /Usage above usual.*~2.0x normal.*may run out before reset/)
+    click("View Synthetic account details")
+    assert.match(window.document.querySelector('[role="dialog"]')!.textContent, /Historical pace: ~4h 0m to limit/)
+    click("Done")
+    setState((old) => ({ ...old, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => ({ ...a, forecasts: a.forecasts?.map((f) => ({ ...f, current: null, warning: null, currentStatus: "quota_unchanged" as const })) })) } }))
+    assert.match(root.textContent, /Pace unavailable: quota unchanged/)
+    assert.doesNotMatch(root.textContent, /At this pace: ~2h|Usage above usual/)
+    assert.match(root.textContent, /Historical pace: ~4h 0m to limit/)
+    click("View Synthetic account details")
+    const pausedDialog = window.document.querySelector('[role="dialog"]')!
+    assert.match(pausedDialog.textContent, /Pace unavailable: quota unchanged/)
+    setState((old) => ({ ...old, error: "Connection unavailable" }))
+    assert.doesNotMatch(pausedDialog.textContent, /Pace unavailable:|Historical pace:|At this pace:/)
+    click("Done")
+    setState((old) => ({ ...old, error: null, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => ({ ...a, forecasts: historical.forecasts })) } }))
+    setState((old) => ({ ...old, error: "Connection unavailable" }))
+    assert.doesNotMatch(root.textContent, /Usage above usual|Historical pace:|~2h 0m to limit/)
+    const { weeklyCalendarReport } = await import("./fixtures")
+    const calendarAccount = snapshot(weeklyCalendarReport(Math.floor(Date.now()/1000)-5)).accounts[0]
+    setState((old) => ({ ...old, error:null, snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map((a)=>({...a,windows:calendarAccount.windows,forecasts:calendarAccount.forecasts}))} }))
+    assert.match(root.textContent,/~10h 15m to limit incl\. short-window pauses/)
+    assert.doesNotMatch(root.textContent,/~5h 30m to limit/)
+    click("View Synthetic account details")
+    assert.match(window.document.querySelector('[role="dialog"]')!.textContent,/incl\. short-window pauses/)
+    click("Done")
+    setState((old)=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map((a)=>({...a,forecasts:a.forecasts?.map((f)=>({...f,calendar:undefined}))}))}}))
+    assert.match(root.textContent,/Without future pauses: ~5h 30m to limit/)
+    assert.doesNotMatch(root.textContent,/incl\. short-window pauses/)
+    setState((old) => ({ ...old, error: null, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => ({ ...a, windows: report.accounts[0].windows, forecasts: undefined })) } }))
     click("View Synthetic account details")
     assert.match(window.document.querySelector('[role="dialog"]')!.textContent, /Synthetic client/)
     const accountDialog = window.document.querySelector('[role="dialog"]')!
@@ -259,7 +292,7 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.doesNotMatch(accountDialog.textContent, /1286m ago/)
     assert.ok(accountDialog.querySelector('.exr-detail-quotas')!.nextElementSibling!.classList.contains('exr-history'))
     assert.doesNotMatch([...accountDialog.querySelectorAll('h3')].map((h)=>h.textContent).join('|'), /Routing|Subscription windows/)
-    const history = accountDialog.querySelector('svg[aria-label^="Subscription quota left"]')!
+    const history = accountDialog.querySelector('svg[aria-label^="Subscription quota"]')!
     assert.ok(history)
     assert.equal(history.querySelectorAll("[data-window]").length,2,"both windows share the same chart")
     history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"End",bubbles:true}))
@@ -305,7 +338,7 @@ test("rendered panel has five native web views, account details, usage graph, to
     setState((old) => ({ ...old, refreshing:false, snapshot:{...old.snapshot, accounts:old.snapshot.accounts.map((a) => ({...a,cooldownUntil:a.windows[0].resetAt,cooldownSource:"upstream_reset",clients:{...a.clients,rows:a.clients.rows.map((c)=>({...c,name:"Updated client"}))}}))} }))
     assert.equal(window.document.querySelector('[role="dialog"]'), accountDialog)
     assert.match(accountDialog.textContent, /Updated client/)
-    assert.equal(accountDialog.querySelector('svg[aria-label^="Subscription quota left"]'),history,"background refresh preserves the chart and cursor owner")
+    assert.equal(accountDialog.querySelector('svg[aria-label^="Subscription quota"]'),history,"background refresh preserves the chart and cursor owner")
     assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/Not observed/)
     assert.equal(root.querySelector('[role="tabpanel"]'), accountPane)
     assert.equal(accountPane.scrollTop, 90)

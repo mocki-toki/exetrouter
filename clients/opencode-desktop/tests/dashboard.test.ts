@@ -4,12 +4,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 import { Schema } from "effect"
-import { best, Forecasts, priority, routingFresh, visibleWindows } from "../src/dashboard"
+import { best, Forecasts, priority, routingFresh, visibleWindows, historicalForecast, currentForecast, usualForecast, forecastWarning, forecastStatus, quotaForecastLabel } from "../src/dashboard"
 import { activity, activityDate, activityIndex, activityValue, dollars } from "../src/chart"
 import { NativeClient, snapshot, models, tokens, usage } from "../src/native"
 import { options } from "../src/options"
-import { Models, Profile, Tokens, Usage } from "../src/schemas"
-import { deferred, doctor, modelList, tokenList, usage as usageFixture } from "./fixtures"
+import { Models, Profile, Tokens, Usage, Snapshot } from "../src/schemas"
+import { deferred, doctor, forecastReport, weeklyCalendarReport, modelList, tokenList, usage as usageFixture } from "./fixtures"
 import { requestAge } from "../src/format"
 
 test("client request ages use seconds, minutes, hours and days without inventing unknown times", () => {
@@ -255,4 +255,133 @@ test("quota forecasts match native elapsed-span, idle, reset and freshness fence
   }
   forecasts.observe(report(base + 390, 0), base + 390)
   assert.equal(forecasts.label(1, report(base + 390, 0).accounts[0].windows[0], base + 390), undefined)
+})
+
+test("shared history forecasts survive IPC and are matched to the exact current quota", () => {
+  const raw = forecastReport(), report = snapshot(raw), account = report.accounts[0], w = account.windows[0], now = report.checkedAt
+  Schema.decodeUnknownSync(Snapshot)(report)
+  const f = historicalForecast(account, w, now)
+  assert.ok(f)
+  assert.equal(currentForecast(f, now), "At this pace: ~2h 0m to limit")
+  assert.equal(usualForecast(f, now), "Historical pace: ~4h 0m to limit")
+  assert.equal(forecastWarning(f, now), "Usage above usual · ~2.0x normal · may run out before reset")
+  assert.equal(historicalForecast(account, w, now + 60), undefined)
+  assert.equal(historicalForecast({ ...account, refreshError: true }, w, now), undefined)
+  for (const changed of [{ ...w, used: 51 }, { ...w, resetAt: w.resetAt! + 1 }, { ...w, observedAt: now - 1 }, { ...w, minutes: 300 }, { ...w, kind: "secondary" }, { ...w, status: "stale" }]) {
+    assert.equal(historicalForecast(account, changed, now), undefined)
+  }
+  assert.equal(currentForecast({ ...f, current: { percentPerHour: 1, limitAt: null } }, now), "At this pace: reset first")
+  assert.equal(usualForecast({ ...f, usual: { percentPerHour: 0, limitAt: null } }, now), "Historical pace: reset first")
+  assert.equal(forecastWarning({ ...f, warning: { rateRatio: null, limitBeforeReset: false } }, now), "Usage above usual")
+  assert.equal(historicalForecast(snapshot(doctor()).accounts[0], w, now), undefined)
+})
+
+test("history forecast projection rejects malformed numeric evidence without forwarding payloads", () => {
+  const raw = forecastReport(), f = raw.quota_accounts[0].quota_forecast[0]
+  const withForecast = (forecast: unknown) => ({ ...raw, quota_accounts: [{ ...raw.quota_accounts[0], quota_forecast: [forecast] }] })
+  for (const invalid of [
+    { ...f, kind: "private-body-marker" }, { ...f, window_minutes: 0 }, { ...f, used_percent: 100 },
+    { ...f, current: { percent_per_hour: -1, limit_at: null } },
+    { ...f, current: { percent_per_hour: 25, limit_at: f.reset_at } },
+    { ...f, current: null }, { ...f, historical_cycles: 0 },
+    { ...f, warning: { rate_ratio: Infinity, limit_before_reset: true } },
+    { ...f, warning: { rate_ratio: 2, limit_before_reset: false } },
+    { ...f, current_status: "private-body-marker" }, { ...f, current_status: "quota_unchanged" },
+    { ...f, current_valid_until: f.observed_at }, { ...f, current_valid_until: f.reset_at + 1 },
+  ]) assert.throws(() => snapshot(withForecast(invalid)))
+  const safe = snapshot(withForecast({ ...f, secret: "private-body-marker" }))
+  assert.doesNotMatch(JSON.stringify(safe), /private-body-marker/)
+  assert.throws(() => snapshot({ ...raw, quota_accounts: [{ ...raw.quota_accounts[0], quota_forecast: [f, f] }] }))
+})
+
+test("runtime pace expiry suppresses obsolete ETAs and warnings without changing historical estimates", () => {
+  const raw = forecastReport(), base = raw.checked_at
+  const f = raw.quota_accounts[0].quota_forecast[0]
+  const withStatus = { ...raw, quota_accounts: [{ ...raw.quota_accounts[0], quota_forecast: [{ ...f, current_status: "recent_pace", current_valid_until: base + 20 }] }] }
+  const r = snapshot(withStatus), a = r.accounts[0], w = a.windows[0], model = historicalForecast(a,w,base)!
+  Schema.decodeUnknownSync(Snapshot)(r)
+  assert.equal(currentForecast(model,base+19), "At this pace: ~2h 0m to limit")
+  assert.equal(currentForecast(model,base+20), undefined)
+  assert.equal(forecastWarning(model,base+20), undefined)
+  assert.equal(quotaForecastLabel(a,w,base+20,new Forecasts()), "Pace unavailable: quota unchanged")
+  assert.equal(usualForecast(model,base+20), "Historical pace: ~4h 0m to limit")
+  const passed = { ...model, currentValidUntil: base+40, current: { percentPerHour:100, limitAt:base+5 } }
+  assert.equal(currentForecast(passed,base+5), undefined)
+  assert.equal(forecastStatus(passed,base+5), "Estimate needs fresh quota")
+  for (const [status, label] of [["reset_changed", "Reset changed; rebuilding pace"], ["reset_time_moving", "Reset time moving; no pace yet"], ["insufficient_history", "Building recent pace"]] as const) {
+    assert.equal(forecastStatus({ ...model, current: null, currentValidUntil: undefined, currentStatus: status },base),label)
+  }
+})
+
+test("continuous fine-grained idle observations override a coarse runtime estimate", () => {
+  for (const minutes of [300,10080]) {
+    const initial = snapshot(forecastReport()), base = initial.checkedAt, template = initial.accounts[0]
+    const fallback = new Forecasts()
+    const report = (at: number, used: number) => ({ ...initial, accounts: [{ ...template, windows: [{ ...template.windows[0], minutes, observedAt: at, used, remaining:100-used }], forecasts: [{ ...template.forecasts![0], minutes, observedAt:at, used, currentStatus:"recent_pace" as const, currentValidUntil:at+1000 }] }] })
+    fallback.observe(report(base,40),base)
+    fallback.observe(report(base+60,50),base+60)
+    const until = base+60+(minutes>=10080?1800:300)
+    let latest = report(base+60,50)
+    for (let at=base+90;at<=until;at+=30) { latest=report(at,50); fallback.observe(latest,at) }
+    const a = latest.accounts[0], w = a.windows[0]
+    assert.ok(currentForecast(historicalForecast(a,w,until),until))
+    assert.equal(quotaForecastLabel(a,w,until,fallback),"Pace unavailable: quota unchanged")
+    assert.equal(fallback.isIdle(2,w,until),false)
+    assert.equal(fallback.isIdle(a.id,{...w,resetAt:w.resetAt!+1},until),false)
+  }
+})
+
+test("weekly calendar ETA includes repeated short pauses and matches both observations", () => {
+  const r = snapshot(weeklyCalendarReport()), a = r.accounts[0], w = a.windows[1], now = r.checkedAt
+  Schema.decodeUnknownSync(Snapshot)(r)
+  const f = historicalForecast(a,w,now)!
+  assert.equal(f.current!.limitAt,now+19800,"raw current pace is retained separately")
+  assert.equal(currentForecast(f,now),"At this pace: ~10h 15m to limit incl. short-window pauses")
+  assert.equal(usualForecast(f,now),"Historical pace: ~11h 0m to limit","do not add pauses a second time to historical rates")
+  for (const change of [{resetAt:a.windows[0].resetAt!+1},{used:83},{observedAt:now-1},{minutes:480},{status:"stale"}]) {
+    const changed = {...a,windows:[{...a.windows[0],...change},w]}
+    assert.equal(currentForecast(historicalForecast(changed,w,now),now),"Without future pauses: ~5h 30m to limit")
+  }
+  assert.equal(currentForecast({...f,calendar:{...f.calendar!,validUntil:now}},now),"Without future pauses: ~5h 30m to limit")
+  const resetFirst = {...f,calendar:{...f.calendar!,current:{percentPerHour:12,limitAt:null}}}
+  assert.equal(currentForecast(resetFirst,now),"At this pace: reset first incl. short-window pauses")
+  assert.equal(forecastWarning(resetFirst,now),"Usage above usual · ~2.0x normal")
+})
+
+test("blocked short windows pause weekly instead of showing a resumed-use calendar promise", () => {
+  const r = snapshot(weeklyCalendarReport()), a = r.accounts[0], w = a.windows[1], now = r.checkedAt
+  const short = {...a.windows[0],used:100,remaining:0}
+  const f = {...a.forecasts![0],calendar:{short,current:null,validUntil:null,pauses:0}}
+  const changed = {...a,windows:[short,w],forecasts:[f]}
+  assert.equal(quotaForecastLabel(changed,w,now,new Forecasts()),"Weekly pace paused: short window exhausted")
+  assert.equal(quotaForecastLabel(changed,{...w,used:100,remaining:0},now,new Forecasts()),undefined)
+  assert.equal(forecastWarning(f,now),undefined)
+  assert.equal(usualForecast(f,now),"Historical pace: ~11h 0m to limit")
+})
+
+test("old weekly metadata and local fallbacks are explicitly unadjusted, not wall-clock ETAs", () => {
+  const r = snapshot(weeklyCalendarReport()), a = r.accounts[0], w = a.windows[1], now = r.checkedAt
+  const f = {...a.forecasts![0],calendar:undefined}
+  assert.equal(currentForecast(f,now),"Without future pauses: ~5h 30m to limit")
+  const fallback = new Forecasts()
+  const earlier = {...w,observedAt:now-60,used:32,remaining:68}
+  fallback.observe({...r,accounts:[{...a,forecasts:undefined,windows:[earlier]}]},now-60)
+  fallback.observe({...r,accounts:[{...a,forecasts:undefined,windows:[w]}]},now)
+  assert.equal(quotaForecastLabel({...a,forecasts:undefined},w,now,fallback),"Without future pauses: ~33m to limit")
+})
+
+test("quota calendar IPC rejects mismatched, expired or malformed evidence and strips unknown fields", () => {
+  const raw = weeklyCalendarReport(), a = raw.quota_accounts[0], f = a.quota_forecast[0], c = f.calendar
+  const withCalendar = (calendar:unknown) => ({...raw,quota_accounts:[{...a,quota_forecast:[{...f,calendar}]}]})
+  for (const invalid of [
+    {...c,pauses:-1},{...c,pauses:1.5},{...c,current:null},{...c,valid_until:f.observed_at},
+    {...c,valid_until:f.current_valid_until+1},{...c,short:{...c.short,kind:f.kind}},
+    {...c,short:{...c.short,used_percent:100}},{...c,short:{...c.short,observed_at:f.observed_at-1}},
+    {...c,current:{percent_per_hour:0,limit_at:null}},{...c,current:{...c.current,limit_at:f.reset_at}},
+  ]) assert.throws(()=>snapshot(withCalendar(invalid)))
+  const safe = snapshot(withCalendar({...c,secret:"private-body-marker",short:{...c.short,secret:"private-body-marker"}}))
+  assert.doesNotMatch(JSON.stringify(safe),/private-body-marker/)
+  const only = snapshot(withCalendar({...c,short:null,pauses:0,current:f.current}))
+  const onlyAccount = {...only.accounts[0],windows:[only.accounts[0].windows[1]]}
+  assert.equal(currentForecast(historicalForecast(onlyAccount,onlyAccount.windows[0],raw.checked_at),raw.checked_at),"At this pace: ~5h 30m to limit")
 })

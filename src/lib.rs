@@ -19,6 +19,7 @@ pub mod platform;
 mod pool;
 mod private_metadata;
 pub mod quota;
+pub mod quota_forecast;
 pub mod quota_history;
 pub mod reset;
 pub mod routing;
