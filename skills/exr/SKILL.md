@@ -68,7 +68,9 @@ The helper uses ChatGPT OAuth through the router, not another provider or host L
 
 ## Reset credits
 
-`exr limits --json` inspects availability; it does not itself redeem credits. The running API consumes an expiring credit at <72 hours to expiry and ≤1% weekly remaining, or one final-day salvage for the already-expiring cohort with consumed ordinary quota. Further credits wait for new weekly depletion after recovery. Strategic resets are preserved and do not affect priority; other subscriptions need not be empty. Ordinary routing uses quota through exhaustion. Manual redemption was removed.
+`exr limits --json` inspects availability; it does not itself redeem credits. The running API consumes an expiring credit at <72 hours to expiry and ≤1% weekly remaining, or one final-day salvage for the already-expiring cohort with consumed ordinary quota. Further credits wait for new weekly depletion after recovery. Strategic resets do not affect priority or get spent automatically; other subscriptions need not be empty. Ordinary routing uses quota through exhaustion.
+
+In standalone mode only, `exr account reset ACCOUNT` prepares one credit by local ID or exact email when live weekly quota has at most 5% remaining. The owner must review and type `RESET ID` in their own terminal. There is no `--yes` or `--json`, no TUI action and no remote request. Do not automate confirmation or retry an uncertain result.
 
 A randomized delay and fresh preflight precede a durable submission with an explicit credit and an account/weekly-cycle idempotency key shared across hosts. Every potentially successful reset fences further credits until verified recovery and a changed weekly cycle. Unknown outcomes are never replayed; confirmed no-ops require new consumption before reconsideration. Cohort/inventory guards survive restart. Missing/expired/stale data cannot authorize redemption. Never spend a real credit deliberately for testing; starting the runtime enables its documented automatic behavior.
 

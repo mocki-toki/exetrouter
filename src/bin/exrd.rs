@@ -106,7 +106,7 @@ enum AdminCommand {
         #[command(subcommand)]
         command: BackupCommand,
     },
-    /// Add, reauthorize, list or disable upstream ChatGPT OAuth accounts.
+    /// Manage upstream ChatGPT OAuth accounts and reset credits locally.
     Oauth {
         #[command(subcommand)]
         command: OauthCommand,
@@ -191,6 +191,11 @@ enum OauthCommand {
     },
     /// List account state and expiry without credentials.
     List,
+    /// Spend one reset credit with interactive confirmation (local operator only).
+    Reset {
+        /// Positive local account ID or exact account email.
+        account: String,
+    },
     /// Reversibly deactivate routing for everyone; retain OAuth state.
     Disable { id: i64 },
     /// Reactivate routing for everyone; preserve the legacy lock marker.
@@ -223,6 +228,16 @@ async fn run() -> Result<()> {
     let mut args = Args::from_arg_matches(&matches)?;
     if let Command::Update { check } = args.command {
         return exetrouter::update::command("exrd", check, args.json).await;
+    }
+    if matches!(
+        &args.command,
+        Command::Admin {
+            command: AdminCommand::Oauth {
+                command: OauthCommand::Reset { .. }
+            }
+        }
+    ) {
+        exetrouter::reset::require_terminal(args.json)?;
     }
     let saved_path = exetrouter::server_config::path(args.config.clone())?;
     let saved = exetrouter::server_config::load(
@@ -452,6 +467,17 @@ async fn run() -> Result<()> {
             args.oauth_issuer,
             args.allow_mock_upstream,
         )?;
+        if let OauthCommand::Reset { account } = command {
+            let oauth_key = read_oauth_key(&args.oauth_key)?;
+            if oauth_key.as_slice() == key {
+                return Err(
+                    "OAuth encryption key must differ from the client-token HMAC key".into(),
+                );
+            }
+            let db = Database::open_existing(args.db).await?;
+            let upstream = Upstream::new(db, oauth_key, config)?;
+            return exetrouter::reset::command(&upstream, &account).await;
+        }
         let db = Database::open(args.db).await?;
         if matches!(command, OauthCommand::InitKey) {
             let mut key = [0; 32];
@@ -610,7 +636,7 @@ async fn run() -> Result<()> {
                     args.json,
                 )?;
             }
-            OauthCommand::InitKey => unreachable!(),
+            OauthCommand::InitKey | OauthCommand::Reset { .. } => unreachable!(),
         }
         return Ok(());
     }

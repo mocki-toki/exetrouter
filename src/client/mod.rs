@@ -153,6 +153,11 @@ enum AccountCommand {
     Add,
     /// Reauthorize the same account through a browser.
     Reauth { id: i64 },
+    /// Spend one reset credit with interactive confirmation (standalone only).
+    Reset {
+        /// Positive local account ID or exact account email.
+        account: String,
+    },
     /// Disable a local OAuth account; retain credentials for reauthorization.
     Disable {
         id: i64,
@@ -229,6 +234,19 @@ async fn run() -> Result<()> {
         config::configure(&options, &mut connection)?;
         return Ok(());
     }
+    if let Some(CommandLine::Account {
+        command: AccountCommand::Reset { account },
+    }) = &options.command
+    {
+        if connection.mode != config::Mode::Standalone {
+            return Err("Account reset requires standalone mode. Server operators use exrd admin oauth reset on the server host.".into());
+        }
+        crate::reset::require_terminal(options.json)?;
+        connection.validate()?;
+        let upstream =
+            crate::local::reset_upstream(std::path::Path::new(&connection.state_dir)).await?;
+        return crate::reset::command(&upstream, account).await;
+    }
     let dashboard = matches!(options.command, None | Some(CommandLine::Tui));
     if dashboard && connection.validate().is_err() {
         if options.json {
@@ -288,6 +306,7 @@ async fn run_session(args: &Session, config_path: &std::path::Path) -> Result<()
             "Account management belongs to standalone mode. Server operators use exrd admin oauth.",
         )?;
         let value = match command {
+            AccountCommand::Reset { .. } => unreachable!("handled before starting local state"),
             AccountCommand::Platform { command } => {
                 crate::platform::command(&local.db, local.vault.clone(), command).await?
             }

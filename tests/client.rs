@@ -1686,8 +1686,11 @@ fn account_cli_rejects_personal_availability_rules_and_manual_redemption_before_
     }
     let help = client.run(&["account", "--help"]);
     let help = String::from_utf8_lossy(&help.stdout);
-    assert!(!help.contains("enable"));
-    assert!(!help.contains("set "));
+    for retired in ["enable", "set"] {
+        assert!(!help
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some(retired)));
+    }
     let output = client.run(&[
         "account",
         "set",
@@ -1704,6 +1707,9 @@ fn account_cli_rejects_personal_availability_rules_and_manual_redemption_before_
     ]);
     assert!(!output.status.success());
     assert!(!client.run(&["limits", "reset", "1"]).status.success());
+    let reset = client.run(&["account", "reset", "1"]);
+    assert!(!reset.status.success());
+    assert!(String::from_utf8_lossy(&reset.stderr).contains("requires standalone mode"));
     for (flag, value) in [
         ("--priority", "256"),
         ("--switch-at", "101"),
@@ -1714,6 +1720,35 @@ fn account_cli_rejects_personal_availability_rules_and_manual_redemption_before_
             .status
             .success());
     }
+    assert!(!client.dir.path().join("requests.log").exists());
+}
+
+#[test]
+fn standalone_reset_requires_interactive_confirmation_before_opening_state() {
+    let client = Client::configured();
+    let state = client.dir.path().join("reset-uninitialized");
+    for (flag, message) in [
+        (None, "requires an interactive local terminal"),
+        (Some("--json"), "--json is not supported"),
+        (Some("--yes"), "unexpected argument"),
+    ] {
+        let output = client
+            .command()
+            .args([
+                "--standalone",
+                "--state-dir",
+                state.to_str().unwrap(),
+                "account",
+                "reset",
+                "1",
+            ])
+            .args(flag)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+    }
+    assert!(!state.exists());
     assert!(!client.dir.path().join("requests.log").exists());
 }
 

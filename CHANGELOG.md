@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add interactive local reset-credit redemption through `exrd admin oauth reset` and standalone `exr account reset`. Require fresh weekly depletion and explicit confirmation, share automatic recovery fences, and leave automatic policy and remote management unchanged.
 - Add conditional weekly calendar estimates that include repeated short-window exhaustion pauses when fresh, aligned observations support both rates. Keep raw and historical pace separate, explicitly label unadjusted weekly fallbacks, validate the companion window in clients, and extend causal offline replay without changing routing, polling or reset-credit rules.
 - Make quota estimates explicitly conditional and expire recent pace when reported quota stops increasing; unchanged refreshes cannot renew activity or postpone a prediction from the same observation. Explain missing pace, changed/moving resets and expired estimates in CLI/TUI/Desktop while retaining exact reset boundaries. Label historical reset counts as observations, not verified cycles. No upstream timestamp normalization, routing/reset-rule changes or calibration claim is introduced.
 - Add private passive quota-history export and causal offline replay of the actual Rust forecast implementation, with chronological validation, paired consumption/ETA comparisons, interval-censored depletion labels and explicit sparse-history/legacy-comparison limitations. No runtime parameter tuning or deployment is performed by these tools.

@@ -31,7 +31,7 @@ fn valid(w: &Window, now: i64) -> bool {
         && w.reset_at.is_some_and(|at| at > now)
 }
 
-fn recovered(before: &[Window], current: &Observation, now: i64) -> bool {
+pub(super) fn recovered(before: &[Window], current: &Observation, now: i64) -> bool {
     let old_week = before.iter().find(|w| w.window_minutes == Some(10080));
     let new_week = current
         .windows

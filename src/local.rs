@@ -56,11 +56,61 @@ fn key(path: &Path) -> Result<[u8; 32]> {
         file.write_all(&value)?;
         file.sync_all()?;
     }
+    read_key(path)
+}
+fn read_key(path: &Path) -> Result<[u8; 32]> {
     private_file(path)?;
     fs::read(path)?
         .try_into()
         .map_err(|_| "local key must contain 32 bytes".into())
 }
+
+fn check_root(root: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(root)?;
+    if !meta.is_dir()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o077 != 0
+    {
+        return Err("Standalone state directory must be owned by you with mode 700".into());
+    }
+    Ok(())
+}
+
+fn owner(conn: &rusqlite::Connection, initialize: bool) -> Result<i64> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
+    if count == 0 && initialize {
+        return crate::create_user(conn, "standalone");
+    }
+    if count != 1 {
+        return Err("Standalone requires its own single-owner state directory".into());
+    }
+    let (id, name): (i64, String) = conn.query_row("SELECT id,name FROM users", [], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })?;
+    if name != "standalone" {
+        return Err("Standalone cannot reuse a managed server database".into());
+    }
+    Ok(id)
+}
+
+pub(crate) async fn reset_upstream(root: &Path) -> Result<Upstream> {
+    check_root(root)?;
+    let hmac = read_key(&root.join("hmac.key"))?;
+    let oauth_key = read_key(&root.join("oauth.key"))?;
+    if hmac == oauth_key {
+        return Err("Local encryption keys must differ".into());
+    }
+    let path = root.join("state.sqlite");
+    private_file(&path)?;
+    let db = Database::open_existing(path).await?;
+    db.call(|conn| owner(conn, false)).await?;
+    Upstream::new(
+        db,
+        oauth_key,
+        upstream::Config::new(upstream::BACKEND.into(), oauth::ISSUER.into(), false)?,
+    )
+}
+
 impl Local {
     pub async fn open(root: &Path, address: SocketAddr, serve: bool) -> Result<Arc<Self>> {
         Self::open_with(
@@ -84,13 +134,7 @@ impl Local {
             .recursive(true)
             .mode(0o700)
             .create(root)?;
-        let meta = fs::symlink_metadata(root)?;
-        if !meta.is_dir()
-            || meta.uid() != unsafe { libc::geteuid() }
-            || meta.permissions().mode() & 0o077 != 0
-        {
-            return Err("Standalone state directory must be owned by you with mode 700".into());
-        }
+        check_root(root)?;
         let mut attached = false;
         let lock = if serve {
             let path = root.join("runtime.lock");
@@ -126,25 +170,7 @@ impl Local {
         }
         private_file(&db_path)?;
         let db = Database::open(db_path).await?;
-        let user = db
-            .call(|conn| {
-                let count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
-                if count == 0 {
-                    return crate::create_user(conn, "standalone");
-                }
-                if count != 1 {
-                    return Err("Standalone requires its own single-owner state directory".into());
-                }
-                let (id, name): (i64, String) =
-                    conn.query_row("SELECT id,name FROM users", [], |r| {
-                        Ok((r.get(0)?, r.get(1)?))
-                    })?;
-                if name != "standalone" {
-                    return Err("Standalone cannot reuse a managed server database".into());
-                }
-                Ok(id)
-            })
-            .await?;
+        let user = db.call(|conn| owner(conn, true)).await?;
         let issuer = config.issuer.clone();
         let upstream = Arc::new(Upstream::new(db.clone(), oauth_key, config)?);
         let requested_address = address;

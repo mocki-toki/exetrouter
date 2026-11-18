@@ -1453,6 +1453,26 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
 }
 
 #[test]
+fn operator_reset_requires_a_terminal_before_opening_state() {
+    let dir = tempfile::tempdir().unwrap();
+    for (flag, message) in [
+        (None, "requires an interactive local terminal"),
+        (Some("--json"), "--json is not supported"),
+        (Some("--yes"), "unexpected argument"),
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_exrd"))
+            .current_dir(dir.path())
+            .args(["admin", "oauth", "reset", "1"])
+            .args(flag)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn restricted_gateway_rejects_personal_availability_routing_and_manual_resets() {
     let server = Server::start();
     let conn = rusqlite::Connection::open(server.dir.path().join("state.sqlite")).unwrap();

@@ -63,28 +63,51 @@ impl Database {
         Self::start(move || Ok(Connection::open(path)?)).await
     }
 
+    /// Open current state without creating it, migrating it or running startup recovery.
+    pub async fn open_existing(path: PathBuf) -> Result<Self> {
+        Self::start_prepared(move || {
+            let conn =
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            conn.busy_timeout(Duration::from_secs(5))?;
+            conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+            let version: usize = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            if version != SCHEMA_VERSION {
+                return Err(
+                    "This command requires an initialized database with the current schema".into(),
+                );
+            }
+            Ok(conn)
+        })
+        .await
+    }
+
     async fn start(open: impl FnOnce() -> Result<Connection> + Send + 'static) -> Result<Self> {
+        Self::start_prepared(move || {
+            let conn = open()?;
+            init(&conn)?;
+            Ok(conn)
+        })
+        .await
+    }
+
+    async fn start_prepared(
+        open: impl FnOnce() -> Result<Connection> + Send + 'static,
+    ) -> Result<Self> {
         let (sender, mut receiver) = mpsc::channel::<Job>(QUEUE_CAPACITY);
         let (ready, initialized) = oneshot::channel();
         thread::Builder::new()
             .name("exrd-db".into())
-            .spawn(move || {
-                let conn = open().and_then(|conn| {
-                    init(&conn)?;
-                    Ok(conn)
-                });
-                match conn {
-                    Ok(mut conn) => {
-                        if ready.send(Ok(())).is_err() {
-                            return;
-                        }
-                        while let Some(job) = receiver.blocking_recv() {
-                            job(&mut conn);
-                        }
+            .spawn(move || match open() {
+                Ok(mut conn) => {
+                    if ready.send(Ok(())).is_err() {
+                        return;
                     }
-                    Err(err) => {
-                        let _ = ready.send(Err(err));
+                    while let Some(job) = receiver.blocking_recv() {
+                        job(&mut conn);
                     }
+                }
+                Err(err) => {
+                    let _ = ready.send(Err(err));
                 }
             })?;
         initialized
