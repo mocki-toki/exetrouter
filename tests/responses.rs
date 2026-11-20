@@ -4028,6 +4028,67 @@ async fn terminal_with_timeout(
 }
 
 #[tokio::test]
+async fn http_failures_before_headers_and_during_body_correlate_with_the_client() {
+    let capture = tempfile::NamedTempFile::new().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(std::sync::Mutex::new(capture.reopen().unwrap()))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    for stage in ["before_headers", "read_body"] {
+        let mut fixture = Fixture::start(false).await;
+        fixture.upstream.models().await.unwrap();
+        if stage == "before_headers" {
+            fixture.mock_server.abort();
+            assert!((&mut fixture.mock_server).await.unwrap_err().is_cancelled());
+        } else {
+            *fixture.mock.mode.lock().unwrap() = "broken_http_body".into();
+        }
+        let mut response = fixture.post(request()).await;
+        let id = response.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        if stage == "before_headers" {
+            assert_eq!(response.status(), 502);
+        } else {
+            assert_eq!(response.status(), 200);
+            assert!(response.chunk().await.unwrap().is_some());
+            fixture.mock.release.notify_one();
+            assert!(response
+                .text()
+                .await
+                .unwrap()
+                .contains("upstream_interrupted"));
+        }
+        let logs = std::fs::read_to_string(capture.path()).unwrap();
+        let failures: Vec<Value> = logs
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap()["fields"].clone())
+            .filter(|f| f["request_id"] == id && f["stage"] == stage)
+            .collect();
+        assert_eq!(failures.len(), 1, "{stage}");
+        let f = &failures[0];
+        if stage == "before_headers" {
+            assert_eq!(f["event"], "upstream_http_post_failed");
+            assert_eq!(f["transport_error_kind"], "connection_refused");
+            assert!(f["elapsed_ms"].is_u64());
+        } else {
+            assert_eq!(f["event"], "upstream_stream_interrupted");
+            assert_eq!(f["events_seen"], 1);
+            assert!(f["duration_ms"].is_u64());
+            assert!(matches!(
+                f["transport_error_kind"].as_str(),
+                Some(
+                    "unexpected_eof" | "incomplete_http_message" | "connection_reset" | "http_body"
+                )
+            ));
+        }
+        assert!(!logs.contains("synthetic-private-body-error"));
+    }
+}
+
+#[tokio::test]
 async fn pool_native_ws_handshake_failure_sends_an_error_without_inference_or_account_replay() {
     for limited in [false, true] {
         let capture = tempfile::NamedTempFile::new().unwrap();
