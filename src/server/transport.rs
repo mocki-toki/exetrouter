@@ -622,13 +622,21 @@ impl RequestLog {
         }
         result
     }
-    fn interrupted(&self, reason: &'static str) {
+    fn post_failed(&self, error: &(dyn std::error::Error + 'static)) {
+        if let Some(failure) = error.downcast_ref::<crate::upstream::HttpPostFailure>() {
+            tracing::info!(event="upstream_http_post_failed", request_id=%self.id,
+                stage="before_headers", elapsed_ms=failure.elapsed_ms, transport_error_kind=failure.kind);
+        }
+    }
+
+    fn interrupted(&self, reason: &'static str, kind: Option<&'static str>) {
         let (last_event_kind, last_event_at_ms, last_event_age_ms) =
             self.last_event.fields(Instant::now());
         tracing::info!(event="upstream_stream_interrupted",request_id=%self.id,
             upstream_transport=self.transport,response_created=self.created,
             events_seen=self.events_seen,output_seen=self.output_seen,
-            last_event_kind,last_event_at_ms,last_event_age_ms,reason);
+            last_event_kind,last_event_at_ms,last_event_age_ms,reason,stage="read_body",
+            duration_ms=self.start.elapsed().as_millis() as u64,transport_error_kind=kind);
     }
     fn ws_interrupted(&self, failure: &WsInterruption, socket: Option<&WsRequestDiagnostics<'_>>) {
         let now = Instant::now();
@@ -1496,7 +1504,8 @@ pub(super) async fn http(
             };
             let response = match response {
                 Ok(response) => response,
-                Err(_) => {
+                Err(error_cause) => {
+                    log.post_failed(error_cause.as_ref());
                     let _ = log.finish("interrupted", Counters::default()).await;
                     return error(
                         StatusCode::BAD_GATEWAY,
@@ -1594,6 +1603,8 @@ pub(super) async fn http(
                                     Ok(log) => log,
                                     Err(_) => return ContextError::Storage.response(),
                                 };
+                                tracing::info!(event="upstream_http_quota_retry",
+                                    request_id=%id.0, attempt_request_id=%log.id);
                                 if log.sent().await.is_err() {
                                     let _ = log.finish("storage_error", Counters::default()).await;
                                     return ContextError::Storage.response();
@@ -1689,7 +1700,7 @@ pub(super) async fn http(
                         Ok(Some(frames))=>Some(frames),
                         Ok(None)=> {
                             end_reason="upstream_eof";
-                            log.interrupted("upstream_eof");
+                            log.interrupted("upstream_eof", None);
                             let _=log.health(Some(crate::health::Rejection::Temporary),"transport").await;
                             None
                         },
@@ -1697,8 +1708,11 @@ pub(super) async fn http(
                             end_reason="upstream_read_error";
                             if let Some(failure) = err.downcast_ref::<WsInterruption>() {
                                 log.ws_interrupted(failure, None);
+                            } else if let Some(http) = err.downcast_ref::<reqwest::Error>() {
+                                let reason = if http.is_timeout() { "read_timeout" } else { "upstream_read_error" };
+                                log.interrupted(reason, Some(crate::upstream::http_error_kind(http)));
                             } else {
-                                log.interrupted(if err.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_timeout) {"read_timeout"} else {"transport_or_protocol"});
+                                log.interrupted("upstream_invalid_sse_event", None);
                             }
                             if !err.downcast_ref::<WsInterruption>().is_some_and(WsInterruption::request_too_large) {
                                 let _=log.health(Some(crate::health::Rejection::Temporary),"transport").await;
@@ -1961,7 +1975,7 @@ pub(super) async fn embeddings(
         _=wait_for_stop(state.stopped.clone())=>Err("service stopping".into()),
         response=upstream.post(&account,"embeddings",&payload,None,log.health_order,Default::default())=>response,
     };
-    let Ok(response) = response else {
+    let Ok(response) = response.inspect_err(|error| log.post_failed(error.as_ref())) else {
         let _ = log.finish("interrupted", Counters::default()).await;
         return error(
             StatusCode::BAD_GATEWAY,
@@ -2312,8 +2326,9 @@ impl<'a> WsSource<'a> {
                         None => WsIncoming::HttpActivity,
                     }));
                 }
-                let chunk = response.chunk().await.map_err(|error| {
-                    WsInterruption::new(if error.is_timeout() {
+                let chunk = response.chunk().await.map_err(|error| WsInterruption {
+                    transport_error_kind: Some(crate::upstream::http_error_kind(&error)),
+                    ..WsInterruption::new(if error.is_timeout() {
                         "read_timeout"
                     } else {
                         "upstream_read_error"
@@ -3747,7 +3762,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                             let response = upstream.post(account, "responses", &dispatch,
                                 Some((upstream_identity_session.as_deref().expect("bound session"), upstream_thread.as_deref().expect("bound thread"))),
                                 log.health_order, crate::upstream::InferenceHeaders { turn_state:turn.as_ref(), responses_lite })
-                                .await.map_err(|_| WsInterruption::new("upstream_connection_failed").at("request_write"))?;
+                                .await.inspect_err(|error| log.post_failed(error.as_ref())).map_err(|_| WsInterruption::new("upstream_connection_failed").at("request_write"))?;
                             WsSource::http(response, &mut log).await
                         }).await?;
                         // As on HTTP, an unbindable header is omitted while the

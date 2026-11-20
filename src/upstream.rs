@@ -31,9 +31,91 @@ use tokio::sync::Mutex;
 // Catalog discovery revision; this does not claim full native-client compatibility.
 pub const CODEX_CLIENT_VERSION: &str = "0.169.0";
 pub const BACKEND: &str = "https://chatgpt.com/backend-api/codex";
+
+fn io_error_kind(error: &std::io::Error) -> Option<&'static str> {
+    use std::io::ErrorKind::*;
+    Some(match error.kind() {
+        ConnectionRefused => "connection_refused",
+        ConnectionReset => "connection_reset",
+        ConnectionAborted => "connection_aborted",
+        BrokenPipe => "broken_pipe",
+        TimedOut => "timed_out",
+        UnexpectedEof => "unexpected_eof",
+        NetworkUnreachable => "network_unreachable",
+        HostUnreachable => "host_unreachable",
+        _ => return None,
+    })
+}
+
+pub(crate) fn http_error_kind(error: &reqwest::Error) -> &'static str {
+    use std::error::Error;
+    if error.is_timeout() {
+        return "timed_out";
+    }
+    let connecting = error.is_connect();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if cause.is::<rustls::Error>() {
+            return "tls";
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            if let Some(kind) = io_error_kind(io) {
+                return kind;
+            }
+            // io::Error::source skips the wrapped error itself (including rustls).
+            source = io.get_ref().map(|e| e as &dyn Error);
+            continue;
+        }
+        if let Some(http) = cause.downcast_ref::<hyper::Error>() {
+            if http.is_incomplete_message() {
+                return "incomplete_http_message";
+            }
+            if http.is_parse() {
+                return "http_protocol";
+            }
+        }
+        // hyper-util's private ConnectError exposes only this fixed DNS marker.
+        if connecting && cause.source().is_some() && cause.to_string() == "dns error" {
+            return "dns";
+        }
+        source = cause.source();
+    }
+    if connecting {
+        "connect"
+    } else if error.is_builder() {
+        "request_build"
+    } else if error.is_body() || error.is_decode() {
+        "http_body"
+    } else {
+        "http_request"
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct HttpPostFailure {
+    pub(crate) kind: &'static str,
+    pub(crate) elapsed_ms: u64,
+}
+
+impl std::fmt::Display for HttpPostFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("upstream connection failed")
+    }
+}
+impl std::error::Error for HttpPostFailure {}
+
+async fn send_inference_post(
+    request: reqwest::RequestBuilder,
+) -> std::result::Result<reqwest::Response, HttpPostFailure> {
+    let start = std::time::Instant::now();
+    request.send().await.map_err(|error| HttpPostFailure {
+        elapsed_ms: start.elapsed().as_millis() as u64,
+        kind: http_error_kind(&error),
+    })
+}
+
 pub(crate) fn websocket_error_kind(error: &codex_tungstenite::Error) -> &'static str {
     use codex_websocket::tungstenite::{error::ProtocolError, Error};
-    use std::io::ErrorKind;
     match error {
         Error::ConnectionClosed => "connection_closed",
         Error::AlreadyClosed => "already_closed",
@@ -44,15 +126,7 @@ pub(crate) fn websocket_error_kind(error: &codex_tungstenite::Error) -> &'static
         {
             "tls"
         }
-        Error::Io(error) => match error.kind() {
-            ErrorKind::ConnectionRefused => "connection_refused",
-            ErrorKind::ConnectionReset => "connection_reset",
-            ErrorKind::ConnectionAborted => "connection_aborted",
-            ErrorKind::BrokenPipe => "broken_pipe",
-            ErrorKind::TimedOut => "timed_out",
-            ErrorKind::UnexpectedEof => "unexpected_eof",
-            _ => "io_other",
-        },
+        Error::Io(error) => io_error_kind(error).unwrap_or("io_other"),
         Error::Tls(_) => "tls",
         Error::Capacity(_) => "capacity",
         Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
@@ -1062,7 +1136,7 @@ impl Upstream {
                 prepared = crate::platform::inference_payload(body, path == "responses/compact")?;
                 &prepared
             };
-            let response = self
+            let request = self
                 .inference_client
                 .post(format!("{}/{path}", self.config.platform_base))
                 .bearer_auth(&account.credentials.access_token)
@@ -1074,10 +1148,8 @@ impl Upstream {
                         "text/event-stream"
                     },
                 )
-                .json(body)
-                .send()
-                .await;
-            return match response {
+                .json(body);
+            return match send_inference_post(request).await {
                 Ok(response) => {
                     let status = response.status().as_u16();
                     if status == 401 {
@@ -1095,7 +1167,7 @@ impl Upstream {
                     }
                     Ok(response)
                 }
-                Err(_) => {
+                Err(failure) => {
                     let _ = self
                         .failure(
                             account,
@@ -1105,7 +1177,7 @@ impl Upstream {
                             None,
                         )
                         .await;
-                    Err("upstream connection failed".into())
+                    Err(failure.into())
                 }
             };
         }
@@ -1124,14 +1196,12 @@ impl Upstream {
         if let Some(session) = session {
             session_headers(&mut headers, session)?;
         }
-        let result = self
+        let request = self
             .inference_client
             .post(format!("{}/{path}", self.config.base_url))
             .headers(headers)
-            .json(body)
-            .send()
-            .await;
-        match result {
+            .json(body);
+        match send_inference_post(request).await {
             Ok(response) => {
                 let status = response.status().as_u16();
                 let observed = if status == 401 {
@@ -1154,7 +1224,7 @@ impl Upstream {
                 }
                 Ok(response)
             }
-            Err(_) => {
+            Err(failure) => {
                 let _ = self
                     .failure(
                         account,
@@ -1164,7 +1234,7 @@ impl Upstream {
                         None,
                     )
                     .await;
-                Err("upstream connection failed".into())
+                Err(failure.into())
             }
         }
     }
@@ -1654,6 +1724,27 @@ fn store_model_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_dns_lookup_has_a_fixed_http_category() {
+        use reqwest::dns::{Name, Resolve, Resolving};
+        struct UnavailableDns;
+        impl Resolve for UnavailableDns {
+            fn resolve(&self, _: Name) -> Resolving {
+                Box::pin(async { Err("private resolver detail".into()) })
+            }
+        }
+        let client = Client::builder()
+            .no_proxy()
+            .dns_resolver(std::sync::Arc::new(UnavailableDns))
+            .build()
+            .unwrap();
+        let failure = send_inference_post(client.post("http://upstream.invalid/responses"))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, "dns");
+        assert_eq!(failure.to_string(), "upstream connection failed");
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
