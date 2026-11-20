@@ -1625,28 +1625,7 @@ pub(super) async fn http(
                         }
                     }
                 }
-                let response_status = if status.as_u16() == 401 {
-                    StatusCode::BAD_GATEWAY
-                } else {
-                    status
-                };
-                let mut failure = error(
-                    response_status,
-                    if status.as_u16() == 401 {
-                        "upstream_authentication_error"
-                    } else {
-                        "upstream_rejected"
-                    },
-                    if status.as_u16() == 401 {
-                        "upstream credentials rejected; a separate new request may refresh them"
-                    } else {
-                        "upstream rejected the request"
-                    },
-                );
-                if let Some(value) = headers.get("retry-after") {
-                    failure.headers_mut().insert("retry-after", value.clone());
-                }
-                return failure;
+                return http_refusal(status, &headers);
             }
             break response;
         };
@@ -1920,6 +1899,179 @@ pub(super) async fn http(
     response
 }
 
+fn http_refusal(status: StatusCode, headers: &HeaderMap) -> Response {
+    let mut failure = if status == StatusCode::UNAUTHORIZED {
+        error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_authentication_error",
+            "upstream credentials rejected; a separate new request may refresh them",
+        )
+    } else {
+        error(status, "upstream_rejected", "upstream rejected the request")
+    };
+    if let Some(value) = headers.get("retry-after") {
+        failure.headers_mut().insert("retry-after", value.clone());
+    }
+    failure
+}
+
+pub(super) async fn embeddings(
+    state: Arc<AppState>,
+    identity: Identity,
+    id: RequestId,
+    payload: Value,
+    model: String,
+) -> Response {
+    let Some(upstream) = &state.upstream else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_unavailable",
+            "Platform route unavailable",
+        );
+    };
+    if payload["input"].is_null() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "input is required",
+        );
+    }
+    let _permit = match state.generation_slots.acquire(identity.user_id) {
+        Ok(permit) => permit,
+        Err(full) => return concurrency_error(full),
+    };
+    let account = match upstream.select_embedding(&model).await {
+        Ok(account) => account,
+        Err(crate::upstream::SelectError::Cooldown(until)) => return cooldown_error(until),
+        Err(crate::upstream::SelectError::Backoff(until)) => return backoff_error(until, &id),
+        Err(crate::upstream::SelectError::ModelUnavailable) => {
+            return error(
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+                "embedding model unavailable",
+            )
+        }
+        Err(_) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "upstream_unavailable",
+                "Platform route unavailable",
+            )
+        }
+    };
+    let Ok(mut log) = RequestLog::begin(
+        &state,
+        record(&identity, &id, &account, &model, "embeddings", "http_json"),
+        "platform_http_json",
+        &account,
+        &[],
+    )
+    .await
+    else {
+        return ContextError::Storage.response();
+    };
+    if log.sent().await.is_err() {
+        return ContextError::Storage.response();
+    }
+    let response = tokio::select! {
+        _=wait_for_stop(state.stopped.clone())=>Err("service stopping".into()),
+        response=upstream.post(&account,"embeddings",&payload,None,log.health_order,Default::default())=>response,
+    };
+    let Ok(response) = response else {
+        let _ = log.finish("interrupted", Counters::default()).await;
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_connection_error",
+            "upstream interrupted",
+        );
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let headers = response.headers().clone();
+        let body = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::oauth::read_json(response, 65536),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok);
+        log.rejected(body.as_ref(), Some(status.as_u16()));
+        let now = chrono::Utc::now().timestamp();
+        let _ = log
+            .quota(
+                crate::quota::http(&headers, status.as_u16(), body.as_ref(), now),
+                now,
+            )
+            .await;
+        if log
+            .finish("upstream_rejected", Counters::default())
+            .await
+            .is_err()
+        {
+            return ContextError::Storage.response();
+        }
+        return http_refusal(status, &headers);
+    }
+    let read = tokio::select! {
+        _=wait_for_stop(state.stopped.clone())=>Err("service stopping".into()),
+        value=crate::oauth::read_json(response,crate::payload::PROJECTED_OUTPUT_BYTES)=>value,
+    };
+    let Ok(value) = read else {
+        let _ = log.finish("interrupted", Counters::default()).await;
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_protocol_error",
+            "embedding response unavailable",
+        );
+    };
+    let input = value
+        .pointer("/usage/prompt_tokens")
+        .and_then(Value::as_i64)
+        .filter(|v| *v >= 0);
+    let valid = value["object"] == "list"
+        && value["model"] == model
+        && value["data"].as_array().is_some_and(|rows| {
+            !rows.is_empty()
+                && rows.iter().all(|row| {
+                    row["object"] == "embedding"
+                        && row["index"].is_u64()
+                        && (row["embedding"].as_str().is_some_and(|s| !s.is_empty())
+                            || row["embedding"]
+                                .as_array()
+                                .is_some_and(|v| !v.is_empty() && v.iter().all(Value::is_number)))
+                })
+        });
+    let counters = Counters {
+        input,
+        output: Some(0),
+        cached_input: Some(0),
+        reasoning_output: Some(0),
+    };
+    if log
+        .finish(
+            if valid {
+                "completed"
+            } else {
+                "invalid_response"
+            },
+            counters,
+        )
+        .await
+        .is_err()
+    {
+        return ContextError::Storage.response();
+    }
+    if !valid {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "upstream_protocol_error",
+            "invalid embedding response",
+        );
+    }
+    let _ = log.health(None, "success").await;
+    unary_json(value, &log, identity.observe_account)
+}
+
 /// Public Platform compaction is unary and may retain visible messages beside
 /// its checkpoint. Do not project it through Codex's single-checkpoint adapter.
 async fn platform_compact(
@@ -1987,6 +2139,10 @@ async fn platform_compact(
             "invalid compaction context",
         );
     }
+    unary_json(value, log, observe_account)
+}
+
+fn unary_json(value: Value, log: &RequestLog, observe_account: bool) -> Response {
     let mut response = Json(value).into_response();
     if observe_account {
         response.headers_mut().insert(

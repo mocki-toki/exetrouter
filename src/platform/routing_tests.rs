@@ -410,6 +410,67 @@ impl Api {
 }
 
 #[tokio::test]
+async fn embeddings_are_discovered_and_charged_only_to_the_observed_project() {
+    let (dir, db, mock, upstream) = fixture().await;
+    mock.state.lock().unwrap().response_models.extend([
+        "text-embedding-3-small".into(),
+        "text-embedding-3-large".into(),
+    ]);
+    inventory::read(
+        &db,
+        Vault::new([7; 32]),
+        &client::Client::new(&mock.base, true).unwrap(),
+        1,
+    )
+    .await
+    .unwrap();
+    let api = Api::open(&dir, &db, upstream).await;
+    let models: Value = reqwest::Client::new()
+        .get(format!("{}/v1/models", api.base))
+        .bearer_auth(&api.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entries: Vec<_> = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["capabilities"] == json!(["embeddings"]))
+        .collect();
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|m| m["source"] == "platform"));
+    let body = json!({"model":"text-embedding-3-small","input":[[1,2,3]],"encoding_format":"base64","dimensions":1});
+    let result = api.post("embeddings", &body).send().await.unwrap();
+    assert_eq!(result.status(), StatusCode::OK);
+    assert!(result.headers().contains_key("x-exetrouter-account"));
+    assert_eq!(
+        result.json::<Value>().await.unwrap()["data"][0]["embedding"],
+        "AACAPw=="
+    );
+    for (path, model) in [
+        ("responses", "text-embedding-3-small"),
+        ("embeddings", "gpt-6.1-sol"),
+        ("embeddings", "text-embedding-ada-002"),
+    ] {
+        assert_eq!(
+            api.post(path, &json!({"model":model,"input":"test"}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    db.call(|conn| {let row:(i64,String,i64,i64,i64)=conn.query_row("SELECT account_id,upstream_transport,input_tokens,output_tokens,usd_nanos FROM usage_events JOIN platform_request_costs ON usage_id=usage_events.id WHERE api_surface='embeddings'",[],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;assert_eq!(row,(1,"platform_http_json".into(),7,0,140));Ok(())}).await.unwrap();
+    let observed = mock.state.lock().unwrap();
+    assert_eq!(observed.inferences, vec![body]);
+    assert_eq!(observed.native_inferences, 0);
+}
+
+#[tokio::test]
 async fn shared_api_routes_platform_json_sse_chat_compaction_and_ws_with_parent_usage_and_context()
 {
     use codex_websocket::tungstenite::{client::IntoClientRequest, Message};

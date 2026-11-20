@@ -46,7 +46,11 @@ pub(super) fn parse(value: &Value) -> Result<Vec<Model>> {
             object: "model",
             display_name: catalog::display_name(id),
             source: "platform",
-            capabilities: Vec::new(),
+            capabilities: if catalog::embedding_model(id) {
+                vec!["embeddings".into()]
+            } else {
+                Vec::new()
+            },
         });
     }
     models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -87,9 +91,9 @@ pub(super) fn render(value: &Value) -> String {
     let mut text = format!(
         "Platform model availability\n{}\n",
         if value["routing_enabled"] == true {
-            "Only reviewed Responses models are eligible for routing; other entries are availability only."
+            "Only reviewed Responses and embedding models are eligible for routing; other entries are availability only."
         } else {
-            "Availability only; no reviewed Responses model is available for routing."
+            "Availability only; no reviewed model is available for routing."
         }
     );
     for row in value["data"].as_array().into_iter().flatten() {

@@ -321,7 +321,7 @@ pub(super) async fn reconcile(
         return Err("existing exetrouter key secret unavailable".into());
     }
     begin(db, access, "create_key").await?;
-    let value=client.request(access,Method::POST,&format!("/organization/projects/{project}/service_accounts/{service_id}/api_keys"),&[],Some(json!({"name":"exetrouter","expires_in_seconds":LIFETIME,"scopes":["api.model.read","api.responses.write"]}))).await?;
+    let value=client.request(access,Method::POST,&format!("/organization/projects/{project}/service_accounts/{service_id}/api_keys"),&[],Some(json!({"name":"exetrouter","expires_in_seconds":LIFETIME,"scopes":["api.model.read","api.responses.write","api.model.embeddings.request"]}))).await?;
     save_created(db, vault, access, project, service_id, value, false).await?;
     let checked = super::inventory::read(db, vault.clone(), client, access.account).await;
     if checked.is_err() {

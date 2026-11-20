@@ -88,7 +88,7 @@ async fn reply(
         state.reads += 1;
     }
     let path = uri.path();
-    if matches!(path, "/responses" | "/responses/compact") {
+    if matches!(path, "/responses" | "/responses/compact" | "/embeddings") {
         if headers.get("authorization").unwrap() == "Bearer synthetic-access" {
             state.native_inferences += 1;
             return (
@@ -122,6 +122,9 @@ async fn reply(
         }
         if path == "/responses/compact" {
             return Json(json!({"object":"response.compaction","id":"cmp_fixture","created_at":now,"output":[{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic compacted prefix"}]},{"type":"compaction","encrypted_content":"platform-checkpoint"}],"usage":{"input_tokens":8,"output_tokens":3,"total_tokens":11}})).into_response();
+        }
+        if path == "/embeddings" {
+            return Json(json!({"object":"list","model":model,"data":[{"object":"embedding","index":0,"embedding":"AACAPw=="}],"usage":{"prompt_tokens":7,"total_tokens":7}})).into_response();
         }
         let id = format!("resp_platform_{}", state.inferences.len());
         let events = [
@@ -186,7 +189,11 @@ async fn reply(
         assert_eq!(body["name"], "exetrouter");
         assert_eq!(
             body["scopes"],
-            json!(["api.model.read", "api.responses.write"])
+            json!([
+                "api.model.read",
+                "api.responses.write",
+                "api.model.embeddings.request"
+            ])
         );
         state.key = true;
         state.created_at = Some(now);
