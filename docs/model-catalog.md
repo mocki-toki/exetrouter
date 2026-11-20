@@ -37,6 +37,8 @@ Schema 6 saves an allowlist of Codex ModelInfo fields: context/compaction limits
 
 Duplicate Codex IDs use minimum numeric limits, intersected reasoning/modalities and positive capabilities enabled only when all accounts support them. Missing/false supports_experimental_context disables that shared capability. Incompatible instructions/tool modes or request-shaping fields reject client export with model_metadata_unavailable; the ordinary ID list remains accessible.
 
+Optional `additional_speed_tiers` and `service_tiers` advertise only entries shared by all accounts offering the model. A missing list contributes no tiers. Different optional tiers do not discard the shared context limits or capabilities. This does not override inference service-tier policy or relax checks on incompatible defaults.
+
 OpenCode receives reported context/input headroom, reasoning variants and modalities. Unreported output limits export as `output: 0`, its unknown-limit convention. Its output reserve is a heuristic; backend support for requested output caps is validated upstream. Public API prices are not inferred.
 
 ```sh
