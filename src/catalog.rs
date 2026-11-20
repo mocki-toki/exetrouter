@@ -5,6 +5,13 @@ use serde_json::{json, Map, Value};
 
 pub(crate) const CACHE_TTL_SECONDS: i64 = 15 * 60;
 
+pub(crate) fn embedding_model(id: &str) -> bool {
+    matches!(
+        id,
+        "text-embedding-3-small" | "text-embedding-3-large" | "text-embedding-ada-002"
+    )
+}
+
 pub(crate) fn fresh(updated_at: Option<i64>, now: i64) -> bool {
     updated_at.is_some_and(|at| at <= now && now.saturating_sub(at) < CACHE_TTL_SECONDS)
 }
@@ -326,6 +333,7 @@ impl Model {
 pub fn codex(models: &[Model]) -> Result<Value> {
     let metadata = models
         .iter()
+        .filter(|model| !embedding_model(&model.id))
         .map(|model| {
             let value = model
                 .metadata
@@ -350,7 +358,7 @@ pub fn opencode_v2(models: &[Model]) -> Result<Value> {
 
 fn opencode_projection(models: &[Model], v1: bool) -> Result<Value> {
     let mut entries = Map::new();
-    for model in models {
+    for model in models.iter().filter(|model| !embedding_model(&model.id)) {
         let meta = model
             .metadata
             .as_ref()

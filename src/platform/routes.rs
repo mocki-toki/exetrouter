@@ -18,6 +18,9 @@ pub(crate) fn route_id(owner: i64) -> Result<i64> {
 }
 
 pub(crate) fn model_spending_permitted(conn: &Connection, model: &str) -> Result<bool> {
+    if catalog::embedding_model(model) {
+        return Ok(true); // No Codex embeddings endpoint, independent of its catalog freshness.
+    }
     let codex = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM oauth_models WHERE model=?1)",
         [model],
@@ -37,6 +40,9 @@ pub(crate) fn model_spending_permitted(conn: &Connection, model: &str) -> Result
 /// Shared by admission and passive diagnostics: only actual native exhaustion
 /// authorizes replacing a known Codex route; operational/auth failures do not.
 pub(crate) fn fallback_eligible(conn: &Connection, model: &str, now: i64) -> Result<bool> {
+    if catalog::embedding_model(model) {
+        return Ok(true);
+    }
     if !model_spending_permitted(conn, model)? {
         return Ok(false);
     }
@@ -121,6 +127,17 @@ pub(crate) fn available(conn: &Connection, owner: i64, now: i64) -> Result<bool>
 /// Reviewed public Responses models, intersected with actual key availability.
 /// Unknown inventory entries are never promoted by guessing endpoint support.
 fn descriptor(id: &str) -> Option<catalog::Model> {
+    if catalog::embedding_model(id) {
+        return Some(catalog::Model {
+            id: id.into(),
+            object: "model".into(),
+            owned_by: "openai".into(),
+            display_name: catalog::display_name(id),
+            source: "platform".into(),
+            capabilities: vec!["embeddings".into()],
+            metadata: None,
+        });
+    }
     let none = match id {
         "gpt-6.1-sol" | "gpt-6-astra" => false,
         "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna" | "gpt-5.6-sol" | "gpt-5.6-terra"

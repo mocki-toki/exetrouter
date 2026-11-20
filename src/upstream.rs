@@ -265,7 +265,10 @@ impl Upstream {
             match result {
                 Ok(models) => {
                     successful += 1;
-                    for model in models {
+                    for model in models
+                        .into_iter()
+                        .filter(|m| !crate::catalog::embedding_model(&m.id))
+                    {
                         match available.entry(model.id.clone()) {
                             std::collections::btree_map::Entry::Vacant(entry) => {
                                 entry.insert(model);
@@ -887,6 +890,17 @@ impl Upstream {
         account: &Account,
         model: &str,
     ) -> std::result::Result<(), SelectError> {
+        if crate::catalog::embedding_model(model) {
+            return Err(SelectError::ModelUnavailable);
+        }
+        self.validate_model(account, model).await
+    }
+
+    async fn validate_model(
+        &self,
+        account: &Account,
+        model: &str,
+    ) -> std::result::Result<(), SelectError> {
         if account.info.id < 0 {
             let requested = model.to_owned();
             let permitted = self
@@ -973,10 +987,21 @@ impl Upstream {
         order: i64,
         options: InferenceHeaders<'_>,
     ) -> Result<reqwest::Response> {
+        let embedding = path == "embeddings";
+        if embedding
+            != body["model"]
+                .as_str()
+                .is_some_and(crate::catalog::embedding_model)
+            || (embedding && account.info.id >= 0)
+        {
+            return Err("model unavailable for this endpoint".into());
+        }
         if account.info.id < 0 {
             // Fixed public Responses endpoint, working key only. Codex account,
             // turn/session/Lite headers and the caller's bearer never cross over.
-            if !matches!(path, "responses" | "responses/compact") || body["generate"] == false {
+            if !matches!(path, "responses" | "responses/compact" | "embeddings")
+                || body["generate"] == false
+            {
                 return Err("unsupported Platform operation".into());
             }
             self.check_cooldown(account)
@@ -993,20 +1018,26 @@ impl Upstream {
             {
                 return Err("Platform spending is disabled for Codex models".into());
             }
-            let body = crate::platform::inference_payload(body, path == "responses/compact")?;
+            let prepared;
+            let body = if embedding {
+                body
+            } else {
+                prepared = crate::platform::inference_payload(body, path == "responses/compact")?;
+                &prepared
+            };
             let response = self
                 .inference_client
                 .post(format!("{}/{path}", self.config.platform_base))
                 .bearer_auth(&account.credentials.access_token)
                 .header(
                     reqwest::header::ACCEPT,
-                    if path == "responses/compact" {
+                    if path != "responses" {
                         "application/json"
                     } else {
                         "text/event-stream"
                     },
                 )
-                .json(&body)
+                .json(body)
                 .send()
                 .await;
             return match response {

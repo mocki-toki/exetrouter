@@ -118,7 +118,10 @@ by remote/standalone CLI, GUI and TUI. No web-session credentials are required.
 
 The selected project uses the uniquely named `exetrouter` service account and
 an API key named `exetrouter`, with a requested lifetime of exactly 30 days and
-only model-list/Responses scopes. A missing service account is created with its
+model-list, Responses and Embeddings scopes. An existing restricted working key needs the
+Embeddings Request permission to use `/v1/embeddings`; upgrading the router does not
+change or rotate that key. Enable the permission in the project's key settings or
+wait for normal managed renewal. A missing service account is created with its
 default `member` membership, without a separate RBAC role assignment. Its initial
 bootstrap key requests the minimum supported one-second lifetime. The returned
 secret is encrypted and committed atomically with creation confirmation, marked
@@ -169,7 +172,7 @@ The bounded, atomic inventory contains at most 2,048 unique model IDs with norma
 display names. Owner names, arbitrary metadata and payloads are discarded. The
 public Models API establishes availability only, not endpoint capabilities or a
 cash balance; no capability is guessed from a model name. The operator inventory
-retains all observed IDs. Only the intersection with reviewed public Responses
+retains all observed IDs. Only the intersection with reviewed public Responses and [embedding](https://developers.openai.com/api/reference/resources/embeddings)
 descriptors enters routing; JSON `routing_enabled` indicates whether that
 intersection is nonempty, not whether a particular request has available funds.
 

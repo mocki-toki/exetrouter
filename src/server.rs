@@ -535,6 +535,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/responses", get(transport::websocket).post(responses))
         .route("/v1/responses/compact", post(compact))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/embeddings", post(embeddings))
         .route("/v1/images/generations", post(native::generate))
         .route("/v1/images/edits", post(native::edit))
         .route("/v1/alpha/search", post(native::search))
@@ -761,6 +762,16 @@ async fn chat_completions(
     model_request(state, identity, id, headers, payload, "chat_completions").await
 }
 
+async fn embeddings(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Extension(id): Extension<RequestId>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<Value>, JsonRejection>,
+) -> Response {
+    model_request(state, identity, id, headers, payload, "embeddings").await
+}
+
 async fn model_request(
     state: Arc<AppState>,
     identity: Identity,
@@ -817,6 +828,9 @@ async fn model_request(
         );
     }
     let model = model.to_owned();
+    if surface == "embeddings" {
+        return transport::embeddings(state, identity, id, payload, model).await;
+    }
     if let Some(upstream) = &state.upstream {
         match upstream.has_active_account().await {
             Ok(true) => {
