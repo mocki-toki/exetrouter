@@ -17,6 +17,7 @@ use codex_websocket::tungstenite::Message as UpstreamMessage;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::{HashSet, VecDeque};
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 const WS_PING_INTERVAL: Duration = Duration::from_secs(15);
 const WS_PRE_RESPONSE_SILENCE: Duration = Duration::from_secs(90);
@@ -135,31 +136,8 @@ impl WsInterruption {
     }
 
     fn transport(reason: &'static str, error: &codex_websocket::tungstenite::Error) -> Self {
-        use codex_websocket::tungstenite::{error::ProtocolError, Error};
-        use std::io::ErrorKind;
-        let kind = match error {
-            Error::ConnectionClosed => "connection_closed",
-            Error::AlreadyClosed => "already_closed",
-            Error::Io(error) => match error.kind() {
-                ErrorKind::ConnectionReset => "connection_reset",
-                ErrorKind::ConnectionAborted => "connection_aborted",
-                ErrorKind::BrokenPipe => "broken_pipe",
-                ErrorKind::TimedOut => "timed_out",
-                ErrorKind::UnexpectedEof => "unexpected_eof",
-                _ => "io_other",
-            },
-            Error::Tls(_) => "tls",
-            Error::Capacity(_) => "capacity",
-            Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
-                "reset_without_close_handshake"
-            }
-            Error::Protocol(_) => "protocol",
-            Error::WriteBufferFull(_) => "write_buffer_full",
-            Error::Utf8(_) => "utf8",
-            _ => "other",
-        };
         Self {
-            transport_error_kind: Some(kind),
+            transport_error_kind: Some(crate::upstream::websocket_error_kind(error)),
             ..Self::new(reason)
         }
     }
@@ -1426,7 +1404,7 @@ pub(super) async fn http(
                 let _=log.finish("interrupted", Counters::default()).await;
                 return error(StatusCode::SERVICE_UNAVAILABLE, "service_stopping", "service stopping");
             },
-            socket=upstream.websocket(&account,(&session,&thread),true,&dispatch_payload,responses_lite)=>match socket {
+            socket=upstream.websocket(&account,(&session,&thread),true,&dispatch_payload,responses_lite).instrument(tracing::info_span!("upstream_handshake", request_id=%id.0))=>match socket {
                 Ok((socket, _headers))=>Some(socket),
                 Err(crate::upstream::SocketError::Cooldown(until))=> {
                     let _=log.finish("local_rejected", Counters::default()).await;
@@ -2633,6 +2611,20 @@ struct ClientWsLog {
     close_code: Option<u16>,
 }
 
+impl ClientWsLog {
+    fn handshake_span(&self) -> tracing::Span {
+        tracing::info_span!("upstream_handshake", client_connection_id=%self.id.0, frame_sequence=self.frames)
+    }
+
+    fn handshake_unavailable(&self, message: &str) -> String {
+        let detail = format!(
+            "{message}; reconnect with full context (client_connection_id={}, frame_sequence={})",
+            self.id.0, self.frames
+        );
+        ws_error("upstream_websocket_unavailable", &detail)
+    }
+}
+
 impl Drop for ClientWsLog {
     fn drop(&mut self) {
         tracing::info!(event="client_websocket_closed",client_connection_id=%self.id.0,
@@ -3221,6 +3213,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                             .expect("validated context"),
                                             responses_lite,
                                         )
+                                        .instrument(client_log.handshake_span())
                                         .await
                                 } else {
                                     // A proactive preference may fall back to the existing
@@ -3237,6 +3230,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                             .expect("validated context"),
                                             responses_lite,
                                         )
+                                        .instrument(client_log.handshake_span())
                                         .await
                                         .map(|(socket, metadata)| (account, socket, metadata))
                                 };
@@ -3298,7 +3292,13 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                         continue 'frames;
                                     }
                                     Err(_) => {
-                                        let _ = send_client(&mut client, ws_error("upstream_websocket_unavailable", "replacement handshake failed before inference; reconnect with full context")).await;
+                                        let _ = send_client(
+                                            &mut client,
+                                            client_log.handshake_unavailable(
+                                                "replacement handshake failed before inference",
+                                            ),
+                                        )
+                                        .await;
                                         continue 'frames;
                                     }
                                 }
@@ -3390,6 +3390,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                             .expect("validated context"),
                         responses_lite,
                     )
+                    .instrument(client_log.handshake_span())
                     .await
                 {
                     Ok(socket) => socket,
@@ -3424,7 +3425,13 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         break 'frames;
                     }
                     Err(_) => {
-                        let _=send_client(&mut client,ws_error("upstream_websocket_unavailable","upstream handshake failed before inference; reconnect with full context")).await;
+                        let _ = send_client(
+                            &mut client,
+                            client_log.handshake_unavailable(
+                                "upstream handshake failed before inference",
+                            ),
+                        )
+                        .await;
                         break 'frames;
                     }
                 };
@@ -3633,6 +3640,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                             .expect("validated context"),
                         responses_lite,
                     )
+                    .instrument(client_log.handshake_span())
                     .await
                 {
                     Ok((replacement, headers)) => {
@@ -3666,8 +3674,13 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         break 'frames;
                     }
                     Err(_) => {
-                        let _ = send_client(&mut client, ws_error("upstream_websocket_unavailable",
-                            "replacement handshake failed before inference; reconnect with full context")).await;
+                        let _ = send_client(
+                            &mut client,
+                            client_log.handshake_unavailable(
+                                "replacement handshake failed before inference",
+                            ),
+                        )
+                        .await;
                         continue 'frames;
                     }
                 }
@@ -3966,6 +3979,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                     .expect("validated context"),
                                     responses_lite,
                                 )
+                                .instrument(client_log.handshake_span())
                                 .await
                             {
                                 if let Err(err) = transfer_context(
@@ -4314,6 +4328,13 @@ mod heartbeat_tests {
                     private,
                 )),
                 "connection_reset",
+            ),
+            (
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    rustls::Error::General(private.into()),
+                )),
+                "tls",
             ),
             (Error::Utf8(private.into()), "utf8"),
             (
