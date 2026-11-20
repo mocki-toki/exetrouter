@@ -4030,6 +4030,12 @@ async fn terminal_with_timeout(
 #[tokio::test]
 async fn pool_native_ws_handshake_failure_sends_an_error_without_inference_or_account_replay() {
     for limited in [false, true] {
+        let capture = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(std::sync::Mutex::new(capture.reopen().unwrap()))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
         let fixture = Fixture::start(false).await;
         fixture.add_account(&["gpt-test"], false).await;
         fixture
@@ -4058,6 +4064,30 @@ async fn pool_native_ws_handshake_failure_sends_an_error_without_inference_or_ac
             }
         );
         assert!(!error.to_string().contains("private handshake error"));
+        let logs = std::fs::read_to_string(capture.path()).unwrap();
+        let failures: Vec<Value> = logs
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|row| row["fields"]["event"] == "upstream_websocket_handshake_failed")
+            .collect();
+        assert_eq!(failures.len(), if limited { 2 } else { 1 });
+        for row in failures {
+            let fields = &row["fields"];
+            assert_eq!(fields["reason"], "http_status");
+            assert_eq!(fields["http_status"], if limited { 429 } else { 503 });
+            assert!(fields["elapsed_ms"].is_u64());
+            let span = &row["span"];
+            assert_eq!(span["frame_sequence"], 1);
+            let id = span["client_connection_id"].as_str().unwrap();
+            assert_eq!(hex::decode(id).unwrap().len(), 16);
+            if !limited {
+                assert!(error["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("client_connection_id={id}, frame_sequence=1")));
+            }
+        }
+        assert!(!logs.contains("private handshake error"));
         if limited {
             assert_eq!(error["status"], 429);
             assert!(error["error"]["retry_after"].as_i64().unwrap() > 0);

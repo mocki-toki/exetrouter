@@ -31,6 +31,43 @@ use tokio::sync::Mutex;
 // Catalog discovery revision; this does not claim full native-client compatibility.
 pub const CODEX_CLIENT_VERSION: &str = "0.169.0";
 pub const BACKEND: &str = "https://chatgpt.com/backend-api/codex";
+pub(crate) fn websocket_error_kind(error: &codex_tungstenite::Error) -> &'static str {
+    use codex_websocket::tungstenite::{error::ProtocolError, Error};
+    use std::io::ErrorKind;
+    match error {
+        Error::ConnectionClosed => "connection_closed",
+        Error::AlreadyClosed => "already_closed",
+        Error::Io(error)
+            if error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<rustls::Error>()) =>
+        {
+            "tls"
+        }
+        Error::Io(error) => match error.kind() {
+            ErrorKind::ConnectionRefused => "connection_refused",
+            ErrorKind::ConnectionReset => "connection_reset",
+            ErrorKind::ConnectionAborted => "connection_aborted",
+            ErrorKind::BrokenPipe => "broken_pipe",
+            ErrorKind::TimedOut => "timed_out",
+            ErrorKind::UnexpectedEof => "unexpected_eof",
+            _ => "io_other",
+        },
+        Error::Tls(_) => "tls",
+        Error::Capacity(_) => "capacity",
+        Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+            "reset_without_close_handshake"
+        }
+        Error::Protocol(_) => "protocol",
+        Error::WriteBufferFull(_) => "write_buffer_full",
+        Error::Http(_) => "http_status",
+        Error::HttpFormat(_) => "http_format",
+        Error::Url(_) => "url",
+        Error::Utf8(_) => "utf8",
+        _ => "other",
+    }
+}
+
 pub struct UpstreamSocket {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     pub(crate) compressed: bool,
@@ -1216,6 +1253,15 @@ impl Upstream {
             Err(SelectError::Backoff(until)) => return Err(SocketError::Backoff(until)),
             Err(_) => return Err(SocketError::Storage),
         }
+        let started = std::time::Instant::now();
+        let log_failure = |reason: &'static str, http_status: Option<u16>| {
+            tracing::info!(
+                event = "upstream_websocket_handshake_failed",
+                reason,
+                http_status,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+            );
+        };
         let request: Result<_> = (|| {
             let mut url = Url::parse(&format!("{}/responses", self.config.base_url))?;
             url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
@@ -1231,7 +1277,10 @@ impl Upstream {
             );
             Ok(request)
         })();
-        let request = request.map_err(|_| SocketError::Unavailable)?;
+        let request = request.map_err(|_| {
+            log_failure("invalid_request", None);
+            SocketError::Unavailable
+        })?;
         let mut config = WebSocketConfig::default()
             .max_message_size(Some(crate::payload::UPSTREAM_WS_MESSAGE_BYTES))
             .max_frame_size(Some(crate::payload::UPSTREAM_WS_MESSAGE_BYTES));
@@ -1252,6 +1301,7 @@ impl Upstream {
         let result = match result {
             Ok(result) => result,
             Err(_) => {
+                log_failure("timed_out", None);
                 if !http_fallback {
                     self.failure(
                         account,
@@ -1266,6 +1316,13 @@ impl Upstream {
                 return Err(SocketError::Unavailable);
             }
         };
+        if let Err(error) = &result {
+            let status = match error {
+                codex_tungstenite::Error::Http(response) => Some(response.status().as_u16()),
+                _ => None,
+            };
+            log_failure(websocket_error_kind(error), status);
+        }
         let (socket, response) = match result {
             Ok(value) => value,
             Err(codex_websocket::tungstenite::Error::Http(response))
