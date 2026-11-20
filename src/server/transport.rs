@@ -1699,20 +1699,24 @@ pub(super) async fn http(
         let mut decoder = SseDecoder::default();
         let mut output = (!streaming || chat_request).then(super::output::CompletionOutput::default);
         let mut terminal = None;
+        let mut end_reason = "terminal_event";
+        let mut chat_done_queued = false;
         let result: Result<()> = async {
             loop {
                 let frames = tokio::select! {
-                    _=wait_for_stop(stopped.clone())=>return Err("service stopping".into()),
-                    _=send.closed(),if streaming=>return Err("client disconnected".into()),
+                    _=wait_for_stop(stopped.clone())=>{end_reason="service_stopping";return Err("service stopping".into());},
+                    _=send.closed(),if streaming=>{end_reason="downstream_closed";return Err("client disconnected".into());},
                     _=json_send.closed(),if !streaming=>return Err("client disconnected".into()),
                     frames=source.next(&mut decoder)=>match frames {
                         Ok(Some(frames))=>Some(frames),
                         Ok(None)=> {
+                            end_reason="upstream_eof";
                             log.interrupted("upstream_eof");
                             let _=log.health(Some(crate::health::Rejection::Temporary),"transport").await;
                             None
                         },
                         Err(err)=> {
+                            end_reason="upstream_read_error";
                             if let Some(failure) = err.downcast_ref::<WsInterruption>() {
                                 log.ws_interrupted(failure, None);
                             } else {
@@ -1735,11 +1739,11 @@ pub(super) async fn http(
                     let mut routing = Vec::new();
                     let ended = match &mut frame.event {
                         Some(event) => {
-                            let ended=log.observe(event).await?;
-                            routing=log.project_routing(event)?;
+                            let ended=log.observe(event).await.inspect_err(|_| end_reason="event_observation_failed")?;
+                            routing=log.project_routing(event).inspect_err(|_| end_reason="routing_projection_failed")?;
                             frame.wire = format!("event: {}\ndata: {}\n\n", event["type"].as_str().unwrap_or("error"), event).into_bytes();
-                            if let Some(output)=&mut output {output.observe(event)?;}
-                            if let Some(output)=&mut output {for event in &mut routing {output.observe(event)?;}}
+                            if let Some(output)=&mut output {output.observe(event).inspect_err(|_| end_reason="output_assembly_failed")?;}
+                            if let Some(output)=&mut output {for event in &mut routing {output.observe(event).inspect_err(|_| end_reason="output_assembly_failed")?;}}
                             ended
                         },
                         None => false,
@@ -1785,24 +1789,19 @@ pub(super) async fn http(
                             (Some(_), Some(event)) if backend_event_error(event).is_some() => {
                                 vec![format!("data: {}\n\n", backend_event_error(event).expect("checked").1).into_bytes()]
                             }
-                            (Some(adapter), Some(event)) => adapter.event(event)?,
+                            (Some(adapter), Some(event)) => adapter.event(event).inspect_err(|_| end_reason="chat_projection_failed")?,
                             (Some(_), None) => Vec::new(),
                             (None, _) => vec![frame.wire],
                         };
                         for chunk in chunks {
-                            tokio::time::timeout(
-                                Duration::from_secs(10),
-                                send.send(Bytes::from(chunk)),
-                            )
-                            .await
-                            .map_err(|_| "client too slow")?
-                            .map_err(|_| "client disconnected")?;
+                            let done = chat_request && chunk == b"data: [DONE]\n\n";
+                            queue_sse_chunk(&send, Bytes::from(chunk)).await.inspect_err(|&reason| end_reason = reason)?;
+                            chat_done_queued |= done;
                         }
                         if !chat_request {
                             for event in routing {
                                 let wire = format!("event: {}\ndata: {}\n\n", event["type"].as_str().expect("routing event"), event);
-                                tokio::time::timeout(Duration::from_secs(10), send.send(Bytes::from(wire))).await
-                                    .map_err(|_| "client too slow")?.map_err(|_| "client disconnected")?;
+                                queue_sse_chunk(&send, Bytes::from(wire)).await.inspect_err(|&reason| end_reason = reason)?;
                             }
                         }
                     }
@@ -1813,6 +1812,13 @@ pub(super) async fn http(
             }
         }
         .await;
+        if streaming {
+            let (last_event_kind, _, last_event_age_ms) = log.last_event.fields(Instant::now());
+            tracing::info!(event="http_sse_finished", request_id=%log.id, upstream_transport=log.transport,
+                reason=end_reason, last_event_kind, last_event_age_ms, events_seen=log.events_seen,
+                output_seen=log.output_seen, upstream_completed_seen=log.last_event.response_completed_seen,
+                chat_done_queued=chat_request.then_some(chat_done_queued));
+        }
         let too_large = result.as_ref().err().is_some_and(|error| {
             error.downcast_ref::<WsInterruption>().is_some_and(WsInterruption::request_too_large)
         });
@@ -4030,6 +4036,16 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
 
 // Data events, unlike SSE comments, wake Codex's event-level idle timer.
 // This downstream heartbeat never resets the upstream read deadline.
+async fn queue_sse_chunk(
+    send: &mpsc::Sender<Bytes>,
+    chunk: Bytes,
+) -> std::result::Result<(), &'static str> {
+    tokio::time::timeout(Duration::from_secs(10), send.send(chunk))
+        .await
+        .map_err(|_| "downstream_queue_timeout")?
+        .map_err(|_| "downstream_closed")
+}
+
 async fn next_sse_chunk(receive: &mut mpsc::Receiver<Bytes>, interval: Duration) -> Option<Bytes> {
     match tokio::time::timeout(interval, receive.recv()).await {
         Ok(chunk) => chunk,
