@@ -1734,7 +1734,11 @@ pub(super) async fn http(
                             None
                         },
                         Err(err)=> {
-                            log.interrupted(if err.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_timeout) {"read_timeout"} else {"transport_or_protocol"});
+                            if let Some(failure) = err.downcast_ref::<WsInterruption>() {
+                                log.ws_interrupted(failure, None);
+                            } else {
+                                log.interrupted(if err.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_timeout) {"read_timeout"} else {"transport_or_protocol"});
+                            }
                             if !err.downcast_ref::<WsInterruption>().is_some_and(WsInterruption::request_too_large) {
                                 let _=log.health(Some(crate::health::Rejection::Temporary),"transport").await;
                             }
@@ -2012,30 +2016,35 @@ impl Source {
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
                 .map(|chunk| decoder.push(&chunk))
                 .transpose(),
-            Self::WebSocket(socket) => match crate::upstream::next_ws(socket).await? {
-                Some(UpstreamMessage::Text(text)) => {
-                    let event =
-                        serde_json::from_str(&text).map_err(|_| "invalid upstream frame")?;
-                    Ok(Some(vec![SseFrame {
-                        wire: Vec::new(),
-                        event: Some(event),
-                    }]))
-                }
-                Some(UpstreamMessage::Ping(bytes)) => {
-                    send_upstream(socket, UpstreamMessage::Pong(bytes)).await?;
-                    Ok(Some(Vec::new()))
-                }
-                Some(UpstreamMessage::Pong(_)) => Ok(Some(Vec::new())),
-                Some(UpstreamMessage::Close(Some(frame))) if u16::from(frame.code) == 1009 => {
-                    Err(WsInterruption {
-                        close_code: Some(1009),
+            Self::WebSocket(socket) => {
+                match tokio::time::timeout(crate::upstream::INFERENCE_IDLE_TIMEOUT, socket.next())
+                    .await
+                    .map_err(|_| WsInterruption::new("read_timeout"))?
+                    .transpose()
+                    .map_err(|err| WsInterruption::transport("upstream_read_error", &err))?
+                {
+                    Some(UpstreamMessage::Text(text)) => {
+                        let event = serde_json::from_str(&text)
+                            .map_err(|_| WsInterruption::new("upstream_invalid_event"))?;
+                        Ok(Some(vec![SseFrame {
+                            wire: Vec::new(),
+                            event: Some(event),
+                        }]))
+                    }
+                    Some(UpstreamMessage::Ping(bytes)) => {
+                        send_upstream(socket, UpstreamMessage::Pong(bytes)).await?;
+                        Ok(Some(Vec::new()))
+                    }
+                    Some(UpstreamMessage::Pong(_)) => Ok(Some(Vec::new())),
+                    Some(UpstreamMessage::Close(frame)) => Err(WsInterruption {
+                        close_code: frame.map(|frame| u16::from(frame.code)),
                         ..WsInterruption::new("upstream_close")
                     }
-                    .into())
+                    .into()),
+                    None => Err(WsInterruption::new("upstream_eof").into()),
+                    _ => Err(WsInterruption::new("upstream_unexpected_frame").into()),
                 }
-                Some(UpstreamMessage::Close(_)) | None => Ok(None),
-                _ => Err("unsupported upstream frame".into()),
-            },
+            }
         }
     }
 }
@@ -4022,7 +4031,7 @@ mod heartbeat_tests {
                 let reply = "synthetic response 🌍";
                 let (sent, received) = tokio::join!(
                     server.send(UpstreamMessage::Text(reply.into())),
-                    crate::upstream::next_ws(&mut client),
+                    client.next(),
                 );
                 sent.unwrap();
                 assert_eq!(received.unwrap().unwrap().into_text().unwrap(), reply);
@@ -4044,17 +4053,50 @@ mod heartbeat_tests {
 
     #[tokio::test]
     async fn compressed_upstream_events_still_enforce_the_decoded_output_bound() {
-        let (mut client, mut server) = compression_pair(true).await;
+        let (client, mut server) = compression_pair(true).await;
+        let mut source = Source::WebSocket(Box::new(client));
+        let mut decoder = SseDecoder::default();
         let text = "x".repeat(crate::payload::UPSTREAM_WS_MESSAGE_BYTES + 1);
         let (sent, received) = tokio::join!(
             server.send(UpstreamMessage::Text(text.into())),
-            client.next(),
+            source.next(&mut decoder),
         );
         sent.unwrap();
-        assert!(matches!(
-            received,
-            Some(Err(codex_tungstenite::Error::Capacity(_)))
-        ));
+        let err = received.err().unwrap();
+        let failure = err.downcast_ref::<WsInterruption>().unwrap();
+        assert_eq!(failure.reason, "upstream_read_error");
+        assert_eq!(failure.transport_error_kind, Some("capacity"));
+    }
+
+    #[tokio::test]
+    async fn http_adapter_preserves_ws_protocol_and_close_diagnostics() {
+        use codex_tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+        for (message, reason, code) in [
+            (
+                UpstreamMessage::Text("private invalid JSON".into()),
+                "upstream_invalid_event",
+                None,
+            ),
+            (
+                UpstreamMessage::Close(Some(CloseFrame {
+                    code: CloseCode::Error,
+                    reason: "private close reason".into(),
+                })),
+                "upstream_close",
+                Some(1011),
+            ),
+        ] {
+            let (client, mut server) = compression_pair(false).await;
+            server.send(message).await.unwrap();
+            let err = Source::WebSocket(Box::new(client))
+                .next(&mut SseDecoder::default())
+                .await
+                .err()
+                .unwrap();
+            let failure = err.downcast_ref::<WsInterruption>().unwrap();
+            assert_eq!((failure.reason, failure.close_code), (reason, code));
+            assert!(!format!("{failure:?}").contains("private"));
+        }
     }
 
     #[test]

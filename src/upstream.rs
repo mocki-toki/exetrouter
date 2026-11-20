@@ -1502,16 +1502,6 @@ impl SseDecoder {
     }
 }
 
-pub(crate) async fn next_ws(
-    socket: &mut UpstreamSocket,
-) -> Result<Option<codex_websocket::tungstenite::Message>> {
-    tokio::time::timeout(INFERENCE_IDLE_TIMEOUT, socket.next())
-        .await
-        .map_err(|_| "upstream stream timed out")?
-        .transpose()
-        .map_err(|_| "upstream stream interrupted".into())
-}
-
 fn store_model_catalog(
     conn: &mut rusqlite::Connection,
     id: i64,
