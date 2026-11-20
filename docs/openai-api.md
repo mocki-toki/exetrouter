@@ -149,6 +149,8 @@ Operators can correlate inference refusals through `upstream_response_rejected` 
 
 HTTP SSE and native WS emit content-free `ping` events after 15 seconds without a downstream event; clients should ignore unknown types. Heartbeats do not indicate generation progress or reset upstream deadlines: 900 seconds for inference, 300 for metadata.
 
+For long Chat completions behind a proxy, request `stream: true` and consume the stream through its finish chunk and `[DONE]`. With JSON, upstream progress produces no downstream bytes until completion. When the HTTP adapter reads an upstream WebSocket, its interruption log distinguishes read errors, invalid events, timeouts and closes; only the fixed error category and optional numeric close code are recorded.
+
 Native WS additionally sends control pings every 15 seconds to upstream during active requests and to downstream during active/idle periods. Any received upstream frame, including pong, proves peer liveness. Complete upstream silence before the first non-control event is bounded to 90 seconds; after the response starts, the 900-second receive budget applies. A client that sends no frames/pongs while idle is closed after 90 seconds. These liveness controls do not produce model output or renew the application-idle deadline.
 
 An HTTP interruption emits generic `error`, then terminal `response.failed`. Usage may remain unknown. A lost connection or shorter client deadline can prevent error delivery; no false completion is invented.
