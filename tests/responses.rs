@@ -129,6 +129,12 @@ impl Fixture {
             .await
             .unwrap();
     }
+    async fn pause_responses(&self, seconds: i64) {
+        self.db.call(move |conn| {
+            conn.execute("INSERT INTO oauth_health(account_id,scope,generation,failures,retry_at,reason,last_order) SELECT id,'responses',generation,1,unixepoch()+?1,'transport',0 FROM oauth_accounts WHERE id=1 ON CONFLICT(account_id,scope) DO UPDATE SET retry_at=excluded.retry_at", [seconds])?;
+            Ok(())
+        }).await.unwrap();
+    }
     async fn expire_health(&self) {
         self.db
             .call(|conn| {
@@ -2283,6 +2289,93 @@ async fn delayed_unauthorized_does_not_invalidate_operator_reauthorization() {
         .unwrap()
         .contains("response.completed"));
     assert_eq!(fixture.mock.refreshes.load(Ordering::SeqCst), 0);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn short_backoff_admits_http_and_bound_websocket_once_before_submission() {
+    let fixture = Fixture::start(false).await;
+    fixture.upstream.models().await.unwrap();
+    fixture.pause_responses(1).await; // Upgrade checks availability before accepting the socket.
+    let mut socket = fixture.ws().await;
+    let mut frame = request();
+    frame["type"] = json!("response.create");
+    socket
+        .send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+    let first = terminal(&mut socket).await;
+    assert_eq!(first["type"], "response.completed");
+    frame["previous_response_id"] = first["response"]["id"].clone();
+    fixture.pause_responses(2).await;
+    socket
+        .send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+    let (http, ws) = tokio::join!(fixture.post(request()), terminal(&mut socket));
+    assert!(http.text().await.unwrap().contains("response.completed"));
+    assert_eq!(ws["type"], "response.completed");
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 3);
+    assert_eq!(fixture.rows().await.len(), 3);
+    socket.close(None).await.unwrap();
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn short_backoff_rechecks_extended_deadline_and_cancels_disconnected_clients() {
+    let fixture = Fixture::start(false).await;
+    fixture.upstream.models().await.unwrap();
+    let mut socket = fixture.ws().await;
+    fixture.pause_responses(3).await;
+    let mut frame = request();
+    frame["type"] = json!("response.create");
+    socket
+        .send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+    let mut http = Box::pin(fixture.post(request()));
+    // Poll the actual HTTP request and give both admissions time to enter their waits.
+    assert!(tokio::time::timeout(Duration::from_millis(250), &mut http)
+        .await
+        .is_err());
+    socket.close(None).await.unwrap();
+    fixture.pause_responses(30).await;
+    let res = http.await;
+    assert_eq!(res.status(), 503);
+    assert!(
+        res.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > 5
+    );
+    assert!(fixture.rows().await.is_empty());
+    assert!(fixture.mock.requests.lock().unwrap().is_empty());
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn disconnected_http_and_websocket_never_submit_after_short_backoff_expires() {
+    let fixture = Fixture::start(false).await;
+    fixture.upstream.models().await.unwrap();
+    let mut socket = fixture.ws().await;
+    fixture.pause_responses(2).await;
+    let mut frame = request();
+    frame["type"] = json!("response.create");
+    socket
+        .send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+    let mut http = Box::pin(fixture.post(request()));
+    assert!(tokio::time::timeout(Duration::from_millis(250), &mut http)
+        .await
+        .is_err());
+    drop(http);
+    socket.close(None).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(fixture.rows().await.is_empty());
+    assert!(fixture.mock.requests.lock().unwrap().is_empty());
     fixture.stop().await;
 }
 

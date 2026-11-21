@@ -1005,6 +1005,86 @@ async fn context_account(
     }
 }
 
+// A request owns at most one short wait, and only before upstream submission.
+#[derive(Default)]
+struct AdmissionBackoff {
+    waited: bool,
+}
+
+impl AdmissionBackoff {
+    fn delay<T>(
+        &mut self,
+        result: &std::result::Result<T, crate::upstream::SelectError>,
+    ) -> Option<Duration> {
+        let Err(crate::upstream::SelectError::Backoff(until)) = result else {
+            return None;
+        };
+        let remaining_ms = until
+            .saturating_mul(1000)
+            .saturating_sub(chrono::Utc::now().timestamp_millis())
+            .max(0);
+        if self.waited || remaining_ms > 5000 {
+            return None;
+        }
+        self.waited = true;
+        tracing::info!(event = "upstream_admission_wait", delay_ms = remaining_ms);
+        Some(Duration::from_millis(remaining_ms as u64))
+    }
+
+    async fn check<T, F>(
+        &mut self,
+        stopped: watch::Receiver<bool>,
+        mut check: impl FnMut() -> F,
+    ) -> std::result::Result<T, crate::upstream::SelectError>
+    where
+        F: std::future::Future<Output = std::result::Result<T, crate::upstream::SelectError>>,
+    {
+        let result = check().await;
+        let Some(delay) = self.delay(&result) else {
+            return result;
+        };
+        tokio::select! {
+            biased;
+            _ = wait_for_stop(stopped) => result,
+            _ = tokio::time::sleep(delay) => check().await,
+        }
+    }
+
+    async fn ws_check<T, F>(
+        &mut self,
+        client: &mut WebSocket,
+        seen: &mut Instant,
+        stopped: watch::Receiver<bool>,
+        mut check: impl FnMut() -> F,
+    ) -> std::result::Result<std::result::Result<T, crate::upstream::SelectError>, WsInterruption>
+    where
+        F: std::future::Future<Output = std::result::Result<T, crate::upstream::SelectError>>,
+    {
+        let result = check().await;
+        let Some(delay) = self.delay(&result) else {
+            return Ok(result);
+        };
+        ws_await_submission(client, seen, stopped, async {
+            tokio::time::sleep(delay).await;
+            Ok(())
+        })
+        .await?;
+        Ok(check().await)
+    }
+}
+
+async fn token_is_active(state: &AppState, identity: &Identity) -> bool {
+    let bearer = identity.bearer.clone();
+    let key = state.key.clone();
+    matches!(
+        state
+            .db
+            .call(move |conn| authenticate(conn, &key, &bearer))
+            .await,
+        Ok(Some(_))
+    )
+}
+
 async fn select_context_account(
     upstream: &crate::upstream::Upstream,
     model: &str,
@@ -1326,14 +1406,25 @@ pub(super) async fn http(
         return ContextError::Conflict.response();
     }
     let owner = context.or(turn_account);
-    let selected = select_context_account(
-        &upstream,
-        &model,
-        cache.preferred.then_some(cache.session.as_str()),
-        owner,
-        &payload,
-    )
-    .await;
+    let mut backoff = AdmissionBackoff::default();
+    let selected = backoff
+        .check(state.stopped.clone(), || {
+            select_context_account(
+                &upstream,
+                &model,
+                cache.preferred.then_some(cache.session.as_str()),
+                owner,
+                &payload,
+            )
+        })
+        .await;
+    if backoff.waited && !token_is_active(&state, &identity).await {
+        return error(
+            StatusCode::UNAUTHORIZED,
+            "authentication_error",
+            "token inactive",
+        );
+    }
     let mut account = match selected {
         Ok(account) => account,
         Err(crate::upstream::SelectError::ModelUnavailable) => {
@@ -2512,7 +2603,10 @@ pub(super) async fn websocket(
         Ok(permit) => permit,
         Err(full) => return concurrency_error(full),
     };
-    match upstream.check_available().await {
+    match AdmissionBackoff::default()
+        .check(state.stopped.clone(), || upstream.check_available())
+        .await
+    {
         Ok(()) => {}
         Err(crate::upstream::SelectError::Cooldown(until)) => return cooldown_error(until),
         Err(crate::upstream::SelectError::Backoff(until)) => return backoff_error(until, &id),
@@ -2875,13 +2969,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
         let frame_received = Instant::now();
         tracing::info!(event="client_websocket_frame_received",client_connection_id=%client_log.id.0,
             frame_sequence=client_log.frames,frame_bytes=text.len());
-        let bearer = identity.bearer.clone();
-        let key = state.key.clone();
-        let authentication = state
-            .db
-            .call(move |conn| authenticate(conn, &key, &bearer))
-            .await;
-        if !matches!(authentication, Ok(Some(_))) {
+        if !token_is_active(&state, &identity).await {
             let _ = send_client(
                 &mut client,
                 ws_error(
@@ -3030,6 +3118,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
         }
         let mut rejected_accounts = Vec::new();
         let mut pending_routing = Vec::new();
+        let mut backoff = AdmissionBackoff::default();
         'attempt: loop {
             let mut frame_turn = match payload.pointer("/client_metadata/x-codex-turn-state") {
                 None | Some(Value::Null) => identity.turn_state.clone(),
@@ -3327,14 +3416,24 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 }
             }
             if binding.is_none() {
-                let selected = select_context_account(
-                    &upstream,
-                    &model,
-                    cache.preferred.then_some(cache.session.as_str()),
-                    context,
-                    &payload,
-                )
-                .await;
+                let selected = match backoff
+                    .ws_check(&mut client, &mut client_seen, stopped.clone(), || {
+                        select_context_account(
+                            &upstream,
+                            &model,
+                            cache.preferred.then_some(cache.session.as_str()),
+                            context,
+                            &payload,
+                        )
+                    })
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(failure) => {
+                        client_log.reason = failure.reason;
+                        break 'frames;
+                    }
+                };
                 let account = match selected {
                     Ok(account) => account,
                     Err(crate::upstream::SelectError::Cooldown(until)) => {
@@ -3537,7 +3636,27 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 .await;
                 break 'frames;
             }
-            match upstream.validate(account, &model).await {
+            let validation = match backoff
+                .ws_check(&mut client, &mut client_seen, stopped.clone(), || {
+                    upstream.validate(account, &model)
+                })
+                .await
+            {
+                Ok(result) => result,
+                Err(failure) => {
+                    client_log.reason = failure.reason;
+                    break 'frames;
+                }
+            };
+            if backoff.waited && !token_is_active(&state, &identity).await {
+                let _ = send_client(
+                    &mut client,
+                    ws_error("authentication_error", "token inactive"),
+                )
+                .await;
+                break 'frames;
+            }
+            match validation {
                 Ok(()) => {}
                 Err(crate::upstream::SelectError::Cooldown(until)) => {
                     if send_client(&mut client, cooldown_frame(until).to_string())
@@ -3707,6 +3826,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             let connection = connection.as_mut().expect("connected transport");
             let http = connection.is_http();
             let id = RequestId::new();
+            backoff.waited = true; // Later attempts in this frame are quota recovery after submission.
             let mut log = match RequestLog::begin(
                 &state,
                 record(&identity, &id, account, &model, "responses", "websocket"),
