@@ -20,7 +20,7 @@ Reviewed client revisions live in [protocol-sources.json](protocol-sources.json)
 | Responses | `/responses` over HTTP SSE or native WS. `store` defaults false; explicit options pass through for backend validation. |
 | Native WS | `OpenAI-Beta: responses_websockets=2026-02-06`; sequential `response.create`, including `generate=false` warmup; service ping/pong, bound pre-response peer silence to 90 seconds and retire recoverable idle sockets after 30 seconds/five minutes of age before a new submission on the same account. |
 | Compaction | One Responses SSE request ending with `compaction_trigger`; project exactly one opaque checkpoint as `response.compaction`. No separate upstream `/responses/compact`. |
-| Chat | Translate supported HTTP JSON/SSE to Responses. Prefer HTTP for large complete requests; otherwise try WS first. Ordinary handshake fallback is allowed only before generation submission. Handshake 401/429 prevents fallback. |
+| Chat | Translate supported HTTP JSON/SSE to Responses. Use upstream HTTP/SSE by default. An explicit WebSocket preference applies to eligible requests below the large-request threshold. Ordinary handshake fallback is allowed only before generation submission. Handshake 401/429 prevents fallback. |
 | Accounting | Create a durable event before possible submission; retain terminal counters or an explicit unknown outcome. |
 | Images | Unary JSON `/images/generations` and `/images/edits`, direct Codex OAuth; reviewed native subset, separate feature pauses, no Responses emulation. |
 | Standalone search | Unary JSON `/alpha/search`, user-scoped session ID and durable account pinning; no migration of backend references. |

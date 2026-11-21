@@ -1213,9 +1213,9 @@ pub(super) async fn http(
 ) -> Response {
     let chat_request = surface == "chat_completions";
     let chat_prefers_websocket = chat_request
-        && !headers
+        && headers
             .get("x-exetrouter-upstream-transport")
-            .is_some_and(|value| value.as_bytes() == b"http_sse");
+            .is_some_and(|value| value.as_bytes() == b"websocket");
     let responses_lite = match lite_mode(&identity) {
         Ok(mode) => mode,
         Err(err) => {

@@ -261,13 +261,20 @@ impl Fixture {
             .unwrap()
     }
     async fn chat(&self, value: Value) -> reqwest::Response {
-        reqwest::Client::new()
-            .post(format!("{}/v1/chat/completions", self.url))
-            .bearer_auth(&self.secret)
+        self.chat_http_request().json(&value).send().await.unwrap()
+    }
+    async fn chat_ws(&self, value: Value) -> reqwest::Response {
+        self.chat_http_request()
+            .header("x-exetrouter-upstream-transport", "websocket")
             .json(&value)
             .send()
             .await
             .unwrap()
+    }
+    fn chat_http_request(&self) -> reqwest::RequestBuilder {
+        reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", self.url))
+            .bearer_auth(&self.secret)
     }
     async fn compact(&self, value: Value) -> reqwest::Response {
         reqwest::Client::new()
@@ -1614,7 +1621,7 @@ async fn upstream_message_size_rejection_does_not_pause_retry_or_move_accounts()
                 .unwrap();
             terminal(&mut socket).await.to_string()
         } else {
-            let response = fixture.chat(chat_request(surface == "chat_sse")).await;
+            let response = fixture.chat_ws(chat_request(surface == "chat_sse")).await;
             assert_eq!(
                 response.status(),
                 if surface == "chat_json" { 413 } else { 200 }
@@ -2001,10 +2008,7 @@ async fn unauthorized_is_sanitized_and_refresh_waits_for_a_new_request_on_all_tr
                 body["stream"] = json!(surface == "responses_sse");
                 fixture.post(body).await
             };
-            assert_eq!(
-                reply.status(),
-                if surface == "chat_sse" { 200 } else { 502 }
-            );
+            assert_eq!(reply.status(), 502);
             reply.text().await.unwrap()
         };
         assert!(
@@ -2034,7 +2038,7 @@ async fn unauthorized_is_sanitized_and_refresh_waits_for_a_new_request_on_all_tr
         assert_eq!(fixture.mock.requests.lock().unwrap().len(), 2);
         assert_eq!(
             fixture.rows().await[0]["status"],
-            if surface.starts_with("responses") {
+            if surface != "native_ws" {
                 "upstream_rejected"
             } else {
                 "failed"
@@ -2152,7 +2156,7 @@ async fn unauthorized_handshake_never_falls_back_or_sends_inference() {
             .handshake_unauthorized
             .store(true, Ordering::SeqCst);
         if chat {
-            let reply = fixture.chat(chat_request(false)).await;
+            let reply = fixture.chat_ws(chat_request(false)).await;
             assert_eq!(reply.status(), 502);
             assert_eq!(
                 reply.json::<Value>().await.unwrap()["error"]["type"],
@@ -2389,12 +2393,8 @@ async fn chat_images_preserve_mixed_input_over_json_sse_and_upstream_transports(
     );
     for http_upstream in [false, true] {
         let fixture = Fixture::start(false).await;
-        fixture
-            .mock
-            .reject_websocket
-            .store(http_upstream, Ordering::SeqCst);
         for streaming in [false, true] {
-            let response = fixture.chat(json!({"model":"gpt-test","stream":streaming,"messages":[
+            let body = json!({"model":"gpt-test","stream":streaming,"messages":[
                 {"role":"system","content":"synthetic instruction"},
                 {"role":"user","content":[
                     {"type":"text","text":"before"},
@@ -2403,7 +2403,12 @@ async fn chat_images_preserve_mixed_input_over_json_sse_and_upstream_transports(
                     {"type":"image_url","image_url":{"url":inline}},
                     {"type":"text","text":"after"}
                 ]}
-            ]})).await;
+            ]});
+            let response = if http_upstream {
+                fixture.chat(body).await
+            } else {
+                fixture.chat_ws(body).await
+            };
             assert_eq!(response.status(), 200);
             if streaming {
                 let (chunks, done) = chat_chunks(&response.text().await.unwrap());
@@ -2542,7 +2547,7 @@ async fn chat_json_replays_function_results_and_attributes_one_record_per_reques
     );
     let calls = fixture.mock.requests.lock().unwrap().clone();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0]["type"], "response.create");
+    assert_eq!(calls[0]["stream"], true);
     assert_eq!(calls[0]["input"][0]["role"], "developer");
     assert_eq!(
         calls[0]["input"][0]["content"][0]["text"],
@@ -2566,7 +2571,7 @@ async fn chat_json_replays_function_results_and_attributes_one_record_per_reques
     let rows = fixture.rows().await;
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row["surface"] == "chat_completions"
-        && row["transport"] == "websocket"
+        && row["transport"] == "http_sse"
         && row["client_transport"] == "http_json"
         && row["status"] == "completed"
         && row["user"] == 1
@@ -2736,7 +2741,10 @@ async fn chat_failures_never_emit_success_or_repeat_inference() {
         // Each injected case is a separate probe after the previous pause.
         fixture.expire_health().await;
         *fixture.mock.mode.lock().unwrap() = mode.into();
-        let body = fixture.chat(chat_request(true)).await.text().await.unwrap();
+        let mut request = chat_request(true);
+        // The mock injects disconnects only into tool-bearing generations.
+        request["tools"] = json!([{"type":"function","function":{"name":"test_tool","parameters":{"type":"object"}}}]);
+        let body = fixture.chat(request).await.text().await.unwrap();
         let (chunks, done) = chat_chunks(&body);
         assert_eq!(done, 0);
         assert!(chunks
@@ -2760,7 +2768,7 @@ async fn chat_failures_never_emit_success_or_repeat_inference() {
 }
 
 #[tokio::test]
-async fn chat_can_select_http_for_one_request() {
+async fn chat_defaults_to_http_and_accepts_per_request_transport_preferences() {
     let fixture = Fixture::start(false).await;
     let body = chat_request(true);
     let response = reqwest::Client::new()
@@ -2778,13 +2786,17 @@ async fn chat_can_select_http_for_one_request() {
         .iter()
         .any(|c| c["choices"][0]["finish_reason"] == "stop"));
     assert!(fixture.mock.handshakes.lock().unwrap().is_empty());
-    let response = fixture.chat(body).await;
+    let response = fixture.chat(body.clone()).await;
+    assert_eq!(chat_chunks(&response.text().await.unwrap()).1, 1);
+    assert!(fixture.mock.handshakes.lock().unwrap().is_empty());
+    let response = fixture.chat_ws(body).await;
     assert_eq!(chat_chunks(&response.text().await.unwrap()).1, 1);
     assert_eq!(fixture.mock.handshakes.lock().unwrap().len(), 1);
     let rows = fixture.rows().await;
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["transport"], "http_sse");
-    assert_eq!(rows[1]["transport"], "websocket");
+    assert_eq!(rows[1]["transport"], "http_sse");
+    assert_eq!(rows[2]["transport"], "websocket");
     fixture.stop().await;
 }
 
@@ -2793,7 +2805,7 @@ async fn chat_falls_back_only_before_inference_and_preserves_rate_limits() {
     let fixture = Fixture::start(false).await;
     fixture.mock.reject_websocket.store(true, Ordering::SeqCst);
     let reply = fixture
-        .chat(chat_request(false))
+        .chat_ws(chat_request(false))
         .await
         .json::<Value>()
         .await
@@ -2804,7 +2816,7 @@ async fn chat_falls_back_only_before_inference_and_preserves_rate_limits() {
     );
     assert_eq!(fixture.rows().await[0]["transport"], "http_sse");
     *fixture.mock.mode.lock().unwrap() = "rate_limit".into();
-    let reply = fixture.chat(chat_request(false)).await;
+    let reply = fixture.chat_ws(chat_request(false)).await;
     assert_eq!(reply.status(), 429);
     assert_eq!(reply.headers()["retry-after"], "17");
     assert!(!reply
@@ -2814,7 +2826,7 @@ async fn chat_falls_back_only_before_inference_and_preserves_rate_limits() {
         .contains("private upstream error"));
     assert_eq!(fixture.mock.requests.lock().unwrap().len(), 2);
     assert_eq!(fixture.rows().await.len(), 2);
-    let reply = fixture.chat(chat_request(false)).await;
+    let reply = fixture.chat_ws(chat_request(false)).await;
     assert_eq!(reply.status(), 429);
     assert!(
         reply.headers()["retry-after"]
@@ -2861,7 +2873,12 @@ async fn quotas_observe_http_headers_and_ws_events_without_blocking_at_one_hundr
     *fixture.mock.quota_event.lock().unwrap() = Some(
         json!({"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":100,"window_minutes":300,"reset_at":reset}},"metered_limit_name":"codex"}),
     );
-    let reply = fixture.chat(chat_request(true)).await.text().await.unwrap();
+    let reply = fixture
+        .chat_ws(chat_request(true))
+        .await
+        .text()
+        .await
+        .unwrap();
     assert!(reply.contains("EXETROUTER_SMOKE_OK"));
     assert!(reply.contains("[DONE]"));
     assert!(!reply.contains("codex.rate_limits"));
@@ -3134,7 +3151,7 @@ async fn quota_metadata_failure_does_not_lose_completed_usage_or_repeat_generati
     *fixture.mock.quota_event.lock().unwrap() = Some(
         json!({"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":90,"window_minutes":300,"reset_at":chrono::Utc::now().timestamp()+300}}}),
     );
-    let reply = fixture.chat(chat_request(false)).await;
+    let reply = fixture.chat_ws(chat_request(false)).await;
     assert_eq!(reply.status(), 200);
     assert_eq!(
         reply.json::<Value>().await.unwrap()["choices"][0]["message"]["content"],
@@ -3178,7 +3195,7 @@ async fn websocket_handshake_quota_rejection_never_falls_back_to_generation() {
         .mock
         .handshake_rate_limit
         .store(true, Ordering::SeqCst);
-    let reply = fixture.chat(chat_request(false)).await;
+    let reply = fixture.chat_ws(chat_request(false)).await;
     assert_eq!(reply.status(), 429);
     assert_eq!(
         reply.json::<Value>().await.unwrap()["error"]["code"],
@@ -3652,13 +3669,18 @@ async fn backend_websocket_errors_survive_chat_conversion_and_native_forwarding(
     let fixture = Fixture::start(false).await;
     *fixture.mock.mode.lock().unwrap() = "backend_parameter_error".into();
     let expected = json!({"error":{"message":"Synthetic option is invalid","type":"invalid_request_error","code":"backend_changed_validation","param":"future_option"}});
-    let reply = fixture.chat(chat_request(false)).await;
+    let reply = fixture.chat_ws(chat_request(false)).await;
     assert_eq!(reply.status(), 422);
     assert_eq!(
         reply.json::<Value>().await.unwrap()["error"]["code"],
         "upstream_rejected"
     );
-    let body = fixture.chat(chat_request(true)).await.text().await.unwrap();
+    let body = fixture
+        .chat_ws(chat_request(true))
+        .await
+        .text()
+        .await
+        .unwrap();
     let (chunks, done) = chat_chunks(&body);
     assert_eq!(done, 0);
     assert_eq!(chunks.len(), 1);

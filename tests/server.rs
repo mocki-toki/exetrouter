@@ -964,7 +964,15 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
     assert_eq!(response.status(), 200);
     assert!(response.text().await.unwrap().contains(OUTPUT));
     for mode in ["chat_sse_valid", "delta_without_item", "ws_wait"] {
-        let mut response = client.post(format!("{api}/v1/chat/completions")).bearer_auth(&secret)
+        let request = client
+            .post(format!("{api}/v1/chat/completions"))
+            .bearer_auth(&secret);
+        let request = if mode == "ws_wait" {
+            request.header("x-exetrouter-upstream-transport", "websocket")
+        } else {
+            request
+        };
+        let mut response = request
             .json(&json!({"model":"gpt-test","stream":true,"messages":[{"role":"user","content":INPUT}],"metadata":{"mode":mode}})).send().await.unwrap();
         assert_eq!(response.status(), 200);
         if mode == "ws_wait" {
@@ -1072,7 +1080,7 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
             body.clone()
         };
         payload["metadata"] = json!({"mode":mode});
-        let response = client
+        let request = client
             .post(format!(
                 "{api}/v1/{}",
                 if chat {
@@ -1081,11 +1089,13 @@ async fn payloads_are_absent_from_real_process_logs_and_state_even_with_trace_re
                     "responses"
                 }
             ))
-            .bearer_auth(&secret)
-            .json(&payload)
-            .send()
-            .await
-            .unwrap();
+            .bearer_auth(&secret);
+        let request = if chat {
+            request.header("x-exetrouter-upstream-transport", "websocket")
+        } else {
+            request
+        };
+        let response = request.json(&payload).send().await.unwrap();
         assert_eq!(response.status(), 400, "{mode}");
         let text = response.text().await.unwrap();
         assert!(text.contains("upstream_rejected"));
