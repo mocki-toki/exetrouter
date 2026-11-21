@@ -1212,6 +1212,10 @@ pub(super) async fn http(
     headers: HeaderMap,
 ) -> Response {
     let chat_request = surface == "chat_completions";
+    let chat_prefers_websocket = chat_request
+        && !headers
+            .get("x-exetrouter-upstream-transport")
+            .is_some_and(|value| value.as_bytes() == b"http_sse");
     let responses_lite = match lite_mode(&identity) {
         Ok(mode) => mode,
         Err(err) => {
@@ -1376,7 +1380,7 @@ pub(super) async fn http(
         ),
         if compact && account.info.id < 0 {
             "platform_http_json"
-        } else if chat_request {
+        } else if chat_prefers_websocket {
             "websocket"
         } else {
             "http_sse"
@@ -1403,7 +1407,7 @@ pub(super) async fn http(
         Ok(value) => value,
         Err(_) => return ContextError::Missing.response(),
     };
-    let socket = if chat_request
+    let socket = if chat_prefers_websocket
         && account.info.id > 0
         && !crate::upstream::prefer_http(&dispatch_payload)
     {

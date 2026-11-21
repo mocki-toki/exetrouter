@@ -2760,6 +2760,35 @@ async fn chat_failures_never_emit_success_or_repeat_inference() {
 }
 
 #[tokio::test]
+async fn chat_can_select_http_for_one_request() {
+    let fixture = Fixture::start(false).await;
+    let body = chat_request(true);
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/chat/completions", fixture.url))
+        .bearer_auth(&fixture.secret)
+        .header("x-exetrouter-upstream-transport", "http_sse")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let (chunks, done) = chat_chunks(&response.text().await.unwrap());
+    assert_eq!(done, 1);
+    assert!(chunks
+        .iter()
+        .any(|c| c["choices"][0]["finish_reason"] == "stop"));
+    assert!(fixture.mock.handshakes.lock().unwrap().is_empty());
+    let response = fixture.chat(body).await;
+    assert_eq!(chat_chunks(&response.text().await.unwrap()).1, 1);
+    assert_eq!(fixture.mock.handshakes.lock().unwrap().len(), 1);
+    let rows = fixture.rows().await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["transport"], "http_sse");
+    assert_eq!(rows[1]["transport"], "websocket");
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn chat_falls_back_only_before_inference_and_preserves_rate_limits() {
     let fixture = Fixture::start(false).await;
     fixture.mock.reject_websocket.store(true, Ordering::SeqCst);
