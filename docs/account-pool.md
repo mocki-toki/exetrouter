@@ -12,9 +12,9 @@ follow the linked migration/rollback procedure.
 
 The visible model list is a union of active account catalogs. An independent full-context request chooses an eligible account for its model, respecting current credentials/catalog, cooldown, operational pauses, quota observations and active load. Explicit cache/session hints provide a stable soft preference among eligible accounts. Stale quota is not treated as confirmed current capacity; percentages are not combined across subscriptions.
 
-Optional [Platform routing](platform-api.md) appends distinct reviewed API models
-and permits an operator-controlled same-model fallback after all eligible Codex
-quotas are exhausted. It uses separate project context identities and health;
+Operators can select [Codex, Platform or both](platform-api.md#select-routing-resources).
+When both are enabled, distinct reviewed API models are appended, and same-model
+fallback requires exhaustion of all eligible Codex quotas. Platform uses separate project context identities and health;
 API failures never mutate OAuth state or Codex percentages. Cross-backend opaque
 state is not assumed portable, and operational/authentication failures are not
 quota exceptions. Accounting/client presence still identifies the parent account.

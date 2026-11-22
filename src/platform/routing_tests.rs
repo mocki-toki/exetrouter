@@ -82,9 +82,7 @@ async fn additive_route_reupgrade_retains_identity_health_secrets_and_never_uses
         "zero display allowance is not an API spending cap"
     );
     exhausted(&db).await;
-    db.call(|conn| set_codex_fallback(conn, true))
-        .await
-        .unwrap();
+    db.call(|conn| Resources::Both.set(conn)).await.unwrap();
     assert!(upstream.select("gpt-6.1-sol").await.unwrap().info.id < 0);
 }
 
@@ -97,7 +95,7 @@ async fn every_eligible_native_subscription_must_be_exhausted_and_owned_platform
         crate::oauth::save(conn,&vault,"second-synthetic-account",&crate::oauth::Credentials {access_token:"synthetic-access".into(),refresh_token:"synthetic-refresh".into()},9999999999)?;
         conn.execute("INSERT INTO oauth_models(account_id,model,display_name,metadata) SELECT 2,model,display_name,metadata FROM oauth_models WHERE account_id=1",[])?;
         conn.execute("UPDATE oauth_accounts SET catalog_updated_at=?1 WHERE id=2",[chrono::Utc::now().timestamp()])?;
-        set_codex_fallback(conn,true)
+        apply_legacy_fallback(conn,true)
     }).await.unwrap();
     exhausted(&db).await;
     assert_eq!(
@@ -116,7 +114,7 @@ async fn every_eligible_native_subscription_must_be_exhausted_and_owned_platform
     );
     let api = upstream.select("gpt-6.1-sol").await.unwrap();
     assert!(api.info.id < 0);
-    db.call(|conn| set_codex_fallback(conn, false))
+    db.call(|conn| apply_legacy_fallback(conn, false))
         .await
         .unwrap();
     assert!(
@@ -190,9 +188,7 @@ async fn platform_catalog_is_observed_source_ordered_and_fallback_is_only_for_al
         1,
         "default policy preserves credit-backed Codex"
     );
-    db.call(|conn| set_codex_fallback(conn, true))
-        .await
-        .unwrap();
+    db.call(|conn| Resources::Both.set(conn)).await.unwrap();
     assert!(upstream.select("gpt-6.1-sol").await.unwrap().info.id < 0);
     db.call(|conn| {
         crate::health::failure(
@@ -410,6 +406,129 @@ impl Api {
 }
 
 #[tokio::test]
+async fn live_resource_selection_filters_catalog_and_never_submits_to_the_excluded_backend() {
+    use codex_websocket::tungstenite::{client::IntoClientRequest, Message};
+    use futures_util::{SinkExt, StreamExt};
+    let (dir, db, mock, upstream) = fixture().await;
+    mock.state
+        .lock()
+        .unwrap()
+        .response_models
+        .push("text-embedding-3-small".into());
+    inventory::read(
+        &db,
+        Vault::new([7; 32]),
+        &client::Client::new(&mock.base, true).unwrap(),
+        1,
+    )
+    .await
+    .unwrap();
+    db.call(|conn| {
+        conn.execute("INSERT INTO oauth_models(account_id,model,display_name) VALUES(1,'gpt-codex-synthetic','Codex fixture')", [])?;
+        Resources::Platform.set(conn)
+    }).await.unwrap();
+    let api = Api::open(&dir, &db, upstream.clone()).await;
+    let models = upstream.models().await.unwrap();
+    assert!(models.iter().all(|m| m.source == "platform"));
+    assert_eq!(models.len(), 3);
+    assert!(models.iter().any(|m| m.id == "gpt-6.1-sol"));
+    assert!(upstream.select("gpt-codex-synthetic").await.is_err());
+    assert!(upstream
+        .select_native(
+            crate::upstream::native::Feature::Images,
+            "gpt-image-2",
+            None,
+            None
+        )
+        .await
+        .is_err());
+    let body = json!({"model":"gpt-6.1-sol","input":"synthetic resource switch"});
+    let response = api.post("responses", &body).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let output: Value = response.json().await.unwrap();
+    let codex_proof =
+        affinity::issue("synthetic-context", affinity::Kind::Content, &[7; 32], 1, 1).unwrap();
+    let opaque = json!({"model":"gpt-6.1-sol","input":[{"type":"reasoning","summary":[],"encrypted_content":codex_proof}]});
+    assert!(!api
+        .post("responses", &opaque)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+
+    let url = api.base.replace("http://", "ws://") + "/v1/responses";
+    let mut request = url.as_str().into_client_request().unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", api.token).parse().unwrap(),
+    );
+    let (mut ws, _) = codex_websocket::connect_async(request).await.unwrap();
+    let frame = json!({"type":"response.create","model":"gpt-6.1-sol","input":[{"role":"user","content":"synthetic WS"}]});
+    ws.send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+    async fn terminal(
+        ws: &mut codex_websocket::WebSocketStream<
+            codex_websocket::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Value {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let frame = ws.next().await.unwrap().unwrap();
+                if frame.is_text() {
+                    let value: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    if value["type"] == "response.completed" || value["type"] == "error" {
+                        return value;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+    assert_eq!(terminal(&mut ws).await["type"], "response.completed");
+    db.call(|conn| Resources::Codex.set(conn)).await.unwrap();
+    let models = upstream.models().await.unwrap();
+    assert_eq!(models.len(), 2);
+    assert!(models.iter().all(|m| m.source == "codex"));
+    let pinned = json!({"model":"gpt-6.1-sol","input":[output["output"][0]]});
+    assert!(!api
+        .post("responses", &pinned)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+    assert_eq!(
+        api.post(
+            "embeddings",
+            &json!({"model":"text-embedding-3-small","input":"synthetic"})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let mut delta = frame;
+    delta["previous_response_id"] = json!("resp_platform_2");
+    ws.send(Message::Text(delta.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(terminal(&mut ws).await["type"], "error");
+
+    // A fresh shared-model request goes to Codex and its refusal cannot use Platform.
+    assert_eq!(
+        api.post("responses", &body).send().await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let observed = mock.state.lock().unwrap();
+    assert_eq!(observed.native_inferences, 1);
+    assert_eq!(observed.inferences.len(), 2);
+}
+
+#[tokio::test]
 async fn embeddings_are_discovered_and_charged_only_to_the_observed_project() {
     let (dir, db, mock, upstream) = fixture().await;
     mock.state.lock().unwrap().response_models.extend([
@@ -605,9 +724,7 @@ async fn native_handshake_quota_fallback_keeps_downstream_ws_and_recovers_platfo
     use codex_websocket::tungstenite::{client::IntoClientRequest, Message};
     use futures_util::{SinkExt, StreamExt};
     let (dir, db, mock, upstream) = fixture().await;
-    db.call(|conn| set_codex_fallback(conn, true))
-        .await
-        .unwrap();
+    db.call(|conn| Resources::Both.set(conn)).await.unwrap();
     let api = Api::open(&dir, &db, upstream).await;
     let url = api.base.replace("http://", "ws://") + "/v1/responses";
     let mut request = url.as_str().into_client_request().unwrap();
@@ -662,9 +779,7 @@ async fn quota_refusal_falls_back_same_model_only_when_enabled_and_keeps_each_at
     let refused = api.post("responses", &body).send().await.unwrap();
     assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(mock.state.lock().unwrap().inferences.is_empty());
-    db.call(|conn| set_codex_fallback(conn, true))
-        .await
-        .unwrap();
+    db.call(|conn| Resources::Both.set(conn)).await.unwrap();
     upstream.check_available().await.unwrap();
     let response = api.post("responses", &body).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);

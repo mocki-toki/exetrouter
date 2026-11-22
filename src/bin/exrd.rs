@@ -84,8 +84,10 @@ enum Command {
         /// Allow client-requested Fast mode by default (tokens may override).
         #[arg(long, action = clap::ArgAction::Set)]
         fast_mode: Option<bool>,
-        /// Allow Codex catalog models to spend available Platform funds.
-        #[arg(long, action = clap::ArgAction::Set)]
+        /// Set routing resources: codex, platform, or codex,platform.
+        #[arg(long, value_enum, value_delimiter = ',', value_name = "RESOURCE")]
+        routing_resources: Vec<exetrouter::platform::Resource>,
+        #[arg(long, hide = true, action = clap::ArgAction::Set)]
         platform_codex_fallback: Option<bool>,
         /// Permit a wildcard listener inside an isolated Docker network only.
         #[arg(long)]
@@ -260,10 +262,12 @@ async fn run() -> Result<()> {
             }
         }
     }
+    let mut resource_policy = None;
     if let Command::Serve {
         gateway_uid,
         listen,
         fast_mode,
+        routing_resources,
         platform_codex_fallback,
         ..
     } = &mut args.command
@@ -274,6 +278,13 @@ async fn run() -> Result<()> {
         if fast_mode.is_none() {
             *fast_mode = Some(saved.fast_mode);
         }
+        resource_policy = if routing_resources.is_empty() {
+            saved.routing_resources
+        } else {
+            Some(exetrouter::platform::Resources::try_from(std::mem::take(
+                routing_resources,
+            ))?)
+        };
         if platform_codex_fallback.is_none() {
             *platform_codex_fallback = saved.platform_codex_fallback;
         }
@@ -379,6 +390,7 @@ async fn run() -> Result<()> {
         listen,
         gateway_uid,
         fast_mode,
+        routing_resources: _,
         platform_codex_fallback,
         allow_container_listen,
         allow_same_uid_for_dev,
@@ -409,8 +421,10 @@ async fn run() -> Result<()> {
             }
         };
         let db = Database::open(args.db).await?;
-        if let Some(enabled) = platform_codex_fallback {
-            db.call(move |conn| exetrouter::platform::set_codex_fallback(conn, enabled))
+        if let Some(resources) = resource_policy {
+            db.call(move |conn| resources.set(conn)).await?;
+        } else if let Some(enabled) = platform_codex_fallback {
+            db.call(move |conn| exetrouter::platform::apply_legacy_fallback(conn, enabled))
                 .await?;
         }
         let config = upstream::Config::new(

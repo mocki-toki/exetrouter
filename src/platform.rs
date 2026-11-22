@@ -102,6 +102,9 @@ pub mod costs;
 mod integration_tests;
 mod inventory;
 mod keys;
+mod policy;
+pub(crate) use policy::Policy;
+pub use policy::{apply_legacy_fallback, Resource, Resources};
 pub(crate) mod routes;
 use crate::{oauth::Vault, Result};
 use futures_util::StreamExt;
@@ -120,6 +123,7 @@ pub(crate) async fn route_catalog(
     base: &str,
 ) -> Result<Vec<crate::catalog::Model>> {
     let accounts=db.call(|conn| {
+        if !Policy::read(conn)?.platform() { return Ok(Vec::new()); }
         let mut stmt=conn.prepare("SELECT k.account_id FROM platform_working_keys k JOIN account_platform_credentials c USING(account_id) JOIN platform_settings s ON s.account_id=k.account_id AND s.project_id=k.project_id JOIN oauth_accounts a ON a.id=k.account_id LEFT JOIN account_policy p ON p.account_id=a.id WHERE k.generation=c.generation AND k.state='active' AND k.expires_at>?1 AND a.state='active' AND COALESCE(p.enabled,1)=1 ORDER BY k.account_id")?;
         let rows=stmt.query_map([chrono::Utc::now().timestamp()],|r|r.get::<_,i64>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
         Ok(rows)
@@ -148,14 +152,18 @@ pub(crate) async fn route_catalog(
     let vault = vault.clone();
     db.call(move |conn| {
         let now = chrono::Utc::now().timestamp();
+        let policy = Policy::read(conn)?;
         let mut models = std::collections::BTreeMap::new();
+        if !policy.platform() {
+            return Ok(Vec::new());
+        }
         for owner in routes::owners(conn)? {
             if routes::account(conn, &vault, owner, now).is_err() {
                 continue;
             }
             if let Ok(entries) = routes::models(conn, owner, now) {
                 for entry in entries {
-                    if routes::model_spending_permitted(conn, &entry.id)? {
+                    if policy.platform_model(conn, &entry.id, now)? {
                         models.entry(entry.id.clone()).or_insert(entry);
                     }
                 }
@@ -177,10 +185,10 @@ pub enum Command {
     },
     /// Read model availability with the stored working key; never submits inference.
     Models { id: i64 },
-    /// Permit/deny future Platform spending for Codex catalog models (default: false).
-    CodexFallback {
-        #[arg(action=clap::ArgAction::Set)]
-        enabled: bool,
+    /// Show or set routing resources. With both, Codex has priority.
+    Resources {
+        #[arg(value_enum, value_name = "RESOURCE", num_args = 0..=2)]
+        resources: Vec<Resource>,
     },
     /// Bind an existing Platform project; optional automatic thirty-day key management.
     Configure {
@@ -212,6 +220,10 @@ pub struct Status {
     #[serde(default)]
     pub codex_fallback_allowed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Resources>,
+    #[serde(default)]
+    pub legacy_platform_restriction: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub costs: Option<costs::Snapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balance: Option<balance::Snapshot>,
@@ -222,15 +234,22 @@ pub struct Status {
 }
 
 pub fn render(value: &serde_json::Value) -> String {
-    if value.get("configured_at").is_none() && value.get("codex_fallback_allowed").is_some() {
-        return format!(
-            "Codex models may use Platform API credits: {}",
-            if value["codex_fallback_allowed"] == true {
-                "allowed"
-            } else {
-                "disabled"
-            }
-        );
+    let resource_text = value["resources"].as_array().map(|resources| {
+        let names = resources
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        let note = if value["legacy_platform_restriction"] == true {
+            " (legacy policy: Platform only for models outside Codex and for embeddings)"
+        } else {
+            ""
+        };
+        format!("Routing resources: {}{note}", names.join(", "))
+    });
+    if value.get("configured_at").is_none() {
+        if let Some(text) = resource_text {
+            return text;
+        }
     }
     if value.is_null() {
         return "No Platform credentials configured.".into();
@@ -308,11 +327,9 @@ pub fn render(value: &serde_json::Value) -> String {
             }
         ));
     }
-    text.push_str(if value["codex_fallback_allowed"] == true {
-        "\nCodex fallback policy: allowed"
-    } else {
-        "\nCodex fallback policy: disabled"
-    });
+    if let Some(resources) = resource_text {
+        text.push_str(&format!("\n{resources}"));
+    }
     if value["refresh_error"].is_string() {
         text.push_str("\nPlatform refresh unavailable; observations may be historical.");
     }
@@ -392,6 +409,8 @@ pub fn snapshot(conn: &Connection, account: i64) -> Result<Option<Status>> {
                     inference_enabled: false,
                     credit_status: "unknown".into(),
                     codex_fallback_allowed: false,
+                    resources: None,
+                    legacy_platform_restriction: false,
                     costs: None,
                     balance: None,
                     key: None,
@@ -401,12 +420,15 @@ pub fn snapshot(conn: &Connection, account: i64) -> Result<Option<Status>> {
         )
         .optional()?;
     if let Some(status) = &mut result {
-        status.codex_fallback_allowed = codex_fallback_allowed(conn)?;
+        let policy = Policy::read(conn)?;
+        status.codex_fallback_allowed = policy.codex() && policy.shared_platform();
+        status.resources = Some(policy.resources);
+        status.legacy_platform_restriction = policy.legacy_platform_restriction;
         let now = chrono::Utc::now().timestamp();
         status.costs = Some(costs::snapshot(conn, account, now)?);
         status.balance = balance::snapshot(conn, account, now)?;
         status.key = keys::snapshot(conn, account, now)?;
-        status.inference_enabled=conn.query_row("SELECT EXISTS(SELECT 1 FROM platform_routes r JOIN account_platform_credentials c ON c.account_id=r.account_id AND c.generation=r.credential_generation JOIN platform_settings s ON s.account_id=r.account_id AND s.project_id=r.project_id JOIN platform_working_keys k ON k.account_id=r.account_id AND k.generation=c.generation AND k.key_id=r.key_id AND k.project_id=r.project_id JOIN oauth_accounts a ON a.id=r.account_id LEFT JOIN account_policy p ON p.account_id=a.id WHERE r.account_id=?1 AND k.state='active' AND k.expires_at>?2 AND a.state='active' AND COALESCE(p.enabled,1)=1 AND r.observed_at<=?2 AND r.observed_at>?2-?3 AND r.catalog<>'[]' AND NOT EXISTS(SELECT 1 FROM platform_key_operations o WHERE o.account_id=r.account_id AND o.status<>'confirmed'))",params![account,now,crate::catalog::CACHE_TTL_SECONDS],|r|r.get(0))?;
+        status.inference_enabled=policy.platform() && conn.query_row("SELECT EXISTS(SELECT 1 FROM platform_routes r JOIN account_platform_credentials c ON c.account_id=r.account_id AND c.generation=r.credential_generation JOIN platform_settings s ON s.account_id=r.account_id AND s.project_id=r.project_id JOIN platform_working_keys k ON k.account_id=r.account_id AND k.generation=c.generation AND k.key_id=r.key_id AND k.project_id=r.project_id JOIN oauth_accounts a ON a.id=r.account_id LEFT JOIN account_policy p ON p.account_id=a.id WHERE r.account_id=?1 AND k.state='active' AND k.expires_at>?2 AND a.state='active' AND COALESCE(p.enabled,1)=1 AND r.observed_at<=?2 AND r.observed_at>?2-?3 AND r.catalog<>'[]' AND NOT EXISTS(SELECT 1 FROM platform_key_operations o WHERE o.account_id=r.account_id AND o.status<>'confirmed'))",params![account,now,crate::catalog::CACHE_TTL_SECONDS],|r|r.get::<_,bool>(0))?;
         status.refresh_error=conn.query_row("SELECT error FROM platform_refresh r JOIN account_platform_credentials c USING(account_id) WHERE r.account_id=?1 AND r.generation=c.generation",[account],|r|r.get::<_,Option<String>>(0)).optional()?.flatten();
     }
     Ok(result)
@@ -434,26 +456,6 @@ pub(crate) fn prune(conn: &Connection, now: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn set_codex_fallback(conn: &Connection, enabled: bool) -> Result<()> {
-    conn.execute(
-        "UPDATE platform_policy SET codex_fallback_allowed=?1 WHERE singleton=1",
-        [enabled],
-    )?;
-    Ok(())
-}
-pub fn codex_fallback_allowed(conn: &Connection) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT codex_fallback_allowed FROM platform_policy WHERE singleton=1",
-        [],
-        |r| r.get(0),
-    )?)
-}
-/// Available funds may be free or purchased. This policy only controls the
-/// Codex-model exception; it does not claim that a key, model or balance is ready.
-pub fn spending_permitted(conn: &Connection, codex_model: bool) -> Result<bool> {
-    Ok(!codex_model || codex_fallback_allowed(conn)?)
-}
-
 pub async fn command(
     db: &crate::store::Database,
     vault: Vault,
@@ -474,11 +476,19 @@ pub async fn command(
         Command::Models { id } => {
             inventory::read(db, vault, &client::Client::new(client::BASE, false)?, *id).await
         }
-        Command::CodexFallback { enabled } => {
-            let enabled = *enabled;
-            db.call(move |conn| set_codex_fallback(conn, enabled))
-                .await?;
-            Ok(serde_json::json!({"codex_fallback_allowed":enabled}))
+        Command::Resources { resources } => {
+            let resources = if resources.is_empty() {
+                None
+            } else {
+                Some(Resources::try_from(resources.clone())?)
+            };
+            db.call(move |conn| {
+                if let Some(resources) = resources {
+                    resources.set(conn)?;
+                }
+                Ok(serde_json::to_value(Policy::read(conn)?)?)
+            })
+            .await
         }
         Command::Configure {
             id,

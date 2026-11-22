@@ -4,6 +4,15 @@ use super::*;
 use crate::platform::routes;
 
 impl Upstream {
+    pub(super) async fn routing_policy(
+        &self,
+    ) -> std::result::Result<crate::platform::Policy, SelectError> {
+        self.db
+            .call(|conn| crate::platform::Policy::read(conn))
+            .await
+            .map_err(|_| SelectError::UpstreamUnavailable)
+    }
+
     pub(crate) async fn select_excluding(
         &self,
         model: &str,
@@ -13,8 +22,14 @@ impl Upstream {
         if crate::catalog::embedding_model(model) {
             return Err(SelectError::ModelUnavailable);
         }
+        let policy = self.routing_policy().await?;
+        if !policy.codex() {
+            return self
+                .select_platform_discover(model, affinity, excluded)
+                .await;
+        }
         let native = self.select_codex_excluding(model, affinity, excluded).await;
-        if matches!(&native, Err(SelectError::Backoff(_))) {
+        if !policy.platform() || matches!(&native, Err(SelectError::Backoff(_))) {
             return native;
         }
         if let Ok(account) = &native {
@@ -31,7 +46,7 @@ impl Upstream {
         if !eligible {
             return native;
         }
-        self.select_platform(model, affinity, excluded)
+        self.select_platform_discover(model, affinity, excluded)
             .await
             .or(native)
     }
@@ -40,13 +55,34 @@ impl Upstream {
         &self,
         model: &str,
     ) -> std::result::Result<Selection, SelectError> {
-        if !crate::catalog::embedding_model(model) {
+        if !crate::catalog::embedding_model(model) || !self.routing_policy().await?.platform() {
             return Err(SelectError::ModelUnavailable);
         }
-        crate::platform::route_catalog(&self.db, &self.vault, &self.config.platform_base)
-            .await
-            .map_err(|_| SelectError::UpstreamUnavailable)?;
-        self.select_platform(model, None, &[]).await
+        self.select_platform_discover(model, None, &[]).await
+    }
+
+    async fn select_platform_discover(
+        &self,
+        model: &str,
+        affinity: Option<&str>,
+        excluded: &[i64],
+    ) -> std::result::Result<Selection, SelectError> {
+        match self.select_platform(model, affinity, excluded).await {
+            Err(SelectError::ModelUnavailable) => {
+                {
+                    let _guard = self.catalog_lock.lock().await;
+                    crate::platform::route_catalog(
+                        &self.db,
+                        &self.vault,
+                        &self.config.platform_base,
+                    )
+                    .await
+                    .map_err(|_| SelectError::UpstreamUnavailable)?;
+                }
+                self.select_platform(model, affinity, excluded).await
+            }
+            result => result,
+        }
     }
 
     async fn select_platform(
@@ -64,6 +100,9 @@ impl Upstream {
                 let now = Utc::now().timestamp();
                 let mut candidates = Vec::new();
                 let mut wait = None;
+                if !crate::platform::Policy::read(conn)?.platform_model(conn, &requested, now)? {
+                    return Ok((candidates, wait));
+                }
                 for id in routes::owners(conn)? {
                     if excluded.contains(&id) {
                         continue;

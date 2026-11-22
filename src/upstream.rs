@@ -354,6 +354,9 @@ impl Upstream {
         let accounts = self
             .db
             .call(|conn| {
+                if !crate::platform::Policy::read(conn)?.codex() {
+                    return Ok(Vec::new());
+                }
                 Ok(oauth::list(conn)?
                     .into_iter()
                     .filter(|info| info.state == "active")
@@ -361,9 +364,7 @@ impl Upstream {
                     .collect::<Vec<_>>())
             })
             .await?;
-        if accounts.is_empty() {
-            return Ok(Vec::new());
-        }
+        let has_codex_accounts = !accounts.is_empty();
         let mut results = futures_util::stream::iter(accounts)
             .map(|id| async move { (id, self.account_models(id).await) })
             .buffer_unordered(4)
@@ -396,8 +397,15 @@ impl Upstream {
         let platform =
             crate::platform::route_catalog(&self.db, &self.vault, &self.config.platform_base)
                 .await?;
-        if successful == 0 && platform.is_empty() {
+        let policy = self
+            .db
+            .call(|conn| crate::platform::Policy::read(conn))
+            .await?;
+        if policy.codex() && has_codex_accounts && successful == 0 && platform.is_empty() {
             return Err("all active account catalogs unavailable".into());
+        }
+        if !policy.codex() {
+            available.clear();
         }
         let mut models = available
             .into_values()
@@ -412,7 +420,9 @@ impl Upstream {
             .iter()
             .map(|m| m.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        models.extend(platform.into_iter().filter(|m| !ids.contains(&m.id)));
+        if policy.platform() {
+            models.extend(platform.into_iter().filter(|m| !ids.contains(&m.id)));
+        }
         Ok(models)
     }
 
@@ -529,16 +539,15 @@ impl Upstream {
     }
 
     pub async fn account_enabled(&self, id: i64) -> crate::Result<bool> {
-        if id < 0 {
-            return self
-                .db
-                .call(move |conn| crate::platform::routes::enabled(conn, id))
-                .await;
-        }
         self.db
             .call(move |conn| {
-                // Only explicit deactivation permits this availability transfer;
-                // authentication failures and operational pauses are checked separately.
+                if !crate::platform::Policy::read(conn)?.allows(id) {
+                    return Ok(false);
+                }
+                if id < 0 {
+                    return crate::platform::routes::enabled(conn, id);
+                }
+                // Explicit deactivation permits transfer; auth and backoff do not.
                 let disabled = conn.query_row(
                     "SELECT state='disabled' FROM oauth_accounts WHERE id=?1",
                     [id],
@@ -567,6 +576,9 @@ impl Upstream {
         affinity: Option<&str>,
         excluded: &[i64],
     ) -> std::result::Result<Selection, SelectError> {
+        if !self.routing_policy().await?.codex() {
+            return Err(SelectError::ModelUnavailable);
+        }
         let cached_model = model.to_owned();
         let cached_excluded = excluded.to_vec();
         let cached=self.db.call(move |conn| {
@@ -850,12 +862,18 @@ impl Upstream {
             .db
             .call(|conn| {
                 let now = Utc::now().timestamp();
+                if !crate::platform::Policy::read(conn)?.codex() {
+                    return Ok(Err(SelectError::UpstreamUnavailable));
+                }
                 let accounts = oauth::list(conn)?;
                 let mut wait = None;
                 for account in accounts
                     .into_iter()
                     .filter(|account| account.state == "active")
                 {
+                    if !crate::account_preferences::effective(conn, account.id)?.enabled {
+                        continue;
+                    }
                     let cooldown = account.cooldown_until.filter(|until| *until > now);
                     let health = account.health_until.filter(|until| *until > now);
                     let candidate = match (cooldown, health) {
@@ -886,6 +904,10 @@ impl Upstream {
             .db
             .call(move |conn| {
                 let now = Utc::now().timestamp();
+                let policy = crate::platform::Policy::read(conn)?;
+                if !policy.platform() {
+                    return Ok(false);
+                }
                 for owner in crate::platform::routes::owners(conn)? {
                     let Ok(account) = crate::platform::routes::account(conn, &vault, owner, now)
                     else {
@@ -897,7 +919,7 @@ impl Upstream {
                     }
                     if let Ok(models) = crate::platform::routes::models(conn, owner, now) {
                         for model in models {
-                            if crate::platform::routes::model_spending_permitted(conn, &model.id)? {
+                            if crate::platform::routes::fallback_eligible(conn, &model.id, now)? {
                                 return Ok(true);
                             }
                         }
@@ -932,6 +954,9 @@ impl Upstream {
         model: &str,
         id: i64,
     ) -> std::result::Result<Selection, SelectError> {
+        if !self.routing_policy().await?.allows(id) {
+            return Err(SelectError::UpstreamUnavailable);
+        }
         if id < 0 {
             let account = self
                 .account(id)
@@ -1053,6 +1078,9 @@ impl Upstream {
         let id = account.info.id;
         let generation = account.info.generation;
         if id < 0 {
+            if !self.routing_policy().await?.platform() {
+                return Err(SelectError::UpstreamUnavailable);
+            }
             let current = self
                 .account(id)
                 .await
@@ -1074,6 +1102,7 @@ impl Upstream {
         match self
             .db
             .call(move |conn| {
+                if !crate::platform::Policy::read(conn)?.codex() { return Err("Codex routing is disabled".into()); }
                 let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts WHERE id=?1 AND generation=?2 AND state='active')",params![id,generation],|row|row.get(0))?;
                 if !valid { return Err("OAuth account changed".into()); }
                 let now=Utc::now().timestamp();
@@ -1127,7 +1156,7 @@ impl Upstream {
                 .call(move |conn| crate::platform::routes::model_spending_permitted(conn, &model))
                 .await?
             {
-                return Err("Platform spending is disabled for Codex models".into());
+                return Err("Platform routing is disabled for this model".into());
             }
             let prepared;
             let body = if embedding {

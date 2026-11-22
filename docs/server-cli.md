@@ -52,6 +52,7 @@ Without saved config, local development defaults to files in the working directo
 | `admin oauth policy ID --locked true` | Preserve the operator lock marker for older clients and rollback; personal availability changes are no longer supported |
 | `admin oauth disable ID` | Reversibly deactivate routing for everyone; retain OAuth state and set the legacy lock marker |
 | `admin oauth enable ID` | Reactivate routing while preserving the operator lock |
+| `admin oauth platform resources [codex] [platform]` | Show or immediately set which upstream resources may serve new requests; choose either or both |
 | `admin backup create --to PATH` | Snapshot live SQLite state and both keys |
 | `admin backup verify --from PATH` | Verify private snapshot integrity/decryptability offline |
 | `admin backup restore --from PATH --to PATH` | Restore into a fresh private directory |
@@ -62,6 +63,10 @@ Reports use readable text by default and `--json` for scripts. Secrets and OAuth
 `serve --gateway-uid` is required unless saved in config. Service/gateway UIDs must differ; same-UID mode is only for local tests. Wildcard listening is rejected unless `--allow-container-listen` is explicitly selected for an isolated container with loopback-published ingress. Never expose it directly to the Internet.
 
 Account policy controls availability and activation locks only. Priorities, switching thresholds and routine expiring-reset redemption are automatic; old manual routing/redemption mutations through management still fail explicitly. Read [automatic selection](account-pool.md#ranking-and-switching) and the explicit [schema 11 to 12 migration](automatic-routing-migration.md) before deployment. Historical routing overrides remain stored only for rollback.
+
+The separate [routing resources policy](platform-api.md#select-routing-resources)
+applies server-wide and leaves account availability and credentials intact. With
+both resources enabled, Codex still takes precedence for shared models.
 
 For an [interactive local reset](cli.md#interactive-local-reset), run `sudo -u exetrouter exrd admin oauth reset ACCOUNT` with access to the configured state in a native deployment, or `sudo docker compose exec exrd exrd admin oauth reset ACCOUNT` from the deployment directory. Do not pass `-T` to Compose: confirmation requires terminal stdin and stdout. The optional Docker host launcher supports `exrd admin oauth reset ACCOUNT` from an interactive terminal. This action is not available through the restricted SSH gateway.
 

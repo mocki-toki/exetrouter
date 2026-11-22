@@ -24,6 +24,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/018_platform_observations.sql"),
     include_str!("migrations/019_platform_routes.sql"),
     include_str!("migrations/020_platform_manual_balance.sql"),
+    include_str!("migrations/021_routing_resources.sql"),
 ];
 pub const SCHEMA_VERSION: usize = MIGRATIONS.len();
 const QUEUE_CAPACITY: usize = 32;
@@ -155,6 +156,42 @@ impl Database {
 mod tests {
     use super::*;
     use crate::{authenticate, create_token, create_user};
+
+    #[test]
+    fn routing_resources_migration_preserves_legacy_policy_and_explicit_selection_on_reupgrade() {
+        use crate::platform::{apply_legacy_fallback, Policy, Resources};
+        for legacy_fallback in [false, true] {
+            let conn = Connection::open_in_memory().unwrap();
+            for migration in &MIGRATIONS[..20] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 20).unwrap();
+            conn.execute(
+                "UPDATE platform_policy SET codex_fallback_allowed=?1",
+                [legacy_fallback],
+            )
+            .unwrap();
+            init(&conn).unwrap();
+            let inherited = Policy::read(&conn).unwrap();
+            assert!(inherited.codex() && inherited.platform());
+            assert_eq!(inherited.shared_platform(), legacy_fallback);
+            Resources::Platform.set(&conn).unwrap();
+            conn.pragma_update(None, "user_version", 20).unwrap();
+            init(&conn).unwrap();
+            apply_legacy_fallback(&conn, !legacy_fallback).unwrap();
+            let explicit = Policy::read(&conn).unwrap();
+            assert!(!explicit.codex() && explicit.shared_platform());
+            assert_eq!(
+                conn.query_row(
+                    "SELECT codex_fallback_allowed FROM platform_policy",
+                    [],
+                    |row| row.get::<_, bool>(0)
+                )
+                .unwrap(),
+                legacy_fallback
+            );
+        }
+    }
 
     #[test]
     fn schema_15_preserves_existing_token_secret_and_defaults_to_enabled_without_fast() {

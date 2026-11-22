@@ -15,6 +15,8 @@ pub struct Config {
     #[serde(default)]
     pub fast_mode: bool,
     #[serde(default)]
+    pub routing_resources: Option<crate::platform::Resources>,
+    #[serde(default)]
     pub platform_codex_fallback: Option<bool>,
 }
 

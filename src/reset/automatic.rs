@@ -73,6 +73,9 @@ pub(super) fn eligible_metadata<'a>(
 }
 
 pub(super) fn authorized(conn: &Connection, id: i64, generation: i64, now: i64) -> Result<bool> {
+    if !crate::platform::Policy::read(conn)?.codex() {
+        return Ok(false);
+    }
     // Require an active operator-enabled account and at least one router user.
     let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts a LEFT JOIN account_policy p ON p.account_id=a.id WHERE a.id=?1 AND a.generation=?2 AND a.state='active' AND COALESCE(p.enabled,1)=1 AND EXISTS(SELECT 1 FROM users))",params![id,generation],|r|r.get(0))?;
     if !valid || crate::health::paused(conn, id, now)?.is_some() {
