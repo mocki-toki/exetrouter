@@ -1,6 +1,6 @@
 # OpenAI-compatible API
 
-ExetRouter supports the routes below, authenticated with a router bearer. It uses ChatGPT Codex OAuth upstream. SDK/native-client verification is recorded in [compatibility](compatibility.md#verified-versions-and-scope); support here does not imply the complete OpenAI Platform API.
+ExetRouter supports the routes below, authenticated with a router bearer. The operator selects [Codex, Platform or both](platform-api.md#select-routing-resources) upstream. SDK/native-client verification is recorded in [compatibility](compatibility.md#verified-versions-and-scope); support here does not imply the complete OpenAI Platform API.
 
 | Route | Supported surface |
 | --- | --- |

@@ -4,7 +4,8 @@ ExetRouter uses `https://chatgpt.com/backend-api/codex` with ChatGPT Codex OAuth
 
 Configured [Platform routes](platform-api.md) additionally use the fixed public
 API with project working keys, independent context identities and health. Codex
-remains primary; the operator-controlled same-model API fallback is quota-only,
+remains primary [when both resources are enabled](platform-api.md#select-routing-resources);
+same-model API fallback in that mode is quota-only,
 never an authentication/backoff bypass. Platform compaction is unary public API
 compaction, not the Codex trigger described below. Non-generating native warmup
 is unsupported on HTTP-backed Platform routes and never becomes billed inference.

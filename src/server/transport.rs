@@ -418,6 +418,17 @@ impl RequestLog {
             .db
             .call(move |conn| {
                 let tx = conn.transaction()?;
+                let policy = crate::platform::Policy::read(&tx)?;
+                if !policy.allows(record.account_id)
+                    || (record.account_id < 0
+                        && !policy.platform_model(
+                            &tx,
+                            &record.model,
+                            chrono::Utc::now().timestamp(),
+                        )?)
+                {
+                    return Err("routing resource no longer available".into());
+                }
                 if record.account_id < 0 {
                     record.account_id = crate::platform::routes::parent(&tx, record.account_id)?;
                 }

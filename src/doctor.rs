@@ -148,6 +148,7 @@ pub(crate) fn snapshot(
     limits: LimitsReport,
     now: i64,
 ) -> Result<ServerReport> {
+    let policy = crate::platform::Policy::read(conn)?;
     let (active, disabled, reauth, expires, updated): (
         usize,
         usize,
@@ -171,8 +172,8 @@ pub(crate) fn snapshot(
             ))
         },
     )?;
-    let mut updated = updated;
-    let mut model_ids=conn.prepare("SELECT DISTINCT model FROM oauth_models m JOIN oauth_accounts a ON a.id=m.account_id WHERE a.state='active'")?.query_map([],|r|r.get::<_,String>(0))?.collect::<std::result::Result<std::collections::BTreeSet<_>,_>>()?;
+    let mut updated = updated.filter(|_| policy.codex());
+    let mut model_ids=conn.prepare("SELECT DISTINCT model FROM oauth_models m JOIN oauth_accounts a ON a.id=m.account_id WHERE a.state='active' AND ?1")?.query_map([policy.codex()],|r|r.get::<_,String>(0))?.collect::<std::result::Result<std::collections::BTreeSet<_>,_>>()?;
     let mut platform_ready = false;
     let mut platform_catalog = false;
     for owner in crate::platform::routes::owners(conn)? {
@@ -279,9 +280,9 @@ pub(crate) fn snapshot(
     } else {
         "configured"
     };
-    let catalog_status = if active == 0 || !configured {
+    let catalog_status = if !configured || (active == 0 && !platform_catalog) {
         "unavailable"
-    } else if current_catalogs > 0 || platform_catalog {
+    } else if (policy.codex() && current_catalogs > 0) || platform_catalog {
         "current"
     } else if updated.is_none() {
         "not_loaded"
@@ -302,7 +303,7 @@ pub(crate) fn snapshot(
     } else {
         None
     };
-    let ready = pool.configured_accounts > 0 || platform_ready;
+    let ready = (policy.codex() && pool.configured_accounts > 0) || platform_ready;
     Ok(ServerReport {
         capabilities: serde_json::Value::Null,
         schema_version: 1,

@@ -45,6 +45,7 @@ fn claim(
         params![account, now-WEEK, now-60], |r| r.get(0))?;
     let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts WHERE id=?1 AND generation=?2 AND state='active')", params![account,generation], |row| row.get(0))?;
     if !valid
+        || !crate::platform::Policy::read(&tx)?.codex()
         || blocked
         || !crate::account_preferences::effective(&tx, account)?.enabled
         || crate::health::paused(&tx, account, now)?.is_some()
@@ -245,6 +246,9 @@ mod tests {
             .unwrap();
         assert!(claim(&mut conn, account, 0, user, now).unwrap().is_none());
         crate::account_preferences::set_policy(&mut conn, account, Some(true), None, None).unwrap();
+        crate::platform::Resources::Platform.set(&conn).unwrap();
+        assert!(claim(&mut conn, account, 0, user, now).unwrap().is_none());
+        crate::platform::Resources::Both.set(&conn).unwrap();
         assert!(claim(&mut conn, account, 0, user, now).unwrap().is_some());
         conn.execute(
             "UPDATE oauth_quota_windows SET observed_at=?1,reset_at=?2",

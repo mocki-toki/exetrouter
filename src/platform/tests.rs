@@ -412,11 +412,10 @@ async fn real_costs_and_thirty_day_key_lifecycle_are_shared_bounded_encrypted_an
         assert!(count <= 91);
         let h = crate::quota_history::range(conn, 1, "90d", None, chrono::Utc::now().timestamp())?;
         assert!(h.platform.unwrap().points.len() > 80);
-        assert!(spending_permitted(conn, false)?);
-        assert!(!spending_permitted(conn, true)?);
-        set_codex_fallback(conn, true)?;
-        assert!(spending_permitted(conn, true)?);
-        assert!(spending_permitted(conn, false)?);
+        assert!(Policy::read(conn)?.platform());
+        assert!(!Policy::read(conn)?.shared_platform());
+        Resources::Both.set(conn)?;
+        assert!(Policy::read(conn)?.shared_platform());
         Ok(())
     })
     .await
@@ -538,9 +537,9 @@ async fn migration_rollback_keeps_unknown_mutations_keys_and_policy_and_retentio
         .await
         .unwrap();
     db.call(move|conn| {
-        set_codex_fallback(conn,true)?;
+        apply_legacy_fallback(conn,true)?;
         conn.pragma_update(None,"user_version",17)?;crate::init(conn)?;
-        verify_credentials(conn,&vault)?;assert!(codex_fallback_allowed(conn)?);
+        verify_credentials(conn,&vault)?;assert!(Policy::read(conn)?.shared_platform());
         let day=chrono::Utc::now().timestamp()/86400*86400;
         for n in 0..800 {conn.execute("INSERT OR REPLACE INTO platform_cost_history(account_id,generation,day,end_at,observed_at,usd_nanos) VALUES(1,1,?1,?2,?2,1)",params![day+n*86400,day+(n+1)*86400])?;}
         prune(conn,day+800*86400)?;prune(conn,day)?;

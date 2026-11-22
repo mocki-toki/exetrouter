@@ -416,6 +416,9 @@ async fn handle(
         .db
         .call(move |conn| {
             let tx = conn.transaction()?;
+            if !crate::platform::Policy::read(&tx)?.codex() {
+                return Err("Codex routing is disabled".into());
+            }
             usage::begin_request(&tx, &record)?;
             let order = crate::health::next(&tx)?;
             tx.commit()?;
