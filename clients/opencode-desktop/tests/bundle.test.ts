@@ -365,9 +365,9 @@ test("rendered panel has five native web views, account details, usage graph, to
     click("7 days"); await delay(10)
     assert.equal(historyInputs.at(-1)?.before,undefined,"changing the interval returns to the latest window")
     setState((old) => ({ ...old, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => ({ ...a, history: a.history && { ...a.history, intervalSeconds: 600, to: a.history.to + 600, points: a.history.points.map((p) => { const hour = p.hour === a.history!.to - 3600 ? a.history!.to : p.hour + 600; return { ...p, hour, observedAt: hour + 60 } }) } })) } }))
-    assert.match(accountDialog.textContent, /10-minute observations/)
+    assert.doesNotMatch(accountDialog.textContent, /10-minute observations/)
     await delay(10)
-    const tenMinuteChart = accountDialog.querySelector('svg[aria-label^="Subscription quota left"]')!
+    const tenMinuteChart = accountDialog.querySelector('svg[aria-label^="Limit history"]')!
     tenMinuteChart.dispatchEvent(new window.KeyboardEvent("keydown", { key: "End", bubbles: true }))
     assert.match(accountDialog.querySelector('[role="status"]')!.textContent, /8-hour.*0% left.*Weekly.*50% left/)
     assert.equal(tenMinuteChart.querySelectorAll('[data-window="primary"] circle').length, 2, "missing ten-minute buckets remain gaps")
@@ -378,7 +378,7 @@ test("rendered panel has five native web views, account details, usage graph, to
     }) } }))
     await delay(10)
     assert.doesNotMatch(accountDialog.textContent, /Invalid Date/)
-    assert.match(accountDialog.textContent, /10-minute observations/)
+    assert.match(accountDialog.querySelector('[role="status"]')!.textContent, /8-hour.*0% left.*Weekly.*50% left/)
     assert.equal(accountDialog.querySelectorAll('[data-window="primary"] circle').length, 2, "legacy IPC history keeps its recorded points")
     click("Done")
     await selectTab("Tokens")
