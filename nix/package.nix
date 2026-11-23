@@ -6,6 +6,9 @@
   wl-clipboard,
   xclip,
   stdenv,
+  pkg-config,
+  sqlite,
+  zstd,
 }: let
   manifest = builtins.fromTOML (builtins.readFile ../Cargo.toml);
 in
@@ -22,7 +25,8 @@ in
       "tokio-tungstenite-0.28.0" = "sha256-V1xmnrfRWOcZZogelZEA4vvyMj2awCfHVA5/glQ6KAI=";
       "tungstenite-0.27.0" = "sha256-VVHhk7l9J/sEmG3q/UuV/sQ3f+fGsmq5vumSy8vbMvw=";
     };
-    nativeBuildInputs = [makeWrapper];
+    nativeBuildInputs = [makeWrapper pkg-config];
+    buildInputs = [sqlite zstd];
     # CLI fixtures require host timezone data; run Rust tests in the dev shell.
     doCheck = false;
     postInstall = ''

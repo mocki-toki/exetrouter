@@ -147,7 +147,8 @@ in
   assert valid named;
   assert valid integration;
   assert rejectsIntegration {programs.opencode.package = lib.mkForce (stub // {version = "1.18.33";});};
-  assert rejectsIntegration {programs.opencode.package = lib.mkForce (stub // {version = "2.3.0";});};
+  assert valid (integrated {programs.opencode.package = lib.mkForce (stub // {version = "2.3.0";});});
+  assert rejectsIntegration {programs.opencode.package = lib.mkForce (stub // {version = "2.4.0";});};
   assert valid (integrated {programs.opencode.web.enable = true;});
   assert valid (withAPI "https://api.example.com/v1");
   assert rejectsAPI "http://localhost.example.com/v1";

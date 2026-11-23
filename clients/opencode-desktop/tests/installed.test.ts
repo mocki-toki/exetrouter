@@ -13,8 +13,8 @@ import { catalog } from "./fixtures"
 
 const binary = process.env.EXETROUTER_OPENCODE_PLUGIN_BIN
 
-test("packed plugin loads in OpenCode 2.2.0 with native credentials and a loopback catalog, without inference", { skip: !binary, timeout: 120_000 }, async (t) => {
-  assert.match(execFileSync(binary!, ["--version"], { encoding: "utf8" }), /\bv2\.2\.0\b/)
+test("packed plugin loads in supported OpenCode 2.2/2.3 with native credentials and a loopback catalog, without inference", { skip: !binary, timeout: 120_000 }, async (t) => {
+  assert.match(execFileSync(binary!, ["--version"], { encoding: "utf8" }), /\bv?2\.(?:2|3)\.\d+\b/)
   const root = await mkdtemp(join(tmpdir(), "exetrouter-opencode-plugin-"))
   let stop: (() => Promise<void>) | undefined
   let closeRouter: (() => void) | undefined

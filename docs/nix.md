@@ -118,7 +118,7 @@ The Home Manager module extends `programs.opencode.exr`:
     connections.default.mode = "standalone";
   };
   programs.opencode.exr.enable = true;
-  programs.opencode.package = opencodeV2Package; # Supply your OpenCode 2.2.x derivation.
+  programs.opencode.package = opencodeV2Package; # Supply your OpenCode 2.2.x or 2.3.x derivation.
 }
 ```
 
@@ -129,14 +129,14 @@ The same plugin package supplies the server provider and native desktop GUI.
 The integration does not expose a listener to the
 network, change a model, issue tokens, or restart the shared OpenCode service.
 Supply `programs.opencode.package` from your OpenCode V2 package source. The
-module requires version 2.2.x to match this plugin's experimental API contract;
+module requires version 2.2.x or 2.3.x to match this plugin's experimental API contract;
 the nixpkgs revision pinned here currently defaults to V1 and is rejected.
 The example's `opencodeV2Package` is a placeholder for that derivation, not an
 export of this flake. Later API versions need compatibility validation before
 the guard is widened.
 
 For Desktop, separately add `home.packages = [ pkgs.opencode-desktop ];` using
-a package set that provides a compatible OpenCode 2.2.x Desktop. Desktop loads
+a package set that provides a compatible OpenCode 2.2.x or 2.3.x Desktop. Desktop loads
 the GUI part from the same global plugin registration. To also run the Home
 Manager web service, independently set `programs.opencode.web.enable = true`;
 the browser uses the server provider, not the native desktop dashboard.
