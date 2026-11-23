@@ -4076,6 +4076,9 @@ async fn disconnect_is_not_retried_and_duplicate_terminal_is_counted_once() {
     let body = fixture.post(value).await.text().await.unwrap();
     assert!(body.contains("upstream_interrupted"));
     assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
+    // Short backoffs may wait once and admit a separate request. Exercise the
+    // immediate rejection path here; a separate test covers short admissions.
+    fixture.pause_responses(30).await;
     assert_eq!(fixture.post(request()).await.status(), 503);
     assert_eq!(fixture.mock.requests.lock().unwrap().len(), 1);
     fixture.expire_health().await;
