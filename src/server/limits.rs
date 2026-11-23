@@ -101,6 +101,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_allows_twelve_concurrent_slots_per_user() {
+        let slots = Slots::new(crate::server::DEFAULT_PER_USER_LIMIT);
+        let mut permits = (0..12)
+            .map(|_| slots.acquire(1).unwrap())
+            .collect::<Vec<_>>();
+        let snapshot = slots.snapshot(1);
+        assert_eq!(snapshot.active_for_user, 12);
+        assert_eq!(snapshot.per_user_limit, 12);
+        assert_eq!(snapshot.global_limit, 64);
+        assert_eq!(slots.acquire(1).err(), Some(Full::User));
+        assert!(slots.acquire(2).is_ok());
+        permits.pop();
+        assert!(slots.acquire(1).is_ok());
+    }
+
+    #[test]
     fn release_and_global_rejection_do_not_strand_user_slots() {
         let slots = Slots::new(1);
         let mut permits = (0..GLOBAL_LIMIT as i64)

@@ -489,6 +489,11 @@ mod tests {
         let secret = token["secret"].as_str().unwrap();
         let api = format!("http://{}", local.address);
         let client = reqwest::Client::new();
+        let doctor = local.request(ControlRequest::Doctor).await.unwrap();
+        for kind in ["generations", "websockets"] {
+            assert_eq!(doctor["limits"][kind]["per_user_limit"], 12);
+            assert_eq!(doctor["limits"][kind]["global_limit"], 64);
+        }
         assert_eq!(
             client
                 .get(format!("{api}/v1/models"))

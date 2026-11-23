@@ -324,10 +324,10 @@ fn doctor_is_authenticated_read_only_and_redacts_account_data_through_the_cli() 
     let first = server.control(json!({"action":"doctor"}));
     assert_eq!(first["ok"], true);
     assert_eq!(first["result"]["oauth"]["status"], "no_active_account");
-    assert_eq!(
-        first["result"]["limits"]["generations"]["per_user_limit"],
-        8
-    );
+    for kind in ["generations", "websockets"] {
+        assert_eq!(first["result"]["limits"][kind]["per_user_limit"], 12);
+        assert_eq!(first["result"]["limits"][kind]["global_limit"], 64);
+    }
     let conn = rusqlite::Connection::open(server.dir.path().join("state.sqlite")).unwrap();
     let now = chrono::Utc::now().timestamp();
     // Invalid encrypted bytes prove diagnostics never need secret decryption.
