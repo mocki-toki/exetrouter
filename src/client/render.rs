@@ -125,6 +125,7 @@ pub(super) fn capability_label(id: &str) -> Option<&'static str> {
         "image_input" => Some("Image input"),
         "image_generation" => Some("Image generation"),
         "image_editing" => Some("Image editing"),
+        "embeddings" => Some("Embeddings"),
         _ => None,
     }
 }
@@ -137,12 +138,22 @@ pub(super) fn model_capabilities(row: &Value) -> String {
         .collect::<Vec<_>>()
         .join(" · ")
 }
+pub(super) fn model_platform_label(row: &Value) -> Option<&'static str> {
+    if row["source"] == "platform" {
+        Some("Platform API")
+    } else if row["platform_fallback"] == true {
+        Some("Platform API fallback")
+    } else {
+        None
+    }
+}
 pub(super) fn model_matches(row: &Value, query: &str, capabilities: &[String]) -> bool {
     let searchable = format!(
-        "{} {} {}",
+        "{} {} {} {}",
         field(row, "id"),
         field(row, "display_name"),
-        model_capabilities(row)
+        model_capabilities(row),
+        model_platform_label(row).unwrap_or("")
     )
     .to_lowercase();
     searchable.contains(&query.trim().to_lowercase())
@@ -209,8 +220,8 @@ fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
 pub(super) fn response(kind: &str, v: &Value) -> String {
     match kind {
         "models" => {
-            let rows = model_rows(v).into_iter().map(|m| vec![field(m,"id"), crate::catalog::display_name(&field(m,"display_name")), field(&m["exetrouter"],"context_window"), model_capabilities(m)]).collect::<Vec<_>>();
-            format!("Available models\n\n{}\nExport metadata: exr models --json --format <codex-json|opencode-v1-json|opencode-v2-json>", table(&["MODEL","NAME","CONTEXT","CAPABILITIES"], &rows))
+            let rows = model_rows(v).into_iter().map(|m| vec![field(m,"id"), crate::catalog::display_name(&field(m,"display_name")), field(&m["exetrouter"],"context_window"), model_capabilities(m), model_platform_label(m).unwrap_or("Codex").into()]).collect::<Vec<_>>();
+            format!("Available models\n\n{}\nExport metadata: exr models --json --format <codex-json|opencode-v1-json|opencode-v2-json>", table(&["MODEL","NAME","CONTEXT","CAPABILITIES","ROUTE"], &rows))
         }
         "tokens" => {
             let rows = v.as_array().into_iter().flatten().map(|t| vec![field(t,"id"),field(t,"name"), token_status(t),token_dates(t),match t["fast_mode"].as_bool(){Some(true)=>"Fast: Allow".into(),Some(false)=>"Fast: Block".into(),None=>String::new()}]).collect::<Vec<_>>();
@@ -573,51 +584,35 @@ fn routing_current(account: &Value, now: i64) -> bool {
 }
 
 pub(super) fn account_details(account: &Value, now: i64) -> String {
-    let label = &account["label"];
-    let mut text = format!("{}\n\n", safe(label.as_str().unwrap_or("Account")));
-    for window in account["quota"]["windows"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .take(2)
-    {
-        if let Some(f) = super::quota_forecast::historical(account, window, now) {
-            if let Some(label) = f
-                .current_label(now)
-                .or_else(|| f.status_label(now).map(str::to_owned))
-            {
-                text.push_str(&format!("{} · {label}\n", window_label(window)));
-            }
-        }
-    }
-    for (line, _) in super::quota_forecast::notes(account, now) {
-        text.push_str(&line);
-        text.push('\n');
-    }
-    if account["platform"].is_object() {
-        text.push_str(&crate::platform::render(&account["platform"]));
-        text.push_str("\n\n");
-    }
-    let billing = subscription(&account["subscription"]);
-    if !billing.is_empty() {
-        text.push_str(&billing);
-        text.push_str("\n\n");
+    let mut text = String::new();
+    let billing = &account["subscription"];
+    if billing.is_object() {
+        let price = billing["plan_usd"].as_u64().map_or_else(
+            || "Unknown".into(),
+            |price| format!("{}/month", crate::money::usd(price as f64)),
+        );
+        let day = billing["billing_day"]
+            .as_u64()
+            .map_or_else(|| "Unknown".into(), |day| format!("{day} of every month"));
+        text.push_str(&format!(
+            "Subscription & billing\nSubscription price: {price}\nBilling day: {day}\n\n"
+        ));
     }
     let Some(count) = account["clients"]["count"].as_u64() else {
         text.push_str("Client activity unavailable on this server.");
         return text;
     };
     let scope = if account["clients"]["scope"] == "server" {
-        "all users' recently active tokens"
+        "All users"
     } else {
-        "your recently active tokens"
+        "Your tokens"
     };
-    text.push_str(&format!("Clients: {count} · {scope}\n"));
+    text.push_str(&format!("Clients · {count} · {scope}\n"));
     if account["clients"]["observed_at"]
         .as_i64()
         .is_some_and(|at| !crate::routing::fresh(at, now))
     {
-        text.push_str("Historical activity snapshot; refresh to update.\n");
+        text.push_str("Historical activity snapshot\n");
     }
     if count == 0 {
         text.push_str("No recent inference requests.\n");
@@ -641,31 +636,30 @@ pub(super) fn account_details(account: &Value, now: i64) -> String {
             id
         };
         let running = client["in_flight"].as_u64().unwrap_or(0);
-        text.push_str(&format!("\n{name} · {id}\n"));
+        text.push_str(&format!("\n{name} · {id}"));
         if running > 0 {
-            text.push_str(&format!("Running: {running} · "));
+            text.push_str(&format!(" · {running} running"));
         }
         let age = client["last_request_at"]
             .as_i64()
-            .filter(|at| *at <= now)
-            .map(|at| {
-                let seconds = now - at;
-                if seconds < 60 {
-                    format!("{seconds}s ago")
-                } else {
-                    format!("{}m ago", seconds / 60)
-                }
+            .and_then(|at| now.checked_sub(at).filter(|age| *age >= 0))
+            .map(|seconds| match seconds {
+                0..60 => format!("{seconds}s ago"),
+                60..3600 => format!("{}m ago", seconds / 60),
+                3600..86400 => format!("{}h ago", seconds / 3600),
+                _ => format!("{}d ago", seconds / 86400),
             })
             .unwrap_or_else(|| "Unknown".into());
-        text.push_str(&format!(
-            "Last request: {age} · {}\n",
-            date(&client["last_request_at"])
-        ));
+        let observed = &client["last_request_at"];
+        if observed.is_i64() {
+            text.push_str(&format!("\nLast request: {age} · {}\n", date(observed)));
+        } else {
+            text.push_str("\nLast request: Unknown\n");
+        }
     }
     if account["clients"]["truncated"] == true {
         text.push_str("\nShowing at most 128 tokens, running requests first.\n");
     }
-    text.push_str("\nTokens disappear after 15 minutes without requests; running requests remain visible.\nOne token may represent multiple apps or appear on multiple accounts.");
     text
 }
 

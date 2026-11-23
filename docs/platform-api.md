@@ -93,9 +93,12 @@ integer nanodollars at the implementation's reviewed standard prices, including
 cached input and the existing long-context tier. Each new finalized estimate is
 frozen atomically with usage, not repriced on dashboard reads. This is not an
 invoice: external activity, tool/storage fees and service-tier adjustments are
-excluded. An unpriced or interrupted request makes the remaining total unknown;
-the known subtotal and unpriced count remain visible. Negative results are not
-clamped or used to stop routing.
+excluded. When some requests are unpriced (for example, after an interruption),
+the dashboard and human-readable CLI show a **partial estimate**: the entered
+amount minus known costs, with the number of excluded requests. The figure may
+overstate remaining funds. Their costs remain unknown in accounting, and the
+complete `remaining_usd_nanos` stays null in JSON; `spent_usd_nanos` contains only
+the known subtotal. Negative estimates are not clamped or used to stop routing.
 
 Account details additionally show **Platform organization estimated remaining
 funds**. An independent Costs API query explicitly starts at the manual-entry
@@ -190,10 +193,15 @@ context and 128,000-token output. Public model pages were reviewed November 13,
 [5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna),
 [5.5](https://developers.openai.com/api/docs/models/gpt-5.5)).
 GPT-5.5 supports reasoning through `xhigh`, not `max`.
+Additional streaming Responses IDs reviewed against the [public model pages](https://developers.openai.com/api/docs/models)
+on November 23, 2026: `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-5.4`, `gpt-5.4-pro`,
+`gpt-5.4-mini`, `gpt-5.2`, `gpt-5.2-pro` and `chat-latest`. Limits and reasoning
+settings are model-specific. A Responses listing alone does not establish streaming
+support; for example, the GPT-5.5 Pro page does not list streaming.
 Unknown inventory entries remain inspection-only until their endpoint contract
 is reviewed. No inference probe is used. Availability caches last 15 minutes.
-Distinct eligible Platform IDs follow Codex models; duplicate IDs retain their
-Codex descriptor rather than merging the larger API context window into it.
+Distinct eligible Platform IDs follow Codex models; shared IDs retain their
+Codex descriptor and are marked as Platform fallbacks when the policy permits it.
 
 A working key is marked active only after its model-list read authenticates and
 returns a valid inventory. A failed read does not cause another key to be created;

@@ -1,10 +1,11 @@
 # Subscription history
 
 Account details in the native TUI and OpenCode Desktop show short and weekly
-subscription windows together, with separate colors, a shared 0–100% quota-left
-axis. The native TUI shows seven days; OpenCode Desktop offers rolling **24 hours,
-7 days, 30 days and 90 days**, with arrows to earlier/later intervals. The web chart
-supports pointer/keyboard selection; TUI details use Left/Right and Home/End, with Up/Down for scrolling.
+subscription windows together on a shared 0–100% axis, with a separate color
+for each series. Both dashboards offer rolling **24-hour, 7-day, 30-day and
+90-day** views, defaulting to seven days. In the TUI, `h` changes the period,
+`[` and `]` page through history, and Left/Right or Home/End move the cursor.
+Up/Down scrolls the details.
 Lines and cursor values show only the remaining percentage: a full window is
 100%, an exhausted window is 0%, and quota recovery moves the line upward.
 Storage keeps upstream used percentages; display converts them without changing
@@ -51,7 +52,7 @@ only as new observations arrive. Rolling windows have fixed durations even
 across DST. Collection still uses the existing roughly 30-second passive worker;
 changing bucket size adds no polls.
 
-On request, Desktop adds a Platform API line to the same percent-remaining chart.
+Both dashboards add a Platform API line to the same percent-remaining chart.
 It uses the current positive manual balance and ExetRouter's recorded Platform
 request costs, not organization-wide daily costs. The chart reads sparse changes
 in ten-minute UTC buckets, carries earlier spend into older pages, and stops at
@@ -70,10 +71,10 @@ is introduced. The existing account-scoped history query reads at most 8,642
 numeric points over the previous 30 days; it does not send that wider history
 to clients. Browsing an older chart interval does not change the forecast.
 
-OpenCode Desktop shows one compact current ETA and averages the two depletion
-times when both are available. It caches the value per snapshot, hides it when
-expired or disconnected, and does not show a historical-only ETA or explanatory
-pace labels. The separate labels below describe the terminal clients.
+OpenCode Desktop and the TUI show one compact ETA. They average the current and
+historical depletion times when both are available, cache the value per snapshot,
+and hide it when expired or disconnected. Neither shows a historical-only ETA or
+explanatory pace labels. The separate labels below describe `exr limits` text output.
 
 Two estimates remain distinct:
 
