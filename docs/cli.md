@@ -74,8 +74,9 @@ exr token revoke tok_... --yes
 The OpenCode Desktop and native TUI Usage tabs plot a [standard API USD equivalent](usage-pricing.md) beside tokens and requests. Each model is priced before aggregation, so Astra and Sol are not treated as equally expensive per token. Unknown and unpriced requests remain visible as incomplete estimates; this is not a ChatGPT subscription bill.
 
 Configured Platform accounts can have a [manual balance reconciliation point](platform-api.md#manual-remaining-funds-estimates).
-Overview defaults to the entered amount minus ExetRouter Platform token-cost
-estimates; account details also show the independent, delayed all-organization
+Overview defaults to the entered amount minus known ExetRouter Platform token-cost
+estimates, marked partial if any requests were excluded because their costs are unknown.
+Account details also show the independent, delayed all-organization
 Costs alternative. These are estimates, not a live provider balance or a routing
 cap. Each new entry replaces both starting points, without a monthly auto-refill.
 On a shared server only its local operator may enter the amount, using
@@ -107,7 +108,7 @@ Use an interactive terminal at least 72 columns × 20 rows. Press `?` for help o
 | Overview | Inspect routing, limits and recently active clients. Enter opens read-only account details, including token labels and last-request times. |
 | Usage | View rolling 24-hour, 7-day, 30-day or 90-day intervals, grouped by total, user, model or your API tokens; reported tokens, requests or standard API-equivalent USD. |
 | Tokens | Search names/IDs; copy IDs; create, rename, pause, re-enable, set Fast preference, rotate or revoke tokens. Revoked tokens are hidden. Enter opens actions for the selected search result. |
-| Models | Search names/IDs and filter by capabilities (match all). Enter copies the selected model ID. |
+| Models | Search names/IDs, distinguish direct Platform API and fallback models, and filter by capabilities, including Embeddings. Enter copies the selected model ID. |
 | Settings | Change mode/connection, check/install client updates, and add, reauthorize or disable standalone accounts. Enter activates an action or opens the selected account menu. |
 
 ←/→ changes tabs; ↑/↓ selects items; PageUp/PageDown scrolls; `r` refreshes; `q` or Ctrl-C exits. In Usage, `p` changes the period, `b` changes grouping, `m` cycles reported tokens / requests / USD estimate, and `[` / `]` page older/newer intervals. Select a group with ↑/↓ to see its chart and totals. User groups combine all that user's tokens; token groups show only your own token labels. In Models, `s` opens search, `f` selects required capabilities and `0` clears both. In account details, `h` changes the history period, `[` / `]` page intervals and Left/Right/Home/End move the observation cursor.
@@ -142,7 +143,7 @@ Window labels use reported durations: 480 minutes is **8-hour**, 10080 is **Week
 
 Overview shows remaining quota with red bars at ≤20%, amber through 50%, and green above 50%. Narrow terminals stack windows. Account labels use issuer-provided email metadata; missing claims show `Email unavailable`. Numeric IDs refer to local pool entries.
 
-A `~… to limit` estimate needs at least one minute of fresh, increasing observations in the current dashboard session. It is kept only in memory and disappears after five minutes without change for short windows, or thirty minutes for weekly/longer windows. Failed/stale reads, gaps over one minute, resets, insufficient data or an earlier free reset suppress it. Rounded upstream percentages can hide consumption, so a missing estimate does not mean no usage.
+The TUI shows one depletion estimate, such as `-21h 30m`, in Overview and account details. It uses the current pace and averages it with the historical depletion time when both predict depletion before the reset. The display is cached until the next snapshot and hidden on expiry or connection failure. Without a current estimate, the TUI shows no pace label. [Limit history](quota-history.md) shows Codex quota and the estimated Platform API balance on the same percentage axis.
 
 Doctor reads local metadata and decrypts credentials only to extract account email labels. It does not refresh tokens, make upstream calls or run inference. Its public TLS/WSS and upstream network status remain `not_checked`. The JSON report retains `schema_version=1` and the older single-account `quota` field; `quota_accounts` adds per-account summaries for pools. Older servers may only expose the single-account summary.
 

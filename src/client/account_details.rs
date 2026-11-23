@@ -1,9 +1,9 @@
 //! Scrollable account details with a fixed-cost, clipped chart header.
-use super::render;
-use crate::quota_history::History;
+use super::{quota_forecast::Forecasts, render};
+use crate::quota_history::{History, PlatformBalance};
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Color, Style},
     symbols::Marker,
     text::{Line, Span},
@@ -14,7 +14,6 @@ use ratatui::{
 };
 use serde_json::Value;
 
-const TOP: u16 = 26;
 pub(super) const COLORS: [Color; 6] = [
     Color::Rgb(132, 190, 203),
     Color::Rgb(170, 163, 230),
@@ -25,7 +24,12 @@ pub(super) const COLORS: [Color; 6] = [
 ];
 
 fn history(account: &Value) -> Option<History> {
-    let mut h: History = serde_json::from_value(account["quota_history"].clone()).ok()?;
+    let mut payload = account["quota_history"].clone();
+    let optional = payload.as_object_mut()?.remove("platform_balance");
+    // A bad optional series must not hide the Codex history.
+    payload.as_object_mut()?.remove("platform");
+    let mut h: History = serde_json::from_value(payload).ok()?;
+    h.platform_balance = optional.and_then(|v| serde_json::from_value(v).ok());
     let mut seen = std::collections::BTreeSet::new();
     let interval = h.interval_seconds;
     let valid = matches!(interval, 600 | 3600)
@@ -53,53 +57,84 @@ fn history(account: &Value) -> Option<History> {
 pub(super) fn range(account: &Value) -> Option<(i64, i64, i64)> {
     history(account).map(|h| (h.from_utc, h.to_utc, h.interval_seconds))
 }
-fn details(account: &Value, now: i64) -> String {
-    render::account_details(account, now)
-        .lines()
-        .skip(2)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
 pub(super) fn height(account: &Value, now: i64, width: u16) -> usize {
-    top_height(account) as usize
-        + Paragraph::new(details(account, now))
+    (chart_header(account, width) + 20) as usize
+        + Paragraph::new(render::account_details(account, now))
             .wrap(Wrap { trim: false })
             .line_count(width.max(1))
 }
 
-fn top_height(account: &Value) -> u16 {
-    TOP + if account["platform"].is_object() {
-        4
-    } else {
-        0
-    } + if platform_history(account).is_some() {
-        15
-    } else {
-        0
+fn windows(account: &Value) -> Vec<&Value> {
+    let mut windows: Vec<_> = account["quota"]["windows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|w| w["window_minutes"].as_i64().is_some_and(|m| m > 0))
+        .take(2)
+        .collect();
+    windows.sort_by_key(|w| w["window_minutes"].as_i64());
+    windows
+}
+
+fn card_columns(width: u16) -> usize {
+    match width {
+        102.. => 3,
+        60.. => 2,
+        _ => 1,
     }
 }
-fn platform_history(account: &Value) -> Option<crate::platform::costs::History> {
-    if !account["platform"].is_object() {
-        return None;
+
+fn chart_header(account: &Value, width: u16) -> u16 {
+    let cards = windows(account).len() + usize::from(account["platform"].is_object());
+    2 + 5 * cards.div_ceil(card_columns(width)) as u16
+}
+
+fn platform_history<'a>(account: &Value, history: &'a History) -> Option<&'a PlatformBalance> {
+    let series = history.platform_balance.as_ref()?;
+    let balance = &account["platform"]["balance"];
+    let interval = history.interval_seconds;
+    let first = series.points.first()?;
+    (series.entered_at >= 0
+        && balance["entered_at"].as_i64() == Some(series.entered_at)
+        && balance["initial_usd_nanos"].as_i64() == Some(series.initial_usd_nanos)
+        && balance["exetrouter"]["status"] != "configuration_changed"
+        && series.initial_usd_nanos > 0
+        && first.hour == (series.entered_at / interval * interval).max(history.from_utc)
+        && series.through_bucket % interval == 0
+        && series.through_bucket < history.to_utc
+        && series.points.len() <= ((history.to_utc - history.from_utc) / interval) as usize
+        && series.points.iter().all(|p| {
+            p.hour >= first.hour
+                && p.hour <= series.through_bucket
+                && p.hour % interval == 0
+                && (0.0..=100.0).contains(&p.remaining_percent)
+        })
+        && series
+            .points
+            .windows(2)
+            .all(|p| p[0].hour < p[1].hour && p[0].remaining_percent >= p[1].remaining_percent))
+    .then_some(series)
+}
+
+pub(super) fn platform_summary(platform: &Value) -> (&'static str, String, Option<f64>) {
+    let balance = &platform["balance"];
+    let remaining = crate::platform::balance::display_remaining_nanos(balance);
+    let initial = balance["initial_usd_nanos"].as_i64();
+    let dollars = |n: i64| crate::money::usd(n as f64 / 1e9);
+    let mut amount = remaining.map_or_else(|| "Unknown".into(), dollars);
+    if let Some(initial) = initial {
+        amount.push_str(&format!(" / {}", dollars(initial)));
     }
-    let h: crate::platform::costs::History =
-        serde_json::from_value(account["quota_history"]["platform"].clone()).ok()?;
-    let mut seen = std::collections::BTreeSet::new();
-    (h.interval_seconds == 86400
-        && h.to_utc > h.from_utc
-        && h.to_utc - h.from_utc <= 90 * 86400
-        && h.points.len() <= 92
-        && h.points.iter().all(|p| {
-            p.from_utc >= h.from_utc
-                && p.from_utc % 86400 == 0
-                && p.to_utc <= h.to_utc
-                && p.to_utc > p.from_utc
-                && p.to_utc <= p.from_utc + 86400
-                && p.observed_at >= p.to_utc
-                && p.usd_nanos >= 0
-                && seen.insert(p.from_utc)
-        }))
-    .then_some(h)
+    let label = if remaining.is_some() && balance["exetrouter"]["status"] == "unpriced_requests" {
+        "Platform API · partial estimate"
+    } else {
+        "Platform API · estimated left"
+    };
+    let percent = remaining
+        .zip(initial)
+        .filter(|(_, initial)| *initial > 0)
+        .map(|(left, initial)| left as f64 / initial as f64 * 100.0);
+    (label, amount, percent)
 }
 pub(super) fn cost_meter(buf: &mut Buffer, area: Rect, percent: Option<f64>) {
     if area.is_empty() {
@@ -149,12 +184,14 @@ pub(super) fn draw(
     now: i64,
     scroll: u16,
     selected: Option<i64>,
+    forecasts: &Forecasts,
 ) {
     if area.is_empty() {
         return;
     }
     let width = area.width;
-    let top_height = top_height(account);
+    let header = chart_header(account, width);
+    let top_height = header + 20;
     let mut buf = Buffer::empty(Rect::new(0, 0, width, top_height));
     put(
         &mut buf,
@@ -165,68 +202,75 @@ pub(super) fn draw(
         ),
         Color::White,
     );
-    let windows: Vec<_> = account["quota"]["windows"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|w| w["window_minutes"].as_i64().is_some())
-        .take(2)
-        .collect();
-    let columns = windows.len().max(1) as u16;
-    for (i, w) in windows.iter().enumerate() {
-        let gap = if columns > 1 { 2 } else { 0 };
-        let col_width = width.saturating_sub(gap) / columns;
-        let x = i as u16 * (col_width + gap);
-        let wwidth = if i + 1 == windows.len() {
-            width - x
-        } else {
-            col_width
-        };
-        let label = render::window_label(w);
-        Paragraph::new(label)
-            .style(Style::default().fg(Color::Gray))
-            .render(Rect::new(x, 2, wwidth, 1), &mut buf);
-        Paragraph::new(format!(
-            "{} remaining",
-            render::percent(&w["remaining_percent"])
-        ))
-        .style(Style::default().fg(COLORS[i]).bold())
-        .render(Rect::new(x, 3, wwidth, 1), &mut buf);
-        meter(
-            &mut buf,
-            Rect::new(x, 4, wwidth, 1),
-            w["remaining_percent"].as_f64(),
-        );
-        Paragraph::new(format!("Resets {}", chart_date(w["reset_at"].as_i64())))
-            .style(Style::default().fg(Color::Gray))
-            .render(Rect::new(x, 5, wwidth, 1), &mut buf);
+    let mut cards: Vec<_> = windows(account).into_iter().map(Some).collect();
+    if account["platform"].is_object() {
+        cards.push(None);
+    }
+    for (i, row) in cards.chunks(card_columns(width)).enumerate() {
+        let y = 2 + 5 * i as u16;
+        let col_width = (width - 2 * (row.len() as u16 - 1)) / row.len() as u16;
+        for (col, window) in row.iter().enumerate() {
+            let x = col as u16 * (col_width + 2);
+            let wwidth = if col + 1 == row.len() {
+                width - x
+            } else {
+                col_width
+            };
+            let line = |dy| Rect::new(x, y + dy, wwidth, 1);
+            let (label, value) = if let Some(w) = window {
+                let eta = forecasts
+                    .label(account, w, now)
+                    .map_or_else(String::new, |label| format!("  {label}"));
+                let current = !account["refresh_error"].is_string()
+                    && w["status"] == "current"
+                    && w["observed_at"]
+                        .as_i64()
+                        .is_some_and(|at| crate::routing::fresh(at, now));
+                meter(
+                    &mut buf,
+                    line(2),
+                    current.then(|| w["remaining_percent"].as_f64()).flatten(),
+                );
+                Paragraph::new(format!("Resets {}", chart_date(w["reset_at"].as_i64())))
+                    .style(Style::default().fg(Color::Gray))
+                    .render(line(3), &mut buf);
+                (
+                    render::window_label(w),
+                    format!("{} left{eta}", render::percent(&w["remaining_percent"])),
+                )
+            } else {
+                let (label, value, percent) = platform_summary(&account["platform"]);
+                cost_meter(&mut buf, line(2), percent);
+                (label.into(), value)
+            };
+            Paragraph::new(label)
+                .style(Style::default().fg(Color::Gray))
+                .render(line(0), &mut buf);
+            Paragraph::new(value)
+                .style(Style::default().fg(Color::White).bold())
+                .render(line(1), &mut buf);
+        }
     }
     put(
         &mut buf,
-        7,
-        Line::styled(
-            if account["quota_history"]["interval_seconds"] == 3600 {
-                "Subscription history · hourly"
-            } else {
-                "Subscription history · 10-minute steps"
-            },
-            Style::default().bold(),
-        ),
+        header,
+        Line::styled("Limit history", Style::default().bold()),
         Color::White,
     );
-    let chart_area = Rect::new(0, 9, width, 12);
+    let chart_area = Rect::new(0, header + 2, width, 12);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Quota left ");
-    let span = range(account).map(|(from, to, _)| to - from);
+        .title(" Left ");
+    let history = history(account);
+    let span = history.as_ref().map(|h| h.to_utc - h.from_utc);
     let mut periods = Vec::new();
     for (label, duration) in [
-        ("24 hours", 86400),
-        ("7 days", 7 * 86400),
-        ("30 days", 30 * 86400),
-        ("90 days", 90 * 86400),
+        ("24h", 86400),
+        ("7d", 7 * 86400),
+        ("30d", 30 * 86400),
+        ("90d", 90 * 86400),
     ] {
         periods.push(Span::styled(
             format!(" {label} "),
@@ -238,8 +282,12 @@ pub(super) fn draw(
         ));
         periods.push(Span::raw(" "));
     }
-    put(&mut buf, 8, Line::from(periods), Color::White);
-    if let Some(h) = history(account).filter(|h| !h.points.is_empty()) {
+    put(&mut buf, header + 1, Line::from(periods), Color::White);
+    let platform = history.as_ref().and_then(|h| platform_history(account, h));
+    if let Some(h) = history
+        .as_ref()
+        .filter(|h| !h.points.is_empty() || platform.is_some())
+    {
         let mut kinds: Vec<_> = h.points.iter().map(|p| p.kind.as_str()).collect();
         kinds.sort_unstable();
         kinds.dedup();
@@ -314,9 +362,50 @@ pub(super) fn draw(
                 })
                 .style(Style::default().fg(colors[*i]))
         }));
+        let platform_points = platform.map(|series| {
+            let x = |hour| (hour - h.from_utc) as f64 / interval as f64;
+            let mut points = Vec::with_capacity(series.points.len() * 2);
+            let mut previous = None;
+            for p in &series.points {
+                if let Some(left) = previous {
+                    points.push((x(p.hour), left));
+                }
+                points.push((x(p.hour), p.remaining_percent));
+                previous = Some(p.remaining_percent);
+            }
+            if let Some(last) = series
+                .points
+                .last()
+                .filter(|p| p.hour < series.through_bucket)
+            {
+                points.push((x(series.through_bucket), last.remaining_percent));
+            }
+            points
+        });
+        if let Some(points) = &platform_points {
+            datasets.push(
+                Dataset::default()
+                    .data(points)
+                    .marker(Marker::Braille)
+                    .graph_type(if points.len() == 1 {
+                        GraphType::Scatter
+                    } else {
+                        GraphType::Line
+                    })
+                    .style(Style::default().fg(COLORS[3])),
+            );
+        }
         let label = |at: i64| {
             chrono::DateTime::from_timestamp(at, 0)
-                .map(|d| d.with_timezone(&chrono::Local).format("%b %-d").to_string())
+                .map(|d| {
+                    d.with_timezone(&chrono::Local)
+                        .format(if span == Some(86400) {
+                            "%-I:%M %p"
+                        } else {
+                            "%b %-d"
+                        })
+                        .to_string()
+                })
                 .unwrap_or_default()
         };
         let labels = [0, last / 2, last].map(|i| Line::from(label(h.from_utc + i * interval)));
@@ -335,16 +424,11 @@ pub(super) fn draw(
                     .style(Style::default().fg(Color::Gray)),
             )
             .render(chart_area, &mut buf);
-        let mut legend = Vec::new();
         let mut values = Vec::new();
         for (i, kind) in kinds.iter().enumerate() {
             let latest = h.points.iter().rev().find(|p| p.kind == *kind).unwrap();
             let w = serde_json::json!({"window_minutes":latest.window_minutes});
             let label = render::window_label(&w);
-            legend.push(Span::styled(
-                format!("● {label}   "),
-                Style::default().fg(colors[i]),
-            ));
             let value = h
                 .points
                 .iter()
@@ -361,16 +445,40 @@ pub(super) fn draw(
                 Style::default().fg(colors[i]),
             ));
         }
-        Paragraph::new(Line::from(legend))
-            .alignment(Alignment::Right)
-            .render(Rect::new(0, 25, width, 1), &mut buf);
-        put(&mut buf, 22, chart_date(Some(selected)), Color::White);
-        if width < 80 {
-            for (i, value) in values.into_iter().take(2).enumerate() {
-                put(&mut buf, 23 + i as u16, Line::from(value), Color::White);
+        if let Some(series) = platform {
+            let value = if selected <= series.through_bucket {
+                let idx = series.points.partition_point(|p| p.hour <= selected);
+                idx.checked_sub(1)
+                    .map(|i| series.points[i].remaining_percent)
+            } else {
+                None
+            };
+            let text = value.map_or_else(
+                || "Not observed".into(),
+                |left| format!("{} left", render::percent(&left.into())),
+            );
+            values.push(Span::styled(
+                format!("Platform API {text}"),
+                Style::default().fg(COLORS[3]),
+            ));
+        }
+        put(
+            &mut buf,
+            header + 14,
+            chart_date(Some(selected)),
+            Color::White,
+        );
+        if width < 85 {
+            for (i, value) in values.into_iter().enumerate() {
+                put(
+                    &mut buf,
+                    header + 15 + i as u16,
+                    Line::from(value),
+                    Color::White,
+                );
             }
         } else {
-            put(&mut buf, 23, Line::from(values), Color::White);
+            put(&mut buf, header + 15, Line::from(values), Color::White);
         }
     } else {
         Paragraph::new(if account["quota_history"].is_object() {
@@ -382,112 +490,6 @@ pub(super) fn draw(
         .style(Style::default().fg(Color::Gray))
         .block(block)
         .render(chart_area, &mut buf);
-    }
-    let shift = if account["platform"].is_object() {
-        4
-    } else {
-        0
-    };
-    if shift > 0 {
-        for y in (7..TOP).rev() {
-            for x in 0..width {
-                buf[(x, y + shift)] = buf[(x, y)].clone();
-            }
-        }
-        for y in 7..11 {
-            for x in 0..width {
-                buf[(x, y)].reset();
-            }
-        }
-        let c = &account["platform"]["balance"];
-        let remaining = c["exetrouter"]["remaining_usd_nanos"]
-            .as_i64()
-            .map(|n| n as f64 / 1e9);
-        let budget = c["initial_usd_nanos"].as_i64().map(|n| n as f64 / 1e9);
-        put(
-            &mut buf,
-            7,
-            crate::platform::balance::headline(&account["platform"]),
-            COLORS[3],
-        );
-        cost_meter(
-            &mut buf,
-            Rect::new(0, 8, width, 1),
-            remaining
-                .zip(budget)
-                .filter(|(_, b)| *b > 0.)
-                .map(|(s, b)| s / b * 100.),
-        );
-        put(
-            &mut buf,
-            9,
-            "ExetRouter token estimate · organization alternative below",
-            Color::Gray,
-        );
-    }
-    if let Some(h) = platform_history(account) {
-        let y = TOP + shift;
-        put(
-            &mut buf,
-            y,
-            "Platform API costs · daily USD · unavailable days remain gaps",
-            COLORS[3],
-        );
-        let points: Vec<_> = h
-            .points
-            .iter()
-            .map(|p| {
-                (
-                    (p.from_utc - h.from_utc) as f64 / 86400.,
-                    p.usd_nanos as f64 / 1e9,
-                )
-            })
-            .collect();
-        let maximum = points.iter().map(|(_, usd)| *usd).fold(0.01, f64::max);
-        let data = Dataset::default()
-            .data(&points)
-            .marker(Marker::Braille)
-            .graph_type(GraphType::Scatter)
-            .style(Style::default().fg(COLORS[3]));
-        let label = |at: i64| {
-            chrono::DateTime::from_timestamp(at, 0)
-                .map(|d| d.with_timezone(&chrono::Local).format("%b %-d").to_string())
-                .unwrap_or_default()
-        };
-        Chart::new(vec![data])
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            )
-            .x_axis(
-                Axis::default()
-                    .bounds([0., ((h.to_utc - h.from_utc) as f64 / 86400.).max(1.)])
-                    .labels([label(h.from_utc), label(h.to_utc)]),
-            )
-            .y_axis(Axis::default().bounds([0., maximum]).labels([
-                crate::money::usd(0.),
-                crate::money::usd(maximum / 2.),
-                crate::money::usd(maximum),
-            ]))
-            .render(Rect::new(0, y + 1, width, 11), &mut buf);
-        let selected = selected.unwrap_or(h.to_utc - 1);
-        let point = h
-            .points
-            .iter()
-            .find(|p| p.from_utc <= selected && selected < p.to_utc);
-        put(
-            &mut buf,
-            y + 12,
-            format!(
-                "{} · {}",
-                chart_date(Some(selected)),
-                point
-                    .map(|p| crate::money::usd(p.usd_nanos as f64 / 1e9))
-                    .unwrap_or_else(|| "Not observed".into())
-            ),
-            Color::Gray,
-        );
     }
     for y in 0..area.height {
         let source = y.saturating_add(scroll);
@@ -501,7 +503,7 @@ pub(super) fn draw(
     let top = top_height.saturating_sub(scroll).min(area.height);
     if top < area.height {
         frame.render_widget(
-            Paragraph::new(details(account, now))
+            Paragraph::new(render::account_details(account, now))
                 .wrap(Wrap { trim: false })
                 .scroll((scroll.saturating_sub(top_height), 0)),
             Rect::new(area.x, area.y + top, width, area.height - top),
@@ -533,7 +535,7 @@ mod tests {
         for (width, height) in [(64, 18), (104, 40)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|f| draw(f, f.area(), &account, base, 0, None))
+                .draw(|f| draw(f, f.area(), &account, base, 0, None, &Forecasts::default()))
                 .unwrap();
             let text = terminal
                 .backend()
@@ -542,16 +544,26 @@ mod tests {
                 .iter()
                 .map(|c| c.symbol())
                 .collect::<String>();
-            assert!(text.contains("Subscription history"));
+            assert!(text.contains("Limit history"));
             assert!(text.contains("8-hour") && text.contains("Weekly"));
             if height >= 25 {
-                assert!(text.contains("Quota left"));
+                assert!(text.contains(" Left "));
                 assert!(text.contains("8-hour 64% left"));
                 assert!(text.contains("Weekly 23% left"));
                 assert!(!text.contains("Used quota") && !text.contains(" used"));
             }
             terminal
-                .draw(|f| draw(f, f.area(), &account, base, 20, Some(base - 3600)))
+                .draw(|f| {
+                    draw(
+                        f,
+                        f.area(),
+                        &account,
+                        base,
+                        20,
+                        Some(base - 3600),
+                        &Forecasts::default(),
+                    )
+                })
                 .unwrap();
             let text = terminal
                 .backend()
@@ -577,33 +589,63 @@ mod tests {
     }
 
     #[test]
-    fn platform_costs_have_a_full_width_meter_and_separate_daily_dollar_history() {
+    fn platform_shares_the_quota_row_and_percent_plot_without_billing_prose() {
         let base = 1_800_000_000 / 86400 * 86400;
-        let account = json!({"label":"Synthetic","platform":{"costs":{"spent_usd_nanos":5_000_000_000_i64,"budget_cents":10000}},"quota":{"windows":[{"window_minutes":10080,"remaining_percent":100}]},"quota_history":{"from_utc":base,"to_utc":base+86400,"interval_seconds":600,"points":[],"platform":{"from_utc":base,"to_utc":base+86400,"interval_seconds":86400,"points":[{"from_utc":base,"to_utc":base+86400,"observed_at":base+86400,"usd_nanos":5_000_000_000_i64}]}}});
+        let account = json!({"label":"Synthetic","subscription":{"plan_usd":20,"billing_day":14},"clients":{"count":0},"platform":{"balance":{"entered_at":base+123,"initial_usd_nanos":86_000_000_000_i64,"exetrouter":{"remaining_usd_nanos":43_000_000_000_i64,"status":"estimated"}}},"quota":{"windows":[{"window_minutes":10080,"remaining_percent":92}]},"quota_history":{"from_utc":base,"to_utc":base+86400,"interval_seconds":600,"points":[{"kind":"primary","hour":base+1200,"observed_at":base+1200,"used_percent":8,"window_minutes":10080,"reset_at":null}],"platform_balance":{"entered_at":base+123,"initial_usd_nanos":86_000_000_000_i64,"through_bucket":base+1800,"points":[{"hour":base,"remaining_percent":100},{"hour":base+600,"remaining_percent":0}]}}});
         let mut terminal = Terminal::new(TestBackend::new(104, 60)).unwrap();
-        terminal
-            .draw(|f| draw(f, f.area(), &account, base + 86400, 0, None))
-            .unwrap();
-        let text = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|c| c.symbol())
-            .collect::<String>();
-        assert!(text.contains("$5 / $100") && text.contains("daily USD"));
-        assert!((0..104).all(|x| terminal.backend().buffer()[(x, 8)].symbol() == "━"));
-        let mut disconnected = account;
-        disconnected.as_object_mut().unwrap().remove("platform");
-        assert!(platform_history(&disconnected).is_none());
+        for (cursor, platform) in [(base + 1200, "0% left"), (base + 2400, "Not observed")] {
+            terminal
+                .draw(|f| {
+                    draw(
+                        f,
+                        f.area(),
+                        &account,
+                        base + 86400,
+                        0,
+                        Some(cursor),
+                        &Forecasts::default(),
+                    )
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let titles: String = (0..104).map(|x| buffer[(x, 2)].symbol()).collect();
+            let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
+            assert!(titles.contains("Weekly") && titles.contains("Platform API · estimated left"));
+            assert!(
+                text.contains("$43 / $86") && text.contains(&format!("Platform API {platform}"))
+            );
+            assert_eq!(text.matches("Limit history").count(), 1);
+            assert!(
+                !text.contains("daily USD")
+                    && !text.contains("Billing source")
+                    && !text.contains("15 minutes")
+            );
+            assert!(text.contains("Subscription price: $20/month"));
+        }
+        let mut changed = account.clone();
+        changed["platform"]["balance"]["entered_at"] = json!(base + 600);
+        assert!(platform_history(&changed, &history(&changed).unwrap()).is_none());
+        changed["quota_history"]["platform_balance"] = json!({"through_bucket":false});
+        assert_eq!(history(&changed).unwrap().points.len(), 1);
+        assert_eq!(chart_header(&account, 48), 12);
     }
 
     #[test]
     fn a_single_weekly_meter_uses_the_full_width() {
-        let account = json!({"label":"Synthetic", "quota":{"windows":[{"window_minutes":10080,"remaining_percent":100}]}});
+        let account = json!({"label":"Synthetic", "quota":{"windows":[{"window_minutes":10080,"remaining_percent":100,"observed_at":1_800_000_000,"status":"current"}]}});
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal
-            .draw(|f| draw(f, f.area(), &account, 1_800_000_000, 0, None))
+            .draw(|f| {
+                draw(
+                    f,
+                    f.area(),
+                    &account,
+                    1_800_000_000,
+                    0,
+                    None,
+                    &Forecasts::default(),
+                )
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert!((0..80).all(
@@ -620,7 +662,17 @@ mod tests {
         assert_eq!(range(&account), Some((base, base + 7 * 86400, 600)));
         let mut terminal = Terminal::new(TestBackend::new(104, 40)).unwrap();
         terminal
-            .draw(|f| draw(f, f.area(), &account, base + 7 * 86400, 0, Some(base + 600)))
+            .draw(|f| {
+                draw(
+                    f,
+                    f.area(),
+                    &account,
+                    base + 7 * 86400,
+                    0,
+                    Some(base + 600),
+                    &Forecasts::default(),
+                )
+            })
             .unwrap();
         let text = terminal
             .backend()
@@ -629,7 +681,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect::<String>();
-        assert!(text.contains("10-minute steps"));
+        assert!(!text.contains("10-minute"));
         assert!(text.contains("80% left"));
         account["quota_history"]["points"][0]["observed_at"] = json!(base + 600);
         assert!(history(&account).is_none());

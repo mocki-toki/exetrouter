@@ -563,7 +563,7 @@ impl Forecast {
             )
         })
     }
-    fn calendar_projection(&self, now: i64) -> Option<&Projection> {
+    pub(crate) fn calendar_projection(&self, now: i64) -> Option<&Projection> {
         self.calendar.as_ref()?.projection(now)
     }
     fn short_blocked(&self, now: i64) -> bool {

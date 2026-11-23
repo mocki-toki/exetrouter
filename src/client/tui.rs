@@ -515,6 +515,28 @@ fn replace_history(state: &mut State, account: i64, history: Value) -> Result<()
     }
     Ok(())
 }
+fn retain_detail_history(state: &State, id: i64, next: &mut Value) {
+    let Some(previous) = account_row(state, id) else {
+        return;
+    };
+    let history = &previous["quota_history"];
+    if !history.is_object()
+        || (state.history_period == 0
+            && state.history_before.is_none()
+            && !history["platform_balance"].is_object())
+    {
+        return;
+    }
+    if let Some(row) = next["quota_accounts"].as_array_mut().and_then(|rows| {
+        rows.iter_mut().find(|row| {
+            row["id"].as_i64() == Some(id)
+                && row["observation_key"] == previous["observation_key"]
+                && (!row["observation_key"].is_null() || row["label"] == previous["label"])
+        })
+    }) {
+        row["quota_history"] = history.clone();
+    }
+}
 fn body(state: &State) -> String {
     let Some(value) = &state.values[state.tab] else {
         return "No data yet. Press r to load this view.".into();
@@ -1018,14 +1040,10 @@ fn selected_model_id(state: &State) -> Option<&str> {
         .filter(|id| !id.is_empty() && !id.chars().any(char::is_control))
 }
 fn account_detail_text(state: &State, id: i64) -> String {
-    state.values[OVERVIEW]
-        .as_ref()
-        .and_then(|value| value["quota_accounts"].as_array())
-        .and_then(|rows| rows.iter().find(|row| row["id"].as_i64() == Some(id)))
-        .map_or_else(
-            || "Account unavailable. Refresh Overview.".into(),
-            |row| render::account_details(row, chrono::Utc::now().timestamp()),
-        )
+    account_row(state, id).map_or_else(
+        || "Account unavailable. Refresh Overview.".into(),
+        |row| render::account_details(row, chrono::Utc::now().timestamp()),
+    )
 }
 fn account_row(state: &State, id: i64) -> Option<&Value> {
     state.values[OVERVIEW]
@@ -1190,8 +1208,6 @@ fn account_ranges(value: &Value, width: u16) -> Vec<(u16, u16)> {
                     chrono::Utc::now().timestamp(),
                 )) + u16::from(account["refresh_error"].is_string())
                     + u16::from(render::weekly_activation(account).is_some())
-                    + super::quota_forecast::notes(account, chrono::Utc::now().timestamp()).len()
-                        as u16
                     + if account["platform"].is_object() {
                         3
                     } else {
@@ -1308,9 +1324,9 @@ fn models(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) -> us
                 capabilities.push(Span::raw(" "));
             }
         }
-        if row["source"] == "platform" {
+        if let Some(label) = render::model_platform_label(row) {
             capabilities.push(Span::styled(
-                " Platform API ",
+                format!(" {label} "),
                 Style::default()
                     .fg(Color::Rgb(227, 169, 117))
                     .bg(Color::Rgb(59, 48, 32)),
@@ -1698,6 +1714,7 @@ fn render_hits(
                     chrono::Utc::now().timestamp(),
                     (*scroll).min(max),
                     state.account_hour,
+                    &state.forecasts,
                 );
             } else {
                 frame.render_widget(Paragraph::new(text), content);
@@ -2039,16 +2056,7 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
         ]
         .into_iter()
         .flatten()
-        .chain(
-            super::quota_forecast::notes(&account, chrono::Utc::now().timestamp())
-                .into_iter()
-                .map(|(text, warning)| {
-                    Line::styled(
-                        text,
-                        Style::default().fg(if warning { Color::Yellow } else { Color::Gray }),
-                    )
-                }),
-        ) {
+        {
             if y >= inner.y as i32 && y < end {
                 frame.render_widget(
                     Paragraph::new(line),
@@ -2081,15 +2089,15 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
                 };
                 let remaining = window["remaining_percent"].as_f64();
                 let now = chrono::Utc::now().timestamp();
-                let stale = window["status"] != "current"
+                let stale = account["refresh_error"].is_string()
+                    || window["status"] != "current"
                     || window["observed_at"]
                         .as_i64()
                         .is_some_and(|at| at > now || now - at >= 60);
-                let forecast =
-                    super::quota_forecast::label(&account, window, now, &state.forecasts);
+                let forecast = state.forecasts.label(&account, window, now);
                 if y >= inner.y as i32 && y < end {
                     let label = format!(
-                        "{}  ·  {}{}{}",
+                        "{}  ·  {}{}",
                         match window["window_minutes"].as_i64() {
                             Some(10080) => "week".into(),
                             Some(minutes) if minutes % 60 == 0 => format!("{}h", minutes / 60),
@@ -2099,8 +2107,7 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
                         render::percent(&window["remaining_percent"]),
                         forecast
                             .map(|text| format!("  ·  {text}"))
-                            .unwrap_or_default(),
-                        if stale { "  ·  historical" } else { "" }
+                            .unwrap_or_default()
                     );
                     frame.render_widget(
                         Paragraph::new(label).style(Style::default().fg(if stale {
@@ -2137,39 +2144,25 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
             y += 3;
         }
         if account["platform"].is_object() {
-            let p = &account["platform"]["balance"];
-            let remaining = p["exetrouter"]["remaining_usd_nanos"]
-                .as_i64()
-                .map(|n| n as f64 / 1e9);
-            let budget = p["initial_usd_nanos"].as_i64().map(|n| n as f64 / 1e9);
+            let (label, amount, percent) =
+                super::account_details::platform_summary(&account["platform"]);
             if y >= inner.y as i32 && y < end {
                 frame.render_widget(
-                    Paragraph::new(crate::platform::balance::headline(&account["platform"])),
+                    Paragraph::new(label).style(Style::default().fg(Color::Gray)),
                     Rect::new(inner.x, y as u16, inner.width, 1),
                 );
             }
             if y + 1 >= inner.y as i32 && y + 1 < end {
-                super::account_details::cost_meter(
-                    frame.buffer_mut(),
+                frame.render_widget(
+                    Paragraph::new(amount).style(Style::default().fg(Color::White).bold()),
                     Rect::new(inner.x, (y + 1) as u16, inner.width, 1),
-                    remaining
-                        .zip(budget)
-                        .filter(|(_, b)| *b > 0.)
-                        .map(|(s, b)| s / b * 100.),
                 );
             }
             if y + 2 >= inner.y as i32 && y + 2 < end {
-                frame.render_widget(
-                    Paragraph::new(if p.is_object() {
-                        format!(
-                            "ExetRouter only · {} unpriced requests",
-                            p["exetrouter"]["unpriced_requests"].as_i64().unwrap_or(0)
-                        )
-                    } else {
-                        "Manual balance not set".into()
-                    })
-                    .style(Style::default().fg(Color::Gray)),
+                super::account_details::cost_meter(
+                    frame.buffer_mut(),
                     Rect::new(inner.x, (y + 2) as u16, inner.width, 1),
+                    percent,
                 );
             }
             y += 3;
@@ -2767,13 +2760,18 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
         if pending.as_ref().is_some_and(|p| p.task.is_finished()) {
             let mut job = pending.take().expect("pending task");
             let result = (&mut job.task).await?;
-            if job.tab == OVERVIEW {
+            if job.tab == OVERVIEW && job.history_account.is_none() {
                 next_limits_refresh = Instant::now() + LIMIT_REFRESH_INTERVAL;
             }
             match result {
                 Ok(value) if job.history_account.is_some() => {
                     if let Err(error) = replace_history(&mut state, job.history_account.unwrap(), value) {
                         state.statuses[OVERVIEW] = error.to_string();
+                    }
+                    if let Some(Modal::Account { id, .. }) = state.modal {
+                        if job.history_account != Some(id) {
+                            pending = Some(start_history(&args.connection, &state, id));
+                        }
                     }
                 }
                 Ok(mut value) if job.mutation => {
@@ -2804,16 +2802,11 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     }
                 }
                 Ok(mut value) => {
-                    if job.tab == OVERVIEW && (state.history_period != 0 || state.history_before.is_some()) {
-                        if let Some(id) = state.history_account {
-                            if let Some(history) = account_row(&state,id).map(|row|row["quota_history"].clone()) {
-                                if let Some(row) = value["quota_accounts"].as_array_mut().and_then(|rows|rows.iter_mut().find(|row|row["id"].as_i64()==Some(id))) {
-                                    row["quota_history"] = history;
-                                }
-                            }
-                        }
-                    }
                     if job.tab == OVERVIEW {
+                        if let Some(Modal::Account { id, .. }) = state.modal {
+                            retain_detail_history(&state, id, &mut value);
+                            pending = Some(start_history(&args.connection, &state, id));
+                        }
                         state.forecasts.observe(&value, chrono::Utc::now().timestamp());
                     }
                     preserve_selection(&mut state, job.tab, &value);
@@ -2843,6 +2836,9 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     );
                 }
                 Err(error) => {
+                    if job.tab == OVERVIEW && job.history_account.is_none() {
+                        state.forecasts.clear_estimates();
+                    }
                     state.statuses[job.tab] = format!(
                         "{}{}",
                         if job.mutation {
@@ -3278,11 +3274,11 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                     state.modal = Some(Modal::Search { kind, input: TextInput::new(query.clone()) });
                 }
                 KeyCode::Char('f') if state.tab == MODELS => {
-                    let entries = [("reasoning",'R'),("tools",'T'),("image_input",'V'),("image_generation",'G'),("image_editing",'E')].into_iter().map(|(id,key)| (format!("{}{}",render::capability_label(id).unwrap(),if state.model_features.iter().any(|v| v==id) {" ✓"}else{""}),KeyCode::Char(key))).collect();
+                    let entries = [("reasoning",'R'),("tools",'T'),("image_input",'V'),("image_generation",'G'),("image_editing",'E'),("embeddings",'B')].into_iter().map(|(id,key)| (format!("{}{}",render::capability_label(id).unwrap(),if state.model_features.iter().any(|v| v==id) {" ✓"}else{""}),KeyCode::Char(key))).collect();
                     state.modal = Some(Modal::Actions { title:"Capabilities · match all".into(), entries, selected:0 });
                 }
-                KeyCode::Char(c @ ('R'|'T'|'V'|'G'|'E')) if state.tab == MODELS => {
-                    let id = match c { 'R'=>"reasoning",'T'=>"tools",'V'=>"image_input",'G'=>"image_generation",_=>"image_editing" };
+                KeyCode::Char(c @ ('R'|'T'|'V'|'G'|'E'|'B')) if state.tab == MODELS => {
+                    let id = match c { 'R'=>"reasoning",'T'=>"tools",'V'=>"image_input",'G'=>"image_generation",'B'=>"embeddings",_=>"image_editing" };
                     if state.model_features.iter().any(|v| v==id) { state.model_features.retain(|v| v!=id); } else { state.model_features.push(id.into()); }
                     state.model_selected=0;
                 }
@@ -3295,7 +3291,7 @@ pub(super) async fn run(original: &Session, config_path: &std::path::Path) -> Re
                             state.account_hour=None;
                             if state.history_account != Some(id) { state.history_period=0;state.history_before=None; }
                             state.history_account=Some(id);state.modal=Some(Modal::Account{id,scroll:0});
-                            pending=Some(start_history(&args.connection,&state,id));
+                            if pending.is_none() { pending=Some(start_history(&args.connection,&state,id)); }
                         }
                     } else {
                         let (title,entries)=action_menu(&state,&args.connection);
@@ -3898,6 +3894,51 @@ mod tests {
         assert_eq!(row["quota_history"], history);
         assert!(replace_history(&mut state,1,serde_json::json!({"from_utc":from,"to_utc":from+91*86400,"interval_seconds":600,"points":[]})).is_err());
         assert_eq!(account_row(&state, 1).unwrap()["quota_history"], history);
+    }
+    #[test]
+    fn live_refresh_keeps_the_open_history_until_it_is_refetched() {
+        let from = 1_800_000_000;
+        let mut state = State::default();
+        let mut next = serde_json::json!({"quota_accounts":[{"id":1,"observation_key":"current","quota_history":{"from_utc":from,"to_utc":from+7*86400,"interval_seconds":600,"points":[]}}]});
+        state.values[OVERVIEW] = Some(next.clone());
+        let history = serde_json::json!({"from_utc":from,"to_utc":from+7*86400,"interval_seconds":600,"points":[],"platform_balance":{"entered_at":from,"initial_usd_nanos":1_000_000_000,"through_bucket":from,"points":[{"hour":from,"remaining_percent":100}]}});
+        replace_history(&mut state, 1, history.clone()).unwrap();
+        retain_detail_history(&state, 1, &mut next);
+        assert_eq!(next["quota_accounts"][0]["quota_history"], history);
+        next["quota_accounts"][0]["observation_key"] = "replacement".into();
+        next["quota_accounts"][0]["quota_history"]["platform_balance"] = Value::Null;
+        retain_detail_history(&state, 1, &mut next);
+        assert!(next["quota_accounts"][0]["quota_history"]["platform_balance"].is_null());
+    }
+
+    #[test]
+    fn models_show_direct_platform_models_fallback_and_embeddings() {
+        let value = serde_json::json!({"data":[
+            {"id":"gpt-platform","source":"platform","capabilities":["tools"]},
+            {"id":"gpt-shared","source":"codex","platform_fallback":true,"capabilities":["tools"]},
+            {"id":"text-embedding-3-small","source":"platform","capabilities":["embeddings"]}
+        ]});
+        let mut state = State {
+            tab: MODELS,
+            model_query: "platform api".into(),
+            ..Default::default()
+        };
+        state.values[MODELS] = Some(value.clone());
+        assert_eq!(filtered_model_rows(&state, &value).len(), 3);
+        let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
+        terminal
+            .draw(|f| render(f, &state, &Connection::default(), false))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Platform API fallback") && text.contains("Embeddings"));
+        state.model_features.push("embeddings".into());
+        assert_eq!(selected_model_id(&state), Some("text-embedding-3-small"));
     }
     use super::*;
     use ratatui::backend::TestBackend;
@@ -4952,7 +4993,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect::<String>();
-        assert!(text.contains("~44m to limit"));
+        assert!(text.contains("-44m"));
         assert!(text.contains("Resets"));
         assert!(!text.contains("remaining"));
         assert!(!text.contains("Updated"));
@@ -4962,6 +5003,7 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         let value = serde_json::json!({"quota_accounts":[{"id":1,"label":"account@example.com","quota":{"windows":[{"kind":"primary","used_percent":50,"remaining_percent":50,"window_minutes":480,"reset_at":now+28800,"observed_at":now,"status":"current"}]},"quota_forecast":[{"kind":"primary","window_minutes":480,"reset_at":now+28800,"observed_at":now,"used_percent":50,"current":{"percent_per_hour":25,"limit_at":now+7200},"usual":{"percent_per_hour":12.5,"limit_at":now+14400},"warning":{"rate_ratio":2,"limit_before_reset":true},"recent_seconds":1800,"historical_intervals":24,"historical_cycles":3}]}]});
         let mut state = State::default();
+        state.forecasts.observe(&value, now);
         state.values[OVERVIEW] = Some(value.clone());
         let mut terminal = Terminal::new(TestBackend::new(150, 35)).unwrap();
         terminal
@@ -4974,16 +5016,28 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect::<String>();
-        assert!(text.contains("~2h 0m to limit"));
-        assert!(text.contains("Historical pace: ~4h 0m to limit"));
-        assert!(text.contains("Usage above usual · ~2.0x normal"));
+        assert!(text.contains("-3h 0m"));
+        assert!(!text.contains("Historical pace") && !text.contains("Usage above usual"));
+        state.modal = Some(Modal::Account { id: 1, scroll: 0 });
+        terminal
+            .draw(|f| render(f, &state, &Connection::default(), false))
+            .unwrap();
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>()
+            .contains("50% left  -3h 0m"));
+        state.modal = None;
         let cli = super::super::render::limits(&value);
         assert!(cli.contains("Historical pace:"));
         assert!(cli.contains("may run out before reset"));
         let mut failed = value.clone();
         failed["quota_accounts"][0]["refresh_error"] = "Live metadata unavailable".into();
         let success_height = account_ranges(&value, 150)[0].1;
-        assert_eq!(success_height - account_ranges(&failed, 150)[0].1, 1);
+        assert_eq!(account_ranges(&failed, 150)[0].1 - success_height, 1);
         state.values[OVERVIEW] = Some(failed);
         terminal
             .draw(|f| render(f, &state, &Connection::default(), false))
@@ -4997,11 +5051,11 @@ mod tests {
             .collect::<String>();
         assert!(!text.contains("Historical pace:"));
         assert!(!text.contains("Usage above usual"));
-        assert!(!text.contains("to limit"));
+        assert!(!text.contains("-3h 0m"));
     }
 
     #[test]
-    fn overview_describes_moving_reset_and_idle_estimates_instead_of_inventing_an_eta() {
+    fn overview_omits_moving_reset_and_idle_pace_statuses() {
         let now = chrono::Utc::now().timestamp();
         let mut value = serde_json::json!({"quota_accounts":[{"id":1,"label":"account@example.com","quota":{"windows":[{"kind":"primary","used_percent":0,"remaining_percent":100,"window_minutes":300,"reset_at":now+18000,"observed_at":now,"status":"current"}]},"quota_forecast":[{"kind":"primary","window_minutes":300,"reset_at":now+18000,"observed_at":now,"used_percent":0,"current":null,"usual":null,"warning":null,"current_status":"reset_time_moving","recent_seconds":0,"historical_intervals":0,"historical_cycles":0}]}]});
         let mut state = State::default();
@@ -5017,7 +5071,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect::<String>();
-        assert!(text.contains("Reset time moving; no pace yet"));
+        assert!(!text.contains("Reset time moving"));
         assert!(!text.contains("to limit"));
         value["quota_accounts"][0]["quota_forecast"][0]["current_status"] =
             "quota_unchanged".into();
@@ -5152,8 +5206,8 @@ mod tests {
         let details = account_detail_text(&state, 1);
         assert!(details.contains("Laptop - Codex"));
         assert!(details.contains("12s ago"));
-        assert!(details.contains("Running: 1"));
-        assert!(details.contains("all users' recently active tokens"));
+        assert!(details.contains("1 running"));
+        assert!(details.contains("Clients · 2"));
         assert!(details.contains("Other user's client"));
         state.modal = Some(Modal::Account { id: 1, scroll: 32 });
         terminal
