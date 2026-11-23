@@ -135,6 +135,26 @@ test("quota charts plot left, not used, including full and exhausted boundaries"
   assert.equal(data.series[0].segments[0].split(" ").at(-1),"644,204")
   assert.equal(data.series[1].segments[0].split(" ").at(-1),"644,112")
 })
+test("Platform remaining uses the same timeline, with no line beyond known spending", () => {
+  const a = snapshot(doctor()).accounts[0], h = a.history!
+  const enteredAt = h.to - 3 * 3600 + 10, bucket = h.to - 3 * 3600
+  const balance = { enteredAt, initialUSD: 100, exetrouter: { remainingUSD: null, spentUSD: 100, through: h.to, observedAt: h.to, unpriced: 1, status: "unpriced_requests" }, organization: { remainingUSD: 95, spentUSD: 5, through: h.to, observedAt: h.to, unpriced: 0, status: "reported" } }
+  const platform = { configuredAt: enteredAt, creditStatus: "unknown", inferenceEnabled: true, balance }
+  const raw = doctor().quota_accounts[0].quota_history
+  const data = {entered_at:enteredAt, initial_usd_nanos:1e11, through_bucket:bucket+3600, points:[{hour:bucket,remaining_percent:100},{hour:bucket+3600,remaining_percent:0}]}
+  const history = quotaHistory({...raw,platform_balance:{...data,private:"private-marker"}})!
+  assert.doesNotMatch(JSON.stringify(history),/private-marker/)
+  const chart = quotaTimeline({...a,platform,history})
+  assert.deepEqual(chart.series.map((s)=>s.kind),["primary","secondary","platform"])
+  const line = chart.series[2]
+  assert.deepEqual([...line.points], [[bucket,100],[bucket+3600,0]])
+  assert.equal(line.points.get(bucket+7200),undefined)
+  assert.match(line.segments[0], /,20 .*?,20 .*?,204$/)
+  assert.equal(quotaTimeline({...a,platform:{...platform,balance:{...balance,enteredAt:enteredAt+1}},history}).series.length,2)
+  for (const invalid of [{...data,through_bucket:h.to},{...data,initial_usd_nanos:0},{...data,points:data.points.slice(1)},{...data,points:[{hour:bucket,remaining_percent:105}]}]) {
+    assert.throws(()=>quotaHistory({...raw,platform_balance:invalid}))
+  }
+})
 test("usage series colors remain distinct and follow identity through selection and sorting", () => {
   const report=normalizeUsage(usage(),"model")
   const first=report.rows[0]

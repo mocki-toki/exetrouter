@@ -125,6 +125,7 @@ test("rendered panel has five native web views, account details, usage graph, to
   const copied: string[] = []
   const usageInputs: {period:string;by:string;before?:number}[] = []
   const historyInputs: {account:number;period:string;before?:number}[] = []
+  let platformHistory: NonNullable<typeof report.accounts[number]["history"]>["platformBalance"]
   const calls = { usage: 0, tokens: 0, models: 0, updates: 0 }
   const [state, setState] = solid.createSignal({ revision:0, snapshot: report, error: null as string | null, refreshing: false, update: null as null | {current:string;latest:string;available:boolean}, clipboardPending: false })
   const [available, setAvailable] = solid.createSignal(true)
@@ -134,7 +135,7 @@ test("rendered panel has five native web views, account details, usage graph, to
   const bridge = {
     state:()=>available()?state():undefined, refresh: async () => {setState((old)=>({...old,revision:old.revision+1}))},
     usage: async (input: typeof usageInputs[number]) => { calls.usage++; usageInputs.push(input); return {...usageReport,...(input.before === undefined ? {} : {to:input.before})} }, tokens: async () => { calls.tokens++; return tokenGate ? tokenGate.promise : tokenRows }, models: async () => { calls.models++; return models(modelList()) },
-    quotaHistory: async (input: typeof historyInputs[number]) => { historyInputs.push(input); const h=report.accounts[0].history!; const to=input.before??h.to; const days=input.period==="24h"?1:Number(input.period.slice(0,-1)); return {...h,from:to-days*86400,to,points:h.points.filter((p)=>p.hour>=to-days*86400&&p.hour<to)} },
+    quotaHistory: async (input: typeof historyInputs[number]) => { historyInputs.push(input); const h=report.accounts[0].history!; const to=input.before??h.to; const days=input.period==="24h"?1:Number(input.period.slice(0,-1)); return {...h,from:to-days*86400,to,points:h.points.filter((p)=>p.hour>=to-days*86400&&p.hour<to),platformBalance:input.before===undefined?platformHistory:undefined} },
     profile: async () => ({ mode: "Standalone", destination: "127.0.0.1:8787", fields: [{ label: "SSH host", value: "router.example.com" }], accounts: [{id:1,email:"account@example.com",state:"active"}], clientVersion: "0.0.0-test", connection: {mode:"standalone",host:"router.example.com",port:2222,ssh_user:"routercli",identity:"/synthetic/key",api_url:null,state_dir:"/synthetic/state",listen:"127.0.0.1:8787"} }),
     desktop: async (input: Record<string, unknown>) => { nativeActions.push(input); return {status:"saved",copied:input.action === "token_create" || input.action === "token_rotate",retryCopy:false,profile:null,update:null,login:input.action === "login_start" ? {url:"https://auth.openai.com/activate",code:"TEST-CODE"} : null} },
     update: async () => { calls.updates++; return { current: "0.0.0-test", latest: "0.0.0-test", available: false } },
@@ -252,37 +253,34 @@ test("rendered panel has five native web views, account details, usage graph, to
       assert.equal(root.querySelector('[role="tabpanel"]:not([hidden])')?.getAttribute("aria-labelledby"), tab.id)
     }
     const historical = snapshot(forecastReport(Math.floor(Date.now() / 1000) - 5)).accounts[0]
-    setState((old) => ({ ...old, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => ({ ...a, windows: historical.windows, forecasts: historical.forecasts })) } }))
-    assert.match(root.textContent, /~2h 0m to limit/)
-    assert.match(root.textContent, /Historical pace: ~4h 0m to limit/)
-    assert.match(root.textContent, /Usage above usual.*~2.0x normal.*may run out before reset/)
+    setState((old) => ({ ...old, snapshot: { ...old.snapshot, checkedAt:historical.windows[0].observedAt, accounts: old.snapshot.accounts.map((a) => ({ ...a, windows: historical.windows, forecasts: historical.forecasts })) } }))
+    assert.equal(root.querySelector('.exr-quota-eta')?.textContent, "-3h 0m")
+    assert.doesNotMatch(root.textContent, /Historical pace|Usage above usual|reported reset times/)
     click("View Synthetic account details")
-    assert.match(window.document.querySelector('[role="dialog"]')!.textContent, /Historical pace: ~4h 0m to limit/)
+    assert.equal(window.document.querySelector('[role="dialog"] .exr-quota-eta')?.textContent, "-3h 0m")
     click("Done")
     setState((old) => ({ ...old, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => ({ ...a, forecasts: a.forecasts?.map((f) => ({ ...f, current: null, warning: null, currentStatus: "quota_unchanged" as const })) })) } }))
-    assert.match(root.textContent, /Pace unavailable: quota unchanged/)
-    assert.doesNotMatch(root.textContent, /At this pace: ~2h|Usage above usual/)
-    assert.match(root.textContent, /Historical pace: ~4h 0m to limit/)
+    assert.equal(root.querySelector('.exr-quota-eta'), null)
+    assert.doesNotMatch(root.textContent, /Pace unavailable|Historical pace|Usage above usual/)
     click("View Synthetic account details")
     const pausedDialog = window.document.querySelector('[role="dialog"]')!
-    assert.match(pausedDialog.textContent, /Pace unavailable: quota unchanged/)
+    assert.equal(pausedDialog.querySelector('.exr-quota-eta'), null)
     setState((old) => ({ ...old, error: "Connection unavailable" }))
-    assert.doesNotMatch(pausedDialog.textContent, /Pace unavailable:|Historical pace:|At this pace:/)
+    assert.equal(pausedDialog.querySelector('.exr-quota-eta'), null)
     click("Done")
     setState((old) => ({ ...old, error: null, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => ({ ...a, forecasts: historical.forecasts })) } }))
     setState((old) => ({ ...old, error: "Connection unavailable" }))
-    assert.doesNotMatch(root.textContent, /Usage above usual|Historical pace:|~2h 0m to limit/)
+    assert.equal(root.querySelector('.exr-quota-eta'), null)
     const { weeklyCalendarReport } = await import("./fixtures")
     const calendarAccount = snapshot(weeklyCalendarReport(Math.floor(Date.now()/1000)-5)).accounts[0]
-    setState((old) => ({ ...old, error:null, snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map((a)=>({...a,windows:calendarAccount.windows,forecasts:calendarAccount.forecasts}))} }))
-    assert.match(root.textContent,/~10h 15m to limit incl\. short-window pauses/)
-    assert.doesNotMatch(root.textContent,/~5h 30m to limit/)
+    setState((old) => ({ ...old, error:null, snapshot:{...old.snapshot,checkedAt:calendarAccount.windows[0].observedAt,accounts:old.snapshot.accounts.map((a)=>({...a,windows:calendarAccount.windows,forecasts:calendarAccount.forecasts}))} }))
+    assert.equal(root.querySelector('.exr-quota-eta')?.textContent, "-10h 37m")
     click("View Synthetic account details")
-    assert.match(window.document.querySelector('[role="dialog"]')!.textContent,/incl\. short-window pauses/)
+    assert.equal(window.document.querySelector('[role="dialog"] .exr-quota-eta')?.textContent,"-10h 37m")
     click("Done")
     setState((old)=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map((a)=>({...a,forecasts:a.forecasts?.map((f)=>({...f,calendar:undefined}))}))}}))
-    assert.match(root.textContent,/Without future pauses: ~5h 30m to limit/)
-    assert.doesNotMatch(root.textContent,/incl\. short-window pauses/)
+    assert.equal(root.querySelector('.exr-quota-eta')?.textContent, "-8h 15m")
+    assert.doesNotMatch(root.textContent,/short-window pauses|Without future pauses/)
     setState((old) => ({ ...old, error: null, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map((a) => ({ ...a, windows: report.accounts[0].windows, forecasts: undefined })) } }))
     click("View Synthetic account details")
     assert.match(window.document.querySelector('[role="dialog"]')!.textContent, /Synthetic client/)
@@ -292,13 +290,13 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.doesNotMatch(accountDialog.textContent, /1286m ago/)
     assert.ok(accountDialog.querySelector('.exr-detail-quotas')!.nextElementSibling!.classList.contains('exr-history'))
     assert.doesNotMatch([...accountDialog.querySelectorAll('h3')].map((h)=>h.textContent).join('|'), /Routing|Subscription windows/)
-    const history = accountDialog.querySelector('svg[aria-label^="Subscription quota"]')!
+    const history = accountDialog.querySelector('svg[aria-label^="Limit history"]')!
     assert.ok(history)
     assert.equal(history.querySelectorAll("[data-window]").length,2,"both windows share the same chart")
     history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"End",bubbles:true}))
     assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/8-hour.*0% left.*Weekly.*50% left/)
     assert.doesNotMatch(accountDialog.querySelector('.exr-history')!.textContent,/Used quota|\bused\b/)
-    assert.match(accountDialog.querySelector('.exr-history')!.textContent,/Quota left/)
+    assert.doesNotMatch(accountDialog.querySelector('.exr-history')!.textContent,/observations · unavailable intervals/)
     assert.equal(history.querySelector('[data-window="primary"] polyline')!.getAttribute('points')!.split(' ').at(-1),'644,204')
     assert.equal(history.querySelector('[data-window="secondary"] polyline')!.getAttribute('points')!.split(' ').at(-1),'644,112')
     history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"Home",bubbles:true}))
@@ -312,20 +310,23 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.equal(subscriptionText.closest('.exr-badge'), null)
     assert.doesNotMatch(root.querySelector('.exr-account-header')!.textContent, /Platform API/)
     await delay(10)
-    const apiHistory=accountDialog.querySelector('svg[aria-label^="Platform API daily"]')!
-    assert.ok(apiHistory)
-    assert.match(accountDialog.querySelector('.exr-platform')!.textContent,/\$5k \/ \$10k/)
+    assert.equal(accountDialog.querySelectorAll('.exr-history svg[role="img"]').length, 1)
+    assert.match(accountDialog.querySelector('.exr-platform')!.textContent,/Unknown/)
+    const bucket=report.accounts[0].history!.to-3600, enteredAt=bucket-3600
+    platformHistory={enteredAt,initialUSD:100,throughBucket:bucket,points:[{hour:enteredAt,left:100},{hour:bucket,left:99}]}
     const estimate={remainingUSD:99,spentUSD:1,through:report.checkedAt,observedAt:report.checkedAt,unpriced:0,status:"estimated"}
-    setState(old=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map(a=>({...a,platform:a.platform?{...a.platform,balance:{enteredAt:apiDay,initialUSD:100,exetrouter:estimate,organization:{...estimate,remainingUSD:97,spentUSD:3,status:"delayed_report"}}}:a.platform}))}}))
+    setState(old=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map(a=>({...a,history:a.history?{...a.history}:a.history,platform:a.platform?{...a.platform,balance:{enteredAt,initialUSD:100,exetrouter:estimate,organization:{...estimate,remainingUSD:97,spentUSD:3,status:"delayed_report"}}}:a.platform}))}}))
     assert.match(root.querySelector('.exr-platform')!.textContent,/\$99 \/ \$100/)
-    assert.doesNotMatch(root.querySelector('.exr-platform')!.textContent,/\$97/)
-    assert.match(accountDialog.querySelector('.exr-platform')!.textContent,/Platform organization.*\$97 \/ \$100/)
-    assert.match(accountDialog.querySelector('.exr-platform')!.textContent,/delayed report.*reported through/)
-    assert.match(accountDialog.querySelector('.exr-platform')!.textContent,/no automatic monthly refill/)
-    apiHistory.dispatchEvent(new window.KeyboardEvent("keydown",{key:"End",bubbles:true}))
-    assert.match(apiHistory.parentElement!.querySelector('[role="status"]')!.textContent,/\$5k/)
+    assert.match(accountDialog.querySelector('.exr-detail-quotas > .exr-platform')!.textContent,/\$99 \/ \$100/)
+    assert.doesNotMatch(accountDialog.textContent,/ExetRouter only|Platform organization|Platform API costs|Organization-wide|Working key|Billing source|Set by the server operator|does not confirm|Tokens disappear|no automatic monthly refill/)
+    await delay(10)
+    assert.ok(history.querySelector('[data-window="platform"] polyline'))
+    history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"End",bubbles:true}))
+    assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/Platform API.*99% left/)
+    history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"Home",bubbles:true}))
+    platformHistory=undefined
     setState(old=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map(a=>({...a,platform:null,history:a.history?{...a.history,platform:null}:a.history}))}}))
-    assert.equal(accountDialog.querySelector('.exr-platform-history'),null)
+    assert.equal(history.querySelector('[data-window="platform"]'),null)
     const accountPane = root.querySelector('[role="tabpanel"]')!
     accountPane.scrollTop = 90
     setState((old) => ({ ...old, refreshing: true }))
@@ -338,7 +339,7 @@ test("rendered panel has five native web views, account details, usage graph, to
     setState((old) => ({ ...old, refreshing:false, snapshot:{...old.snapshot, accounts:old.snapshot.accounts.map((a) => ({...a,cooldownUntil:a.windows[0].resetAt,cooldownSource:"upstream_reset",clients:{...a.clients,rows:a.clients.rows.map((c)=>({...c,name:"Updated client"}))}}))} }))
     assert.equal(window.document.querySelector('[role="dialog"]'), accountDialog)
     assert.match(accountDialog.textContent, /Updated client/)
-    assert.equal(accountDialog.querySelector('svg[aria-label^="Subscription quota"]'),history,"background refresh preserves the chart and cursor owner")
+    assert.equal(accountDialog.querySelector('svg[aria-label^="Limit history"]'),history,"background refresh preserves the chart and cursor owner")
     assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/Not observed/)
     assert.equal(root.querySelector('[role="tabpanel"]'), accountPane)
     assert.equal(accountPane.scrollTop, 90)

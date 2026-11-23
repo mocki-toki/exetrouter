@@ -39,7 +39,21 @@ export function quotaHistory(value: unknown): QuotaHistory | null {
     seen.add(key)
     return { kind, hour, observedAt, used: number(p.used_percent), minutes: nullable(p.window_minutes), resetAt: nullable(p.reset_at) }
   }).sort((a, b) => a.hour - b.hour)
-  return { from, to, intervalSeconds: interval, points, ...(h.platform == null ? {} : { platform: platformHistory(h.platform) }) }
+  const platformBalance = h.platform_balance == null ? undefined : (() => {
+    const b = record(h.platform_balance), enteredAt = number(b.entered_at), initial = number(b.initial_usd_nanos), throughBucket = number(b.through_bucket)
+    const first = Math.max(from, Math.floor(enteredAt / interval) * interval)
+    if (!Number.isSafeInteger(enteredAt) || !Number.isInteger(initial) || initial <= 0 || initial > 1e16 || throughBucket % interval || throughBucket < first || throughBucket >= to || enteredAt >= to) throw new Error("Invalid Platform balance history.")
+    let previousHour = first - interval, previousLeft = 100
+    const points = list(b.points, (to - from) / interval).map((entry) => {
+      const p = record(entry), hour = number(p.hour), left = number(p.remaining_percent)
+      if (hour % interval || hour <= previousHour || hour > throughBucket || left > previousLeft) throw new Error("Invalid Platform balance history.")
+      previousHour = hour; previousLeft = left
+      return { hour, left }
+    })
+    if (points[0]?.hour !== first) throw new Error("Invalid Platform balance history.")
+    return { enteredAt, initialUSD: initial / 1e9, throughBucket, points }
+  })()
+  return { from, to, intervalSeconds: interval, points, ...(h.platform == null ? {} : { platform: platformHistory(h.platform) }), ...(platformBalance ? { platformBalance } : {}) }
 }
 
 /** Optional history must not hide otherwise usable current account metadata. */

@@ -28,6 +28,22 @@ pub struct History {
     pub points: Vec<Point>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<crate::platform::costs::History>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_balance: Option<PlatformBalance>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlatformBalance {
+    pub entered_at: i64,
+    pub initial_usd_nanos: i64,
+    pub through_bucket: i64,
+    pub points: Vec<PlatformPoint>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlatformPoint {
+    pub hour: i64,
+    pub remaining_percent: f64,
 }
 
 pub(crate) fn prune(conn: &Connection, now: i64) -> Result<()> {
@@ -69,7 +85,10 @@ pub fn range(
     if !exists {
         return Err("account not found".into());
     }
-    read_range(conn, account, to - hours * 3600, to, now)
+    let mut history = read_range(conn, account, to - hours * 3600, to, now)?;
+    // Only chart reads aggregate spend history; passive Doctor snapshots stay unchanged.
+    history.platform_balance = platform_balance(conn, account, history.from_utc, to, now)?;
+    Ok(history)
 }
 
 fn read_range(conn: &Connection, account: i64, from: i64, to: i64, now: i64) -> Result<History> {
@@ -92,7 +111,80 @@ fn read_range(conn: &Connection, account: i64, from: i64, to: i64, now: i64) -> 
         interval_seconds: INTERVAL,
         points,
         platform: crate::platform::costs::history(conn, account, from, to.min(now), now)?,
+        platform_balance: None,
     })
+}
+
+fn platform_balance(
+    conn: &Connection,
+    account: i64,
+    from: i64,
+    to: i64,
+    now: i64,
+) -> Result<Option<PlatformBalance>> {
+    use rusqlite::OptionalExtension;
+    let anchor = conn.query_row("SELECT b.entered_at,b.initial_usd_nanos,b.usage_after_id FROM platform_balance_anchors b JOIN account_platform_credentials c USING(account_id) WHERE b.account_id=?1 AND b.generation=c.generation AND b.initial_usd_nanos>0", [account], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))).optional()?;
+    let Some((entered_at, initial_usd_nanos, after)) = anchor else {
+        return Ok(None);
+    };
+    let first = from.max(entered_at.div_euclid(INTERVAL) * INTERVAL);
+    let mut through_bucket = (to - 1).min(now).div_euclid(INTERVAL) * INTERVAL;
+    if entered_at > now || entered_at >= to || first > through_bucket {
+        return Ok(None);
+    }
+    // Attribute recorded prices to the request's UTC bucket. Earlier spend is
+    // folded into the first visible bucket so paging cannot restart the balance.
+    let mut stmt = conn.prepare("SELECT MAX(?3,e.at_utc / ?6 * ?6) AS bucket,COALESCE(SUM(c.usd_nanos),0),MAX(c.usd_nanos IS NULL)
+        FROM usage_events e LEFT JOIN platform_request_costs c ON c.usage_id=e.id
+        WHERE e.account_id=?1 AND e.id>?2 AND e.at_utc<?4 AND e.at_utc<=?5
+          AND e.upstream_transport IN ('platform_http_sse','platform_http_json')
+        GROUP BY bucket ORDER BY bucket")?;
+    let rows = stmt.query_map(params![account, after, first, to, now, INTERVAL], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, bool>(2)?,
+        ))
+    })?;
+    let mut points = Vec::new();
+    let mut remaining = initial_usd_nanos;
+    for row in rows {
+        let (hour, spent, unknown) = row?;
+        if points.is_empty() && hour > first {
+            points.push(PlatformPoint {
+                hour: first,
+                remaining_percent: 100.0,
+            });
+        }
+        if unknown {
+            // A missing price invalidates the cumulative total, not just this bucket.
+            through_bucket = hour - INTERVAL;
+            break;
+        }
+        let next = remaining.saturating_sub(spent).max(0);
+        if next != remaining || points.is_empty() {
+            points.push(PlatformPoint {
+                hour,
+                remaining_percent: next as f64 / initial_usd_nanos as f64 * 100.0,
+            });
+        }
+        remaining = next;
+    }
+    if through_bucket < first {
+        return Ok(None);
+    }
+    if points.is_empty() {
+        points.push(PlatformPoint {
+            hour: first,
+            remaining_percent: 100.0,
+        });
+    }
+    Ok(Some(PlatformBalance {
+        entered_at,
+        initial_usd_nanos,
+        through_bucket,
+        points,
+    }))
 }
 
 #[cfg(test)]
@@ -104,6 +196,83 @@ mod tests {
         crate::init(&conn).unwrap();
         conn.execute("INSERT INTO oauth_accounts(account_id,state,encrypted_credentials,expires_at,created_at) VALUES('synthetic','active',X'1234',9999999999,0)", []).unwrap();
         conn
+    }
+    #[test]
+    fn platform_history_uses_account_costs_after_the_manual_entry_and_stops_at_unknowns() {
+        let conn = database();
+        let now = 1_800_000_000;
+        let start = now - 3 * 86_400;
+        let user = crate::create_user(&conn, "fixture").unwrap();
+        let token = crate::create_token(&conn, &[0; 32], user, "fixture", 1)
+            .unwrap()
+            .token
+            .id;
+        conn.execute("INSERT INTO account_platform_credentials(account_id,encrypted_admin_key,generation,configured_at) VALUES(1,X'00',1,?1)", [start]).unwrap();
+        let log = |at: i64, transport: &str, amount: Option<i64>| {
+            conn.execute("INSERT INTO usage_events(at_utc,user_id,token_id,account_id,api_surface,model,status,upstream_transport) VALUES(?1,?2,?3,1,'responses','synthetic','completed',?4)", params![at,user,token,transport]).unwrap();
+            if let Some(amount) = amount {
+                conn.execute(
+                    "INSERT INTO platform_request_costs(usage_id,usd_nanos) VALUES(?1,?2)",
+                    params![conn.last_insert_rowid(), amount],
+                )
+                .unwrap();
+            }
+        };
+        let platform = "platform_http_json";
+        log(start, platform, Some(91_000_000_000_i64));
+        crate::platform::balance::set(&conn, 1, 10_000, start + 30).unwrap();
+        log(start + 601, platform, Some(20_000_000_000));
+        log(now - 599, "http_sse", None);
+        log(now - 1, platform, Some(10_000_000_000));
+        log(now + 1, platform, Some(50_000_000_000));
+        let h = range(&conn, 1, "7d", None, now)
+            .unwrap()
+            .platform_balance
+            .unwrap();
+        let values = |h: &PlatformBalance| {
+            h.points
+                .iter()
+                .map(|p| (p.hour, p.remaining_percent.round()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(h.entered_at, start + 30);
+        assert_eq!(h.through_bucket, now);
+        assert_eq!(
+            values(&h),
+            [(start, 100.0), (start + 600, 80.0), (now - 600, 70.0)]
+        );
+        let before = now - 600;
+        let page = range(&conn, 1, "24h", Some(before), now)
+            .unwrap()
+            .platform_balance
+            .unwrap();
+        assert_eq!(values(&page), [(before - 86_400, 80.0)]);
+        assert_eq!(page.through_bucket, before - 600);
+        assert!(snapshot(&conn, 1, now).unwrap().platform_balance.is_none());
+
+        log(now - 601, platform, None);
+        let h = range(&conn, 1, "24h", None, now)
+            .unwrap()
+            .platform_balance
+            .unwrap();
+        assert_eq!(h.through_bucket, now - 1800);
+        assert_eq!(values(&h), [(now + 600 - 86_400, 80.0)]);
+        log(start + 602, platform, None);
+        assert!(range(&conn, 1, "24h", None, now)
+            .unwrap()
+            .platform_balance
+            .is_none());
+        conn.execute("UPDATE account_platform_credentials SET generation = 2", [])
+            .unwrap();
+        assert!(range(&conn, 1, "7d", None, now)
+            .unwrap()
+            .platform_balance
+            .is_none());
+        crate::platform::balance::set(&conn, 1, 0, start + 30).unwrap();
+        assert!(range(&conn, 1, "7d", None, now)
+            .unwrap()
+            .platform_balance
+            .is_none());
     }
     fn save(conn: &mut Connection, at: i64, order: i64, generation: i64, used: f64) {
         let value = json!({"type":"codex.rate_limits","rate_limits":{

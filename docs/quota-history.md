@@ -51,6 +51,14 @@ only as new observations arrive. Rolling windows have fixed durations even
 across DST. Collection still uses the existing roughly 30-second passive worker;
 changing bucket size adds no polls.
 
+On request, Desktop adds a Platform API line to the same percent-remaining chart.
+It uses the current positive manual balance and ExetRouter's recorded Platform
+request costs, not organization-wide daily costs. The chart reads sparse changes
+in ten-minute UTC buckets, carries earlier spend into older pages, and stops at
+the first unpriced request. A new balance entry restarts the series. The optional
+`platform_balance` in `quota-history --json` requires updated router code (or an
+updated embedded runtime in standalone); older responses still show Codex.
+
 ## History-based depletion forecasts
 
 The shared runtime derives optional `quota_accounts[].quota_forecast` metadata
@@ -61,6 +69,11 @@ No schema migration, extra upstream poll, inference or persistent forecast state
 is introduced. The existing account-scoped history query reads at most 8,642
 numeric points over the previous 30 days; it does not send that wider history
 to clients. Browsing an older chart interval does not change the forecast.
+
+OpenCode Desktop shows one compact current ETA and averages the two depletion
+times when both are available. It caches the value per snapshot, hides it when
+expired or disconnected, and does not show a historical-only ETA or explanatory
+pace labels. The separate labels below describe the terminal clients.
 
 Two estimates remain distinct:
 

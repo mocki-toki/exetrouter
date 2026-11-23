@@ -5,6 +5,7 @@ import { createMemo, createSignal, getOwner, onCleanup, runWithOwner } from "sol
 import type { DashboardState, SessionAccount } from "./schemas"
 import { Accounts } from "./rpc"
 import { Dashboard } from "./contract"
+import { Forecasts, type ForecastLookup } from "./dashboard"
 import { quotaIndicator } from "./indicator"
 import { openAccount } from "./overview"
 import { DashboardView } from "./panel"
@@ -14,6 +15,10 @@ export const setup: Plugin.Setup = (ctx) => {
   installInlineImages(ctx, { CodeBlock, Style, createKeyed, onCleanup, collectImages })
   const owner = getOwner()
   const state = createMemo((previous: DashboardState | undefined) => ctx.main(Dashboard).state() ?? previous)
+  const snapshot = createMemo(() => state()?.snapshot)
+  const forecasts = new Forecasts()
+  const estimates = createMemo(() => { const report = snapshot(); return report ? forecasts.observe(report) : undefined })
+  const forecast: ForecastLookup = (account, window, now) => estimates()?.(account, window, now)
   const [accounts, setAccounts] = createSignal(new Map<string, SessionAccount>())
   const key = (server: string, session: string) => `${server}\0${session}`
   const remember = (id: string, account: SessionAccount | null) => setAccounts((old) => {
@@ -54,12 +59,12 @@ export const setup: Plugin.Setup = (ctx) => {
       const indicator = quotaIndicator(state(), Math.floor(Date.now() / 1000), accounts().get(key(input.session.server.id, input.session.id)) ?? null)
       if (!indicator) return
       return { label: indicator.label, title: indicator.title, icon: "server", run: () => {
-        if (indicator.id !== null) openAccount(ctx, dialog, indicator.id, now, state)
+        if (indicator.id !== null) openAccount(ctx, dialog, indicator.id, now, state, forecast)
         else ctx.layout.open(`${ctx.id}:dashboard`, input.session)
       } }
     },
   })
   const tab = { id: "dashboard", title: "ExetRouter", closable: "compact" as const, fallback: true }
-  ctx.add(Panel, { id: "dashboard", region: "side", list: (input) => input.open.includes("dashboard") ? [tab] : [], render: (props) => <DashboardView remote={!props.session.server.builtin} /> })
+  ctx.add(Panel, { id: "dashboard", region: "side", list: (input) => input.open.includes("dashboard") ? [tab] : [], render: (props) => <DashboardView remote={!props.session.server.builtin} now={now()} forecast={forecast} /> })
   return () => clearInterval(clock)
 }

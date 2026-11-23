@@ -39,12 +39,17 @@ export type PlatformHistory = typeof PlatformHistory.Type
 export const PlatformCosts = Schema.Struct({ from: Schema.Number, to: Schema.Number, observedAt: Schema.NullOr(Schema.Number), spentUSD: Schema.NullOr(Schema.Number), budgetUSD: Schema.NullOr(Schema.Number), complete: Schema.Boolean, basis: Schema.String })
 export const BalanceEstimate = Schema.Struct({ remainingUSD: Schema.NullOr(Schema.Number), spentUSD: Schema.NullOr(Schema.Number), through: Schema.Number, observedAt: Schema.NullOr(Schema.Number), unpriced: Schema.Number, status: Schema.String })
 export const PlatformBalance = Schema.Struct({ enteredAt: Schema.Number, initialUSD: Schema.Number, exetrouter: BalanceEstimate, organization: BalanceEstimate })
+export const PlatformBalanceHistory = Schema.Struct({
+  enteredAt: Schema.Number, initialUSD: Schema.Number, throughBucket: Schema.Number,
+  points: Schema.Array(Schema.Struct({ hour: Schema.Number, left: Schema.Number })),
+})
 export const QuotaHistory = Schema.Struct({
   from: Schema.Number, to: Schema.Number, intervalSeconds: Schema.optionalKey(Schema.Number),
   // Pre-release Platform IPC used this name; accept it during GUI reloads.
   interval: Schema.optionalKey(Schema.Number),
   points: Schema.Array(Schema.Struct({ kind: Schema.String, hour: Schema.Number, observedAt: Schema.Number, used: Schema.Number, minutes: Schema.NullOr(Schema.Number), resetAt: Schema.NullOr(Schema.Number) })),
   platform: Schema.optionalKey(Schema.NullOr(PlatformHistory)),
+  platformBalance: Schema.optionalKey(PlatformBalanceHistory),
 })
 export type QuotaHistory = typeof QuotaHistory.Type
 
