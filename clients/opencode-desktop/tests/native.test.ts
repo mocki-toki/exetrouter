@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Schema } from "effect"
+import { platformRemaining } from "../src/dashboard"
 import { execJSON, NativeClient, platformHistory, snapshot, usage } from "../src/native"
 import { options } from "../src/options"
 import { count, date, duration, freshness, percent, subscriptionPlan } from "../src/format"
@@ -92,7 +93,11 @@ test("manual balance projects independent estimates, unknowns and overspend with
   assert.doesNotMatch(JSON.stringify(result),/private-body-marker/)
   const withEstimate=(e:typeof estimate)=>snapshot({...value,quota_accounts:[{...value.quota_accounts[0],platform:{...platform,balance:{...platform.balance,exetrouter:e}}}]}).accounts[0].platform?.balance
   assert.equal(withEstimate({...estimate,remaining_usd_nanos:-1e9,spent_usd_nanos:101e9})?.exetrouter.remainingUSD,-1)
-  assert.equal(withEstimate({...estimate,remaining_usd_nanos:null,unpriced_requests:1,status:"unpriced_requests"})?.exetrouter.remainingUSD,null)
+  const partial=withEstimate({...estimate,remaining_usd_nanos:null,unpriced_requests:1,status:"unpriced_requests"})
+  assert.equal(partial?.exetrouter.remainingUSD,null)
+  assert.deepEqual(platformRemaining(partial),{usd:99,excluded:1})
+  assert.deepEqual(platformRemaining(withEstimate({...estimate,remaining_usd_nanos:null,spent_usd_nanos:0,unpriced_requests:2,status:"unpriced_requests"})),{usd:100,excluded:2})
+  assert.deepEqual(platformRemaining(withEstimate({...estimate,remaining_usd_nanos:null,unpriced_requests:1,status:"configuration_changed"})),{usd:null,excluded:0})
   assert.throws(()=>withEstimate({...estimate,unpriced_requests:1}))
   assert.throws(()=>withEstimate({...estimate,remaining_usd_nanos:100e9}))
   assert.throws(()=>withEstimate({...estimate,status:"confirmed_provider_balance"}))

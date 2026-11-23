@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Show a partial estimate of Platform funds after known costs when some requests are unpriced. Label the excluded requests and keep complete estimates unknown in JSON; billing observations and routing are unchanged.
 - Add interactive local reset-credit redemption through `exrd admin oauth reset` and standalone `exr account reset`. Require fresh weekly depletion and explicit confirmation, share automatic recovery fences, and leave automatic policy and remote management unchanged.
 
 ## 0.11.0

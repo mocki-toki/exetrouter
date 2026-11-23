@@ -136,18 +136,51 @@ pub(super) fn save_report(
     Ok(())
 }
 
+fn unpriced_count(balance: &serde_json::Value) -> Option<u64> {
+    let e = &balance["exetrouter"];
+    if e["status"] != "unpriced_requests" {
+        return None;
+    }
+    e["unpriced_requests"].as_u64().filter(|&n| n > 0)
+}
+
+/// For display only: subtract the known subtotal without claiming a complete estimate.
+pub(crate) fn display_remaining_nanos(balance: &serde_json::Value) -> Option<i64> {
+    let e = &balance["exetrouter"];
+    if let Some(remaining) = e["remaining_usd_nanos"].as_i64() {
+        return Some(remaining);
+    }
+    unpriced_count(balance)?;
+    balance["initial_usd_nanos"]
+        .as_i64()?
+        .checked_sub(e["spent_usd_nanos"].as_i64()?)
+}
+
+pub(crate) fn unpriced_note(balance: &serde_json::Value) -> Option<String> {
+    let count = unpriced_count(balance)?;
+    let noun = if count == 1 { "request" } else { "requests" };
+    Some(format!("{count} unpriced {noun} excluded"))
+}
+
+fn dollars(nanos: Option<i64>) -> String {
+    nanos
+        .map(|n| crate::money::usd(n as f64 / 1e9))
+        .unwrap_or_else(|| "Unknown".into())
+}
+
 pub fn headline(platform: &serde_json::Value) -> String {
     let b = &platform["balance"];
-    let dollars = |v: &serde_json::Value| {
-        v.as_i64()
-            .map(|n| crate::money::usd(n as f64 / 1e9))
-            .unwrap_or_else(|| "Unknown".into())
-    };
     if b.is_object() {
+        let remaining = display_remaining_nanos(b);
+        let label = if remaining.is_some() && unpriced_count(b).is_some() {
+            "partial estimate"
+        } else {
+            "estimated"
+        };
         format!(
-            "Platform API  ·  {} / {} left · estimated",
-            dollars(&b["exetrouter"]["remaining_usd_nanos"]),
-            dollars(&b["initial_usd_nanos"])
+            "Platform API  ·  {} / {} left · {label}",
+            dollars(remaining),
+            dollars(b["initial_usd_nanos"].as_i64())
         )
     } else {
         "Platform API  ·  Set a manual balance to estimate remaining funds".into()
@@ -161,11 +194,6 @@ pub fn detail(platform: &serde_json::Value) -> String {
             .into();
     }
     let org = &b["organization"];
-    let dollars = |v: &serde_json::Value| {
-        v.as_i64()
-            .map(|n| crate::money::usd(n as f64 / 1e9))
-            .unwrap_or_else(|| "Unknown".into())
-    };
     let date = |v: &serde_json::Value| {
         v.as_i64()
             .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
@@ -176,7 +204,18 @@ pub fn detail(platform: &serde_json::Value) -> String {
             })
             .unwrap_or_else(|| "Unknown".into())
     };
-    format!("Manual {} · {}\nExetRouter: {} left · standard token estimate; excludes external usage, tool fees and tier adjustments · {} unpriced\nPlatform organization: {} left · {} · through {}",dollars(&b["initial_usd_nanos"]),date(&b["entered_at"]),dollars(&b["exetrouter"]["remaining_usd_nanos"]),b["exetrouter"]["unpriced_requests"].as_i64().unwrap_or(0),dollars(&org["remaining_usd_nanos"]),org["status"].as_str().unwrap_or("awaiting_report").replace('_'," "),date(&org["through_utc"]))
+    let partial = unpriced_note(b)
+        .map(|note| format!(" · partial estimate: {note}"))
+        .unwrap_or_default();
+    format!(
+        "Manual {} · {}\nExetRouter: {} left · standard token estimate; excludes external usage, tool fees and tier adjustments{partial}\nPlatform organization: {} left · {} · through {}",
+        dollars(b["initial_usd_nanos"].as_i64()),
+        date(&b["entered_at"]),
+        dollars(display_remaining_nanos(b)),
+        dollars(org["remaining_usd_nanos"].as_i64()),
+        org["status"].as_str().unwrap_or("awaiting_report").replace('_', " "),
+        date(&org["through_utc"])
+    )
 }
 
 #[cfg(test)]
@@ -299,7 +338,7 @@ mod tests {
         );
     }
     #[test]
-    fn unknown_usage_stays_unknown_across_recovery_until_new_manual_entry() {
+    fn partial_display_excludes_unpriced_requests_without_changing_accounting() {
         let (conn, token) = database();
         set(&conn, 1, 0, 100).unwrap();
         begin(&conn, &token, "pending", 1, "gpt-5.5", "platform_http_sse");
@@ -311,11 +350,21 @@ mod tests {
                 .remaining_usd_nanos,
             None
         );
+        let pending = serde_json::to_value(snapshot(&conn, 1, 101).unwrap()).unwrap();
+        assert_eq!(display_remaining_nanos(&pending), Some(0));
         usage::recover_requests(&conn).unwrap();
         crate::init(&conn).unwrap();
+        begin(&conn, &token, "priced", 1, "gpt-5.5", "platform_http_json");
+        finish(&conn, "priced", "platform_http_json", Some(100));
         let b = snapshot(&conn, 1, 102).unwrap().unwrap();
         assert_eq!(b.exetrouter.remaining_usd_nanos, None);
         assert_eq!(b.exetrouter.unpriced_requests, 1);
+        let platform = serde_json::json!({"balance": b});
+        assert_eq!(display_remaining_nanos(&platform["balance"]), Some(-791000));
+        assert!(headline(&platform).ends_with("partial estimate"));
+        let report = detail(&platform);
+        assert!(report.contains("1 unpriced request excluded"));
+        assert!(report.contains("Platform organization: Unknown left"));
         set(&conn, 1, 0, 103).unwrap();
         begin(&conn, &token, "known", 1, "gpt-5.5", "platform_http_json");
         finish(&conn, "known", "platform_http_json", Some(100));
@@ -376,6 +425,7 @@ mod tests {
         assert_eq!(b.exetrouter.remaining_usd_nanos, None);
         assert_eq!(b.exetrouter.status, "configuration_changed");
         assert_eq!(b.organization.remaining_usd_nanos, None);
+        assert_eq!(display_remaining_nanos(&serde_json::json!(b)), None);
         assert!(set(&conn, 99, 10000, 100).is_err());
         assert!(set(&conn, 1, 1_000_000_001, 100).is_err());
         assert_eq!(

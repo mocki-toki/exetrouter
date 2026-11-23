@@ -1,4 +1,4 @@
-import type { Account, Snapshot, Window, QuotaForecast } from "./schemas"
+import type { Account, PlatformBalance, Snapshot, Window, QuotaForecast } from "./schemas"
 
 export function fresh(at: number | null, now: number): boolean { return at !== null && at <= now && now - at < 60 }
 export function routingFresh(account: Account, now: number): boolean {
@@ -13,6 +13,15 @@ export function priority(account: Account): boolean {
 }
 export function visibleWindows(account: Account): readonly Window[] {
   return account.windows.filter((w) => w.minutes !== null && w.minutes > 0).sort((a, b) => a.minutes! - b.minutes!)
+}
+
+export function platformRemaining(balance: typeof PlatformBalance.Type | null | undefined) {
+  if (!balance) return { usd: null, excluded: 0 }
+  const estimate = balance.exetrouter
+  if (estimate.status === "unpriced_requests" && estimate.unpriced > 0 && estimate.spentUSD !== null) {
+    return { usd: balance.initialUSD - estimate.spentUSD, excluded: estimate.unpriced }
+  }
+  return { usd: estimate.remainingUSD, excluded: 0 }
 }
 
 /** Match the runtime's projections to the quota observation they describe. */
