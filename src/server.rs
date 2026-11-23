@@ -57,6 +57,7 @@ const CONTROL_LIMIT: u64 = 32_768;
 /// A full 90-day ten-minute history must fit equally over SSH and standalone.
 /// Requests, queues and concurrent management operations retain their own bounds.
 pub const CONTROL_REPLY_LIMIT: usize = 8_388_608;
+pub const DEFAULT_PER_USER_LIMIT: usize = 12;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -290,9 +291,9 @@ pub(crate) async fn local_api(
         decode_slots: Arc::new(Semaphore::new(4)),
         continuation_bytes: Arc::new(Semaphore::new(continuation::TOTAL_BYTES)),
         native_slots: Arc::new(Semaphore::new(4)),
-        mcp: mcp::McpState::new(8),
-        generation_slots: limits::Slots::new(8),
-        websocket_slots: limits::Slots::new(8),
+        mcp: mcp::McpState::new(DEFAULT_PER_USER_LIMIT),
+        generation_slots: limits::Slots::new(DEFAULT_PER_USER_LIMIT),
+        websocket_slots: limits::Slots::new(DEFAULT_PER_USER_LIMIT),
         fast_mode: false,
         upstream: Some(upstream.clone()),
         jobs: jobs.clone(),
@@ -351,8 +352,8 @@ pub(crate) async fn local_api(
 }
 pub(crate) fn local_limits(user: i64) -> crate::doctor::LimitsReport {
     crate::doctor::LimitsReport {
-        generations: limits::Slots::new(8).snapshot(user),
-        websockets: limits::Slots::new(8).snapshot(user),
+        generations: limits::Slots::new(DEFAULT_PER_USER_LIMIT).snapshot(user),
+        websockets: limits::Slots::new(DEFAULT_PER_USER_LIMIT).snapshot(user),
     }
 }
 

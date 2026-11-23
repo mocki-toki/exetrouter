@@ -94,9 +94,9 @@ enum Command {
         allow_container_listen: bool,
         #[arg(long)]
         allow_same_uid_for_dev: bool,
-        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=64))]
+        #[arg(long, default_value_t = server::DEFAULT_PER_USER_LIMIT as u16, value_parser = clap::value_parser!(u16).range(1..=64))]
         generations_per_user: u16,
-        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=64))]
+        #[arg(long, default_value_t = server::DEFAULT_PER_USER_LIMIT as u16, value_parser = clap::value_parser!(u16).range(1..=64))]
         websockets_per_user: u16,
     },
 }
