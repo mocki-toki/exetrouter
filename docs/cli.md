@@ -76,7 +76,7 @@ The OpenCode Desktop and native TUI Usage tabs plot a [standard API USD equivale
 Configured Platform accounts can have a [manual balance reconciliation point](platform-api.md#manual-remaining-funds-estimates).
 Overview defaults to the entered amount minus known ExetRouter Platform token-cost
 estimates, marked partial if any requests were excluded because their costs are unknown.
-Account details also show the independent, delayed all-organization
+The operator's Platform status report also shows the independent, delayed all-organization
 Costs alternative. These are estimates, not a live provider balance or a routing
 cap. Each new entry replaces both starting points, without a monthly auto-refill.
 On a shared server only its local operator may enter the amount, using

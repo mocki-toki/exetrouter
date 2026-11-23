@@ -60,11 +60,9 @@ no free-only gate and the configured allowance is a display reference, not a loc
 spending cap. Upstream remains authoritative about available funds and balance
 exhaustion. Daily costs are not subtracted from an assumed grant to admit work.
 
-Account details show separate daily-dollar Platform history under subscription
-history with the same 24-hour/7-day/30-day/90-day range controls. Daily costs are
-not interpolated into ten-minute quota samples. Partial boundary days outside a
-selected interval are omitted, not proportionally estimated. Disconnected
-accounts have no Platform meter, notice or history series.
+The operator can inspect organization-wide costs separately. Account details in
+the TUI and Desktop instead show [estimated Platform percent remaining](quota-history.md)
+on the same chart as Codex. Disconnected accounts have no Platform meter or line.
 
 ## Manual remaining-funds estimates
 
@@ -100,8 +98,8 @@ overstate remaining funds. Their costs remain unknown in accounting, and the
 complete `remaining_usd_nanos` stays null in JSON; `spent_usd_nanos` contains only
 the known subtotal. Negative estimates are not clamped or used to stop routing.
 
-Account details additionally show **Platform organization estimated remaining
-funds**. An independent Costs API query explicitly starts at the manual-entry
+The operator's Platform status report additionally shows **Platform organization
+estimated remaining funds**. An independent Costs API query starts at the manual-entry
 timestamp, not at midnight or the subscription billing day. Its returned partial
 boundary buckets are never prorated, and their amounts are not added to the
 ExetRouter estimate. Missing, overlapping or duplicate intervals cannot establish

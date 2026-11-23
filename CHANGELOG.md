@@ -1,8 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.12.0
 
-- Show a partial estimate of Platform funds after known costs when some requests are unpriced. Label the excluded requests and keep complete estimates unknown in JSON; billing observations and routing are unchanged.
+- Raise default per-user capacity to 12 concurrent generations and 12 client WebSockets. Explicit server overrides and global limits are unchanged.
+- Show one cached, compact quota ETA in the TUI and Desktop, refining the live estimate with history when both are available. Put the Codex and Platform API cards together and chart percent remaining on one axis.
+- Show a partial estimate of Platform funds after known costs when some requests are unpriced. Keep the complete estimate unknown in JSON; billing observations and admission are unchanged.
+- Route observed embedding models through Platform projects and meter input tokens. Add reviewed callable Platform Responses models and distinguish direct Platform models from shared Codex fallbacks in Models without changing native model limits.
+- Add operator selection of Codex and Platform routing resources. This release uses schema 21; use the [reviewed migration](docs/platform-api.md#select-routing-resources) from schema 20. Existing schema-21 deployments can use the same-schema updater.
+- Keep the deployed upstream HTTP/WebSocket diagnostics, SSE for Chat Completions by default, and a bounded wait for brief operational backoff before generation admission.
+- Publish OpenCode Desktop plugin 0.7.0 with the shared dashboard changes and the OpenCode 2.3 compatibility update from PR #16.
 - Add interactive local reset-credit redemption through `exrd admin oauth reset` and standalone `exr account reset`. Require fresh weekly depletion and explicit confirmation, share automatic recovery fences, and leave automatic policy and remote management unchanged.
 
 ## 0.11.0
@@ -21,7 +27,6 @@
 - Add operator-owned expected subscription billing days, plan prices and exact USD API allowance overrides through shared standalone/server configuration. Schema 17 is additive; follow `docs/subscription-metadata.md` for migration and rollback.
 - Add encrypted, account-bound Platform Admin Key provisioning from private files for the local operator or standalone owner, with redacted diagnostics and verified backups.
 - Add actual organization-wide daily Platform Costs, bounded numeric history and shared GUI/TUI/CLI spending views, without treating costs or configured allowances as verified free credit. Schema 18 adds managed thirty-day `exetrouter` service-account keys with encrypted one-time secrets, durable pre-POST fences and no retry of uncertain mutations. Project management is explicit. Follow `docs/platform-api.md` for migration and rollback.
-- Add durable operator selection of `codex`, `platform` or both through `platform resources`, replacing the old `codex-fallback` command. Both retain Codex-first, quota-only fallback for shared models. Schema 21 preserves the previous behavior until an explicit selection; see `docs/platform-api.md` for migration and rollback. Platform allowances remain display references, not spending caps.
 - Add bounded read-only Platform model availability for local operators/standalone owners using the actual working key, with credential/project generation fences and no guessed capabilities. Authenticate and validate model access before marking working keys active; failed checks preserve the confirmed secret rather than recreating it. Restrict Admin requests to the explicit management route/method allowlist.
 - Add shared Platform Responses JSON/SSE, translated Chat, unary compaction and HTTP-backed client WS routing. Schema 19 keeps project context/health separate from OAuth while retaining parent-account durable usage. Enable same-model API fallback only after all eligible Codex quotas are exhausted and the operator policy permits it; never replay ambiguous inference or migrate opaque state across backends/projects. Append distinct reviewed, key-visible Platform models after Codex without changing native descriptors. Native non-generating warmup is refused locally without spending.
 - Use compact human USD formatting (`$5k`, `$12.5k`, `$1.2M`) across CLI, TUI and Desktop without changing numeric automation values; remove the redundant model-filter explanation.

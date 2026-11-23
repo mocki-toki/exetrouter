@@ -63,8 +63,8 @@ For a checkout with no local changes, update to the reviewed release and rebuild
 
 ```sh
 cd /absolute/path/to/exetrouter
-git fetch origin tag v0.11.0
-git switch --detach v0.11.0
+git fetch origin tag v0.12.0
+git switch --detach v0.12.0
 cd clients/opencode-desktop
 npm ci --ignore-scripts --no-audit --no-fund
 npm run typecheck
@@ -76,8 +76,8 @@ Use the installation method's update command for Homebrew or Nix clients instead
 of `exr update`. If the checkout has local changes, preserve it and use a separate
 clone at the release tag, then change only this plugin's `package` path in global
 OpenCode configuration. Keep existing connection options and credentials. The
-plugin 0.6.0 and native `exr` 0.11.0 include history-based quota forecasts,
-Platform metadata and the 0.9.2 history
+plugin 0.7.0 and native `exr` 0.12.0 include compact quota forecasts,
+shared Codex and Platform limit history, and the 0.9.2 history
 compatibility fixes. Update **both**: a 0.9.2 native client can still show Codex
 accounts but drops newer Platform/billing fields, so rebuilding only the GUI
 cannot show their balances. The GUI reloads when its local bundle is rebuilt;
@@ -85,12 +85,7 @@ reopen the panel if necessary. Nix users must update the ExetRouter flake input
 and rebuild their managed configuration, including its plugin directory and
 configured `exrBinary`.
 
-Platform routing, billing, costs and manual-balance estimates require a server
-with schema 20 support. Upgrading an older server or standalone state requires
-the reviewed [0.10.0 migration and rollback](../../docs/platform-api.md#release-upgrade-from-schema-15).
-Do not downgrade a newer-schema development deployment or point an older binary
-at newer standalone state. An existing schema-20 shared server does not need a
-schema migration just to update its native client and GUI.
+Router 0.12.0 uses schema 21. Review the [routing resource migration](../../docs/platform-api.md#select-routing-resources) before updating a schema-20 server or standalone state. Existing schema-21 servers can use the same-schema updater. Updating only a remote-mode client or GUI does not migrate the server.
 
 ## Using the provider
 
