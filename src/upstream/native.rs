@@ -58,6 +58,9 @@ impl Upstream {
         hint: Option<&str>,
         pinned: Option<i64>,
     ) -> std::result::Result<Selection, SelectError> {
+        if !self.routing_policy().await?.codex() {
+            return Err(SelectError::ModelUnavailable);
+        }
         let blocked = self.db.call(move |conn| {
             let mut stmt = conn.prepare("SELECT p.account_id,p.retry_at,p.kind='quota' FROM native_feature_pauses p JOIN oauth_accounts a ON a.id=p.account_id WHERE a.state='active' AND p.feature=?1 AND p.retry_at>?2")?;
             let rows = stmt.query_map(params![feature.name(), Utc::now().timestamp()], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,i64>(1)?, row.get::<_,bool>(2)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
@@ -141,7 +144,7 @@ impl Upstream {
         let (id, generation) = (account.info.id, account.info.generation);
         self.db.call(move |conn| {
             let valid = conn.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts WHERE id=?1 AND generation=?2 AND state='active')", params![id,generation], |row| row.get::<_,bool>(0))?;
-            if !valid || !crate::account_preferences::effective(conn, id)?.enabled
+            if !valid || !crate::platform::Policy::read(conn)?.codex() || !crate::account_preferences::effective(conn, id)?.enabled
                 || crate::health::paused(conn, id, Utc::now().timestamp())?.is_some()
                 || paused(conn, id, feature)?.is_some()
                 || (feature == Feature::Search && crate::quota::blocked_until(conn, id, Utc::now().timestamp())?.is_some())

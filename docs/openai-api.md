@@ -1,6 +1,6 @@
 # OpenAI-compatible API
 
-ExetRouter supports the routes below, authenticated with a router bearer. It uses ChatGPT Codex OAuth upstream. SDK/native-client verification is recorded in [compatibility](compatibility.md#verified-versions-and-scope); support here does not imply the complete OpenAI Platform API.
+ExetRouter supports the routes below, authenticated with a router bearer. The operator selects [Codex, Platform or both](platform-api.md#select-routing-resources) upstream. SDK/native-client verification is recorded in [compatibility](compatibility.md#verified-versions-and-scope); support here does not imply the complete OpenAI Platform API.
 
 | Route | Supported surface |
 | --- | --- |
@@ -10,10 +10,13 @@ ExetRouter supports the routes below, authenticated with a router bearer. It use
 | `GET /v1/responses` with WS upgrade | Sequential native `response.create` |
 | `POST /v1/responses/compact` | One opaque compaction checkpoint |
 | `POST /v1/chat/completions` | Limited Chat JSON or SSE |
+| `POST /v1/embeddings` | Unary JSON, using the configured Platform project only |
 | `POST /v1/images/generations`, `/v1/images/edits` | [Native unary Codex images](native-tools.md#image-api), JSON, one `gpt-image-2` output |
 | `POST /v1/alpha/search` | [Native standalone search](native-tools.md#standalone-web-search), scoped and account-pinned |
 
-Embeddings, audio/Realtime, files/uploads/batches and saved-completion CRUD are not implemented. Image routes do not provide the complete Platform Images API or bypass Codex's client-side image-tool authorization gate. Forwarding a backend option does not add a resource endpoint or a new transport.
+Audio/Realtime, files/uploads/batches and saved-completion CRUD are not implemented. Image routes do not provide the complete Platform Images API or bypass Codex's client-side image-tool authorization gate. Forwarding a backend option does not add a resource endpoint or a new transport.
+
+For embeddings, choose an ID with `source: "platform"` and the `embeddings` capability in `GET /v1/models`. The router lists `text-embedding-3-small`, `text-embedding-3-large` and `text-embedding-ada-002` only when observed for a configured project. These models do not appear in generation-only client exports. `client.embeddings.create(model="text-embedding-3-small", input=["first", "second"])` accepts the usual string or token inputs, `float` or `base64` encoding and upstream-supported dimensions. Split large batches to keep each unary JSON reply within the 1 MiB output bound. Requests use Platform funds and do not consume Codex quota.
 
 For agent tool discovery and invocation, use the separate authenticated [MCP endpoint `/mcp`](mcp.md). It reuses these native operations and returns MCP image content without requiring Codex's built-in image extension.
 
@@ -92,6 +95,8 @@ Native WS services upstream ping/pong and control events between requests. If th
 
 Large complete generations may instead use upstream HTTP SSE while the client continues using native WS. HTTP has no socket-local response IDs: incremental input must be expanded from the bounded latest completed context. If expansion is unavailable, the router returns `previous_response_not_found` **before inference and accounting**; the client must supply full current input. Reviewed OpenCode V2 performs one full-context recovery and may reopen its WS. Other clients must implement this recovery or resend full input explicitly. No history is truncated or retained beyond the existing recovery budget. Normal authorization/account affinity still applies on the full request, including after reconnect.
 
+When a native WS error reports `upstream_websocket_unavailable`, its message includes the downstream `client_connection_id` and `frame_sequence`. Look up that pair in the JSON log's `span` on `upstream_websocket_handshake_failed` events. Each failed attempt records elapsed milliseconds, a fixed reason and the numeric HTTP status when available. A Chat handshake carries its HTTP `request_id` in the span. The measurements cover the attempt to open the upstream connection before generation submission.
+
 An interrupted native WS request retains error code/type `upstream_interrupted`, except the request-specific upstream size rejection described below. Its message includes a fixed reason/stage, an optional numeric close code and the router-generated request ID for correlation with the server's `upstream_stream_interrupted` summary. No upstream close-reason text or transport-error payload is exposed. Delivery can fail if the client connection is already lost. A close code of 1000 does not mean an in-flight response completed; completion requires its terminal event. Client retries remain client-controlled; the router does not infer retry linkage or the user's cancellation intent from adjacent requests.
 
 Idle metadata is retained as at most one 64 KiB transient notification and delivered after the next `response.created`, preserving native event ordering. Unexpected idle data/terminal/error frames close the downstream connection instead of attributing them to a later request. Upstream controls do not extend the 300-second downstream idle deadline.
@@ -128,6 +133,8 @@ Unsupported/multiple codings return 415 `unsupported_content_encoding`; corrupt/
 
 Upstream WS negotiates RFC 7692 `permessage-deflate`, matching the reviewed Codex 0.164.0 transport. When accepted, the complete request passes through the negotiated compressor without changing its input. When declined, plain text messages use continuation frames of at most 1 MiB. Incoming upstream messages remain bounded to 1 MiB **after decompression**, independently of input acceptance. Negotiation does not enable downstream client compression or forward arbitrary extension headers. Compressed outgoing messages require transient buffers proportional to the input; they are not constrained by the old 2 MiB fragment write-buffer ceiling.
 
+Chat Completions uses upstream HTTP/SSE by default, including when the client requests a single JSON response. The optional `X-ExetRouter-Upstream-Transport` header accepts `http_sse` to name the default or `websocket` to prefer WebSocket for an eligible request.
+
 Complete generation requests whose serialized prepared JSON reaches 16 MiB prefer upstream HTTP SSE **before submission**. This is a transport-selection heuristic, not an input ceiling or a claimed OpenAI size contract. HTTP validates its own limits. Existing native connections can switch transports between completed requests on the same eligible account; scoped identities and input are preserved, old socket-specific turn state is discarded, and the client-facing WS remains open. Subsequent generations stay on HTTP for that binding. Native `generate=false` warmup remains WS-only and is never converted into HTTP generation. Chat uses the same pre-submission preference. HTTP headers are projected as bounded `response.metadata` after `response.created`, with authenticated turn state, and actual upstream transport is recorded in usage. Client disconnect/shutdown cancels the HTTP wait without a detached task; an unobserved outcome remains unknown.
 
 If upstream still closes with 1009 (`Message Too Big`), return `upstream_request_too_large` without account-wide operational backoff, automatic replay or account transfer. HTTP Chat using upstream WS returns 413 for JSON or a started-stream error for SSE. Other upstream interruptions retain their existing backoff/retry contract. Neither fragmentation nor compression removes a provider's whole-message or decoded-size limit; source compatibility and synthetic fixtures do not prove that any particular large live context is accepted.
@@ -147,7 +154,13 @@ Backend HTTP errors retain their status with fixed redacted HTTP/Chat bodies. Bo
 
 Operators can correlate inference refusals through `upstream_response_rejected` logs: router request ID, upstream transport, optional upstream request ID/status and exact allowlisted `error_code`, `error_type` and `error_param` labels. Unknown or missing labels are `unknown`, not a guessed cause. Labels such as `unsupported_parameter` and `max_output_tokens` can identify a validation refusal without retaining its message or arbitrary parameter paths. The HTTP and upstream-event paths use the same classifier; redacted client bodies and native event forwarding are unchanged. Logs cannot reconstruct historical errors recorded before this diagnostic, and no diagnostic triggers a retry.
 
+If an upstream HTTP POST fails before response headers arrive, `upstream_http_post_failed` records the router request ID, `stage=before_headers`, elapsed milliseconds and a fixed `transport_error_kind`. During HTTP stream reads, `upstream_stream_interrupted` includes the request duration and a transport category when the HTTP client reports one. SSE decoder failures and clean EOF before completion have separate reasons. For an HTTP quota retry, `upstream_http_quota_retry` links the original request ID to the new attempt ID. The category reflects the available client-library evidence. A failure before headers does not establish whether the provider received the POST.
+
+After a streaming HTTP response starts, `http_sse_finished` records why the worker stopped: a terminal event, a downstream disconnect or queue timeout, shutdown, an upstream read failure, or the local observation/projection stage that failed. Correlate its request ID with `upstream_stream_interrupted` for transport detail. `upstream_completed_seen` reports an observed `response.completed`; for Chat, `chat_done_queued` means `[DONE]` entered the downstream queue, not that the client received it. HTTP 200 alone does not establish either outcome.
+
 HTTP SSE and native WS emit content-free `ping` events after 15 seconds without a downstream event; clients should ignore unknown types. Heartbeats do not indicate generation progress or reset upstream deadlines: 900 seconds for inference, 300 for metadata.
+
+For long Chat completions behind a proxy, request `stream: true` and consume the stream through its finish chunk and `[DONE]`. With JSON, upstream progress produces no downstream bytes until completion. When the HTTP adapter reads an upstream WebSocket, its interruption log distinguishes read errors, invalid events, timeouts and closes; only the fixed error category and optional numeric close code are recorded.
 
 Native WS additionally sends control pings every 15 seconds to upstream during active requests and to downstream during active/idle periods. Any received upstream frame, including pong, proves peer liveness. Complete upstream silence before the first non-control event is bounded to 90 seconds; after the response starts, the 900-second receive budget applies. A client that sends no frames/pongs while idle is closed after 90 seconds. These liveness controls do not produce model output or renew the application-idle deadline.
 

@@ -118,7 +118,10 @@ by remote/standalone CLI, GUI and TUI. No web-session credentials are required.
 
 The selected project uses the uniquely named `exetrouter` service account and
 an API key named `exetrouter`, with a requested lifetime of exactly 30 days and
-only model-list/Responses scopes. A missing service account is created with its
+model-list, Responses and Embeddings scopes. An existing restricted working key needs the
+Embeddings Request permission to use `/v1/embeddings`; upgrading the router does not
+change or rotate that key. Enable the permission in the project's key settings or
+wait for normal managed renewal. A missing service account is created with its
 default `member` membership, without a separate RBAC role assignment. Its initial
 bootstrap key requests the minimum supported one-second lifetime. The returned
 secret is encrypted and committed atomically with creation confirmation, marked
@@ -169,7 +172,7 @@ The bounded, atomic inventory contains at most 2,048 unique model IDs with norma
 display names. Owner names, arbitrary metadata and payloads are discarded. The
 public Models API establishes availability only, not endpoint capabilities or a
 cash balance; no capability is guessed from a model name. The operator inventory
-retains all observed IDs. Only the intersection with reviewed public Responses
+retains all observed IDs. Only the intersection with reviewed public Responses and [embedding](https://developers.openai.com/api/reference/resources/embeddings)
 descriptors enters routing; JSON `routing_enabled` indicates whether that
 intersection is nonempty, not whether a particular request has available funds.
 
@@ -196,22 +199,42 @@ A working key is marked active only after its model-list read authenticates and
 returns a valid inventory. A failed read does not cause another key to be created;
 the confirmed one-time secret and pre-POST fence are preserved for reconciliation.
 
-## Codex-model API spending policy
+## Select routing resources
 
-`platform_codex_fallback` defaults to **false**. Operators can set it in the saved
-server JSON or with `exrd serve --platform-codex-fallback false`. Without an
-explicit startup value, the durable local policy is preserved. Immediate local
-operator/standalone equivalents:
+The server operator can change the enabled resources for all users immediately:
 
 ```sh
-exrd admin oauth platform codex-fallback false
-exr account platform codex-fallback false
+exrd admin oauth platform resources codex
+exrd admin oauth platform resources platform
+exrd admin oauth platform resources codex platform
+exrd admin oauth platform resources --json  # Show the current policy.
 ```
 
-The policy applies only to Platform spending for models also available in the
-Codex catalog. It does not disable native Codex quotas or independent Platform
-models. Both free and purchased funds are eligible; this flag controls only which
-models may use Platform, not the source of its funds.
+The standalone equivalent is `exr account platform resources`, with the same
+arguments. With both resources enabled, argument order does not change routing:
+Codex comes first for shared models, and Platform-only models route directly.
+In a single-resource mode the other resource is never used as a fallback. The
+model catalog reflects the enabled resources; embeddings require Platform, and
+native images/search (including MCP tools) require Codex. Platform routes still
+require a configured working key and an active, operator-enabled parent account.
+
+The change is durable and applies to new admissions, including new frames on
+existing WebSockets. It does not cancel in-flight generations, deactivate accounts,
+delete credentials, or implicitly move saved conversations or opaque context.
+If context cannot safely transfer, reconnect or resend self-contained text/tool
+history. Disabling Codex also prevents reset-credit redemption and the weekly
+activation probe. Read-only diagnostics and configured Platform key maintenance
+are separate from inference routing.
+
+To apply an explicit selection on every server startup, use
+`"routing_resources": ["codex", "platform"]` in server JSON or
+`exrd serve --routing-resources codex,platform`. The flag overrides the file.
+Omit both to retain the most recent operator selection across restarts.
+Before any explicit selection, the previous behavior is preserved: legacy
+`true` acts as `codex platform`; the legacy default/`false` allows Platform-only
+models and embeddings but not shared models on Platform. The old server setting
+is read only for that inherited policy. Use `resources codex` to disable all
+Platform inference, including embeddings.
 
 The
 [subscription credit benefit](https://developers.openai.com/api/docs/guides/chatgpt-api-credits)
@@ -230,8 +253,8 @@ Platform [compaction](https://developers.openai.com/api/reference/resources/resp
 uses the public unary `/responses/compact` operation, not Codex's SSE trigger.
 Its returned visible prefix and opaque checkpoint are both preserved.
 
-Codex remains first choice. Same-model Platform fallback requires the operator
-policy and exhaustion of **every eligible Codex subscription for that model**.
+With both resources enabled, Codex remains first choice. Same-model Platform
+fallback requires exhaustion of **every eligible Codex subscription for that model**.
 Unknown quota, authentication failures, expired credentials or operational backoff
 do not authorize API spending as a substitute. A recognized pre-generation quota
 refusal can trigger the existing bounded fallback; uncertain submitted inference
@@ -305,6 +328,22 @@ Older native clients cannot display Platform fields, and older servers cannot
 continue Platform-owned opaque sessions. Reconcile the chosen rollback target
 with client-held state before resuming workers; never strip proofs to fake
 portability. Keep the same signing/encryption keys throughout.
+
+## Schema 21 upgrade and rollback
+
+Stop/drain workers and verify a private snapshot before schema 20 → 21. The
+additive `routing_resources` table starts empty, preserving the previous policy
+until the operator sets a resource selection. No credentials, route identities,
+quota observations or usage rows are changed. Deploy matching server and native
+gateway binaries; use the reviewed schema migration rather than the ordinary
+same-schema Docker update.
+
+To roll back, drain workers, take a current verified snapshot, remove the new
+`routing_resources` setting/flag from the startup configuration, and set
+`PRAGMA user_version=20` during maintenance before restoring matching schema-20
+binaries. Retain the new table and its row so re-upgrading restores the selection.
+The old binary uses the old fallback setting and **cannot enforce a single-resource
+policy**. Review the resulting admission policy before reopening traffic.
 
 ## Schema 20 upgrade and rollback
 

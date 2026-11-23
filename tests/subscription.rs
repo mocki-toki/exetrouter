@@ -210,30 +210,40 @@ fn standalone_owner_and_server_operator_share_billing_rules_and_json() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("no usable Platform working key"));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("sk-"));
     }
-    for enabled in ["true", "false"] {
-        for output in [
-            run_local(&["account", "platform", "codex-fallback", enabled, "--json"]),
-            run_server(&[
-                "admin",
-                "oauth",
-                "platform",
-                "codex-fallback",
-                enabled,
-                "--json",
-            ]),
-        ] {
+    for (resources, expected) in [
+        (&["platform"][..], serde_json::json!(["platform"])),
+        (
+            &["platform", "codex"][..],
+            serde_json::json!(["codex", "platform"]),
+        ),
+        (&["codex"][..], serde_json::json!(["codex"])),
+    ] {
+        let mut local_args = vec!["account", "platform", "resources", "--json"];
+        let mut server_args = vec!["admin", "oauth", "platform", "resources", "--json"];
+        local_args.extend(resources);
+        server_args.extend(resources);
+        for output in [run_local(&local_args), run_server(&server_args)] {
             assert!(
                 output.status.success(),
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
-                    ["codex_fallback_allowed"],
-                enabled == "true"
-            );
+            let policy: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(policy["resources"], expected);
+            assert_eq!(policy["legacy_platform_restriction"], false);
         }
     }
+    for invalid in [&["codex", "codex"][..], &["unknown"][..]] {
+        let mut args = vec!["admin", "oauth", "platform", "resources"];
+        args.extend(invalid);
+        assert!(!run_server(&args).status.success());
+    }
+    let persisted = run_server(&["admin", "oauth", "platform", "resources", "--json"]);
+    assert!(persisted.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&persisted.stdout).unwrap()["resources"],
+        serde_json::json!(["codex"])
+    );
     for path in [state.join("state.sqlite"), db] {
         let db = rusqlite::Connection::open(path).unwrap();
         assert_eq!(

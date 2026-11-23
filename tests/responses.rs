@@ -129,6 +129,12 @@ impl Fixture {
             .await
             .unwrap();
     }
+    async fn pause_responses(&self, seconds: i64) {
+        self.db.call(move |conn| {
+            conn.execute("INSERT INTO oauth_health(account_id,scope,generation,failures,retry_at,reason,last_order) SELECT id,'responses',generation,1,unixepoch()+?1,'transport',0 FROM oauth_accounts WHERE id=1 ON CONFLICT(account_id,scope) DO UPDATE SET retry_at=excluded.retry_at", [seconds])?;
+            Ok(())
+        }).await.unwrap();
+    }
     async fn expire_health(&self) {
         self.db
             .call(|conn| {
@@ -261,13 +267,20 @@ impl Fixture {
             .unwrap()
     }
     async fn chat(&self, value: Value) -> reqwest::Response {
-        reqwest::Client::new()
-            .post(format!("{}/v1/chat/completions", self.url))
-            .bearer_auth(&self.secret)
+        self.chat_http_request().json(&value).send().await.unwrap()
+    }
+    async fn chat_ws(&self, value: Value) -> reqwest::Response {
+        self.chat_http_request()
+            .header("x-exetrouter-upstream-transport", "websocket")
             .json(&value)
             .send()
             .await
             .unwrap()
+    }
+    fn chat_http_request(&self) -> reqwest::RequestBuilder {
+        reqwest::Client::new()
+            .post(format!("{}/v1/chat/completions", self.url))
+            .bearer_auth(&self.secret)
     }
     async fn compact(&self, value: Value) -> reqwest::Response {
         reqwest::Client::new()
@@ -1614,7 +1627,7 @@ async fn upstream_message_size_rejection_does_not_pause_retry_or_move_accounts()
                 .unwrap();
             terminal(&mut socket).await.to_string()
         } else {
-            let response = fixture.chat(chat_request(surface == "chat_sse")).await;
+            let response = fixture.chat_ws(chat_request(surface == "chat_sse")).await;
             assert_eq!(
                 response.status(),
                 if surface == "chat_json" { 413 } else { 200 }
@@ -2001,10 +2014,7 @@ async fn unauthorized_is_sanitized_and_refresh_waits_for_a_new_request_on_all_tr
                 body["stream"] = json!(surface == "responses_sse");
                 fixture.post(body).await
             };
-            assert_eq!(
-                reply.status(),
-                if surface == "chat_sse" { 200 } else { 502 }
-            );
+            assert_eq!(reply.status(), 502);
             reply.text().await.unwrap()
         };
         assert!(
@@ -2034,7 +2044,7 @@ async fn unauthorized_is_sanitized_and_refresh_waits_for_a_new_request_on_all_tr
         assert_eq!(fixture.mock.requests.lock().unwrap().len(), 2);
         assert_eq!(
             fixture.rows().await[0]["status"],
-            if surface.starts_with("responses") {
+            if surface != "native_ws" {
                 "upstream_rejected"
             } else {
                 "failed"
@@ -2152,7 +2162,7 @@ async fn unauthorized_handshake_never_falls_back_or_sends_inference() {
             .handshake_unauthorized
             .store(true, Ordering::SeqCst);
         if chat {
-            let reply = fixture.chat(chat_request(false)).await;
+            let reply = fixture.chat_ws(chat_request(false)).await;
             assert_eq!(reply.status(), 502);
             assert_eq!(
                 reply.json::<Value>().await.unwrap()["error"]["type"],
@@ -2283,6 +2293,93 @@ async fn delayed_unauthorized_does_not_invalidate_operator_reauthorization() {
 }
 
 #[tokio::test]
+async fn short_backoff_admits_http_and_bound_websocket_once_before_submission() {
+    let fixture = Fixture::start(false).await;
+    fixture.upstream.models().await.unwrap();
+    fixture.pause_responses(1).await; // Upgrade checks availability before accepting the socket.
+    let mut socket = fixture.ws().await;
+    let mut frame = request();
+    frame["type"] = json!("response.create");
+    socket
+        .send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+    let first = terminal(&mut socket).await;
+    assert_eq!(first["type"], "response.completed");
+    frame["previous_response_id"] = first["response"]["id"].clone();
+    fixture.pause_responses(2).await;
+    socket
+        .send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+    let (http, ws) = tokio::join!(fixture.post(request()), terminal(&mut socket));
+    assert!(http.text().await.unwrap().contains("response.completed"));
+    assert_eq!(ws["type"], "response.completed");
+    assert_eq!(fixture.mock.requests.lock().unwrap().len(), 3);
+    assert_eq!(fixture.rows().await.len(), 3);
+    socket.close(None).await.unwrap();
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn short_backoff_rechecks_extended_deadline_and_cancels_disconnected_clients() {
+    let fixture = Fixture::start(false).await;
+    fixture.upstream.models().await.unwrap();
+    let mut socket = fixture.ws().await;
+    fixture.pause_responses(3).await;
+    let mut frame = request();
+    frame["type"] = json!("response.create");
+    socket
+        .send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+    let mut http = Box::pin(fixture.post(request()));
+    // Poll the actual HTTP request and give both admissions time to enter their waits.
+    assert!(tokio::time::timeout(Duration::from_millis(250), &mut http)
+        .await
+        .is_err());
+    socket.close(None).await.unwrap();
+    fixture.pause_responses(30).await;
+    let res = http.await;
+    assert_eq!(res.status(), 503);
+    assert!(
+        res.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > 5
+    );
+    assert!(fixture.rows().await.is_empty());
+    assert!(fixture.mock.requests.lock().unwrap().is_empty());
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn disconnected_http_and_websocket_never_submit_after_short_backoff_expires() {
+    let fixture = Fixture::start(false).await;
+    fixture.upstream.models().await.unwrap();
+    let mut socket = fixture.ws().await;
+    fixture.pause_responses(2).await;
+    let mut frame = request();
+    frame["type"] = json!("response.create");
+    socket
+        .send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+    let mut http = Box::pin(fixture.post(request()));
+    assert!(tokio::time::timeout(Duration::from_millis(250), &mut http)
+        .await
+        .is_err());
+    drop(http);
+    socket.close(None).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(fixture.rows().await.is_empty());
+    assert!(fixture.mock.requests.lock().unwrap().is_empty());
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn older_success_cannot_clear_a_newer_response_backoff() {
     let fixture = Fixture::start(false).await;
     let mut body = request();
@@ -2389,12 +2486,8 @@ async fn chat_images_preserve_mixed_input_over_json_sse_and_upstream_transports(
     );
     for http_upstream in [false, true] {
         let fixture = Fixture::start(false).await;
-        fixture
-            .mock
-            .reject_websocket
-            .store(http_upstream, Ordering::SeqCst);
         for streaming in [false, true] {
-            let response = fixture.chat(json!({"model":"gpt-test","stream":streaming,"messages":[
+            let body = json!({"model":"gpt-test","stream":streaming,"messages":[
                 {"role":"system","content":"synthetic instruction"},
                 {"role":"user","content":[
                     {"type":"text","text":"before"},
@@ -2403,7 +2496,12 @@ async fn chat_images_preserve_mixed_input_over_json_sse_and_upstream_transports(
                     {"type":"image_url","image_url":{"url":inline}},
                     {"type":"text","text":"after"}
                 ]}
-            ]})).await;
+            ]});
+            let response = if http_upstream {
+                fixture.chat(body).await
+            } else {
+                fixture.chat_ws(body).await
+            };
             assert_eq!(response.status(), 200);
             if streaming {
                 let (chunks, done) = chat_chunks(&response.text().await.unwrap());
@@ -2542,7 +2640,7 @@ async fn chat_json_replays_function_results_and_attributes_one_record_per_reques
     );
     let calls = fixture.mock.requests.lock().unwrap().clone();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0]["type"], "response.create");
+    assert_eq!(calls[0]["stream"], true);
     assert_eq!(calls[0]["input"][0]["role"], "developer");
     assert_eq!(
         calls[0]["input"][0]["content"][0]["text"],
@@ -2566,7 +2664,7 @@ async fn chat_json_replays_function_results_and_attributes_one_record_per_reques
     let rows = fixture.rows().await;
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row["surface"] == "chat_completions"
-        && row["transport"] == "websocket"
+        && row["transport"] == "http_sse"
         && row["client_transport"] == "http_json"
         && row["status"] == "completed"
         && row["user"] == 1
@@ -2736,7 +2834,10 @@ async fn chat_failures_never_emit_success_or_repeat_inference() {
         // Each injected case is a separate probe after the previous pause.
         fixture.expire_health().await;
         *fixture.mock.mode.lock().unwrap() = mode.into();
-        let body = fixture.chat(chat_request(true)).await.text().await.unwrap();
+        let mut request = chat_request(true);
+        // The mock injects disconnects only into tool-bearing generations.
+        request["tools"] = json!([{"type":"function","function":{"name":"test_tool","parameters":{"type":"object"}}}]);
+        let body = fixture.chat(request).await.text().await.unwrap();
         let (chunks, done) = chat_chunks(&body);
         assert_eq!(done, 0);
         assert!(chunks
@@ -2760,11 +2861,44 @@ async fn chat_failures_never_emit_success_or_repeat_inference() {
 }
 
 #[tokio::test]
+async fn chat_defaults_to_http_and_accepts_per_request_transport_preferences() {
+    let fixture = Fixture::start(false).await;
+    let body = chat_request(true);
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/chat/completions", fixture.url))
+        .bearer_auth(&fixture.secret)
+        .header("x-exetrouter-upstream-transport", "http_sse")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let (chunks, done) = chat_chunks(&response.text().await.unwrap());
+    assert_eq!(done, 1);
+    assert!(chunks
+        .iter()
+        .any(|c| c["choices"][0]["finish_reason"] == "stop"));
+    assert!(fixture.mock.handshakes.lock().unwrap().is_empty());
+    let response = fixture.chat(body.clone()).await;
+    assert_eq!(chat_chunks(&response.text().await.unwrap()).1, 1);
+    assert!(fixture.mock.handshakes.lock().unwrap().is_empty());
+    let response = fixture.chat_ws(body).await;
+    assert_eq!(chat_chunks(&response.text().await.unwrap()).1, 1);
+    assert_eq!(fixture.mock.handshakes.lock().unwrap().len(), 1);
+    let rows = fixture.rows().await;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["transport"], "http_sse");
+    assert_eq!(rows[1]["transport"], "http_sse");
+    assert_eq!(rows[2]["transport"], "websocket");
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn chat_falls_back_only_before_inference_and_preserves_rate_limits() {
     let fixture = Fixture::start(false).await;
     fixture.mock.reject_websocket.store(true, Ordering::SeqCst);
     let reply = fixture
-        .chat(chat_request(false))
+        .chat_ws(chat_request(false))
         .await
         .json::<Value>()
         .await
@@ -2775,7 +2909,7 @@ async fn chat_falls_back_only_before_inference_and_preserves_rate_limits() {
     );
     assert_eq!(fixture.rows().await[0]["transport"], "http_sse");
     *fixture.mock.mode.lock().unwrap() = "rate_limit".into();
-    let reply = fixture.chat(chat_request(false)).await;
+    let reply = fixture.chat_ws(chat_request(false)).await;
     assert_eq!(reply.status(), 429);
     assert_eq!(reply.headers()["retry-after"], "17");
     assert!(!reply
@@ -2785,7 +2919,7 @@ async fn chat_falls_back_only_before_inference_and_preserves_rate_limits() {
         .contains("private upstream error"));
     assert_eq!(fixture.mock.requests.lock().unwrap().len(), 2);
     assert_eq!(fixture.rows().await.len(), 2);
-    let reply = fixture.chat(chat_request(false)).await;
+    let reply = fixture.chat_ws(chat_request(false)).await;
     assert_eq!(reply.status(), 429);
     assert!(
         reply.headers()["retry-after"]
@@ -2832,7 +2966,12 @@ async fn quotas_observe_http_headers_and_ws_events_without_blocking_at_one_hundr
     *fixture.mock.quota_event.lock().unwrap() = Some(
         json!({"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":100,"window_minutes":300,"reset_at":reset}},"metered_limit_name":"codex"}),
     );
-    let reply = fixture.chat(chat_request(true)).await.text().await.unwrap();
+    let reply = fixture
+        .chat_ws(chat_request(true))
+        .await
+        .text()
+        .await
+        .unwrap();
     assert!(reply.contains("EXETROUTER_SMOKE_OK"));
     assert!(reply.contains("[DONE]"));
     assert!(!reply.contains("codex.rate_limits"));
@@ -3105,7 +3244,7 @@ async fn quota_metadata_failure_does_not_lose_completed_usage_or_repeat_generati
     *fixture.mock.quota_event.lock().unwrap() = Some(
         json!({"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":90,"window_minutes":300,"reset_at":chrono::Utc::now().timestamp()+300}}}),
     );
-    let reply = fixture.chat(chat_request(false)).await;
+    let reply = fixture.chat_ws(chat_request(false)).await;
     assert_eq!(reply.status(), 200);
     assert_eq!(
         reply.json::<Value>().await.unwrap()["choices"][0]["message"]["content"],
@@ -3149,7 +3288,7 @@ async fn websocket_handshake_quota_rejection_never_falls_back_to_generation() {
         .mock
         .handshake_rate_limit
         .store(true, Ordering::SeqCst);
-    let reply = fixture.chat(chat_request(false)).await;
+    let reply = fixture.chat_ws(chat_request(false)).await;
     assert_eq!(reply.status(), 429);
     assert_eq!(
         reply.json::<Value>().await.unwrap()["error"]["code"],
@@ -3623,13 +3762,18 @@ async fn backend_websocket_errors_survive_chat_conversion_and_native_forwarding(
     let fixture = Fixture::start(false).await;
     *fixture.mock.mode.lock().unwrap() = "backend_parameter_error".into();
     let expected = json!({"error":{"message":"Synthetic option is invalid","type":"invalid_request_error","code":"backend_changed_validation","param":"future_option"}});
-    let reply = fixture.chat(chat_request(false)).await;
+    let reply = fixture.chat_ws(chat_request(false)).await;
     assert_eq!(reply.status(), 422);
     assert_eq!(
         reply.json::<Value>().await.unwrap()["error"]["code"],
         "upstream_rejected"
     );
-    let body = fixture.chat(chat_request(true)).await.text().await.unwrap();
+    let body = fixture
+        .chat_ws(chat_request(true))
+        .await
+        .text()
+        .await
+        .unwrap();
     let (chunks, done) = chat_chunks(&body);
     assert_eq!(done, 0);
     assert_eq!(chunks.len(), 1);
@@ -4028,8 +4172,75 @@ async fn terminal_with_timeout(
 }
 
 #[tokio::test]
+async fn http_failures_before_headers_and_during_body_correlate_with_the_client() {
+    let capture = tempfile::NamedTempFile::new().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(std::sync::Mutex::new(capture.reopen().unwrap()))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    for stage in ["before_headers", "read_body"] {
+        let mut fixture = Fixture::start(false).await;
+        fixture.upstream.models().await.unwrap();
+        if stage == "before_headers" {
+            fixture.mock_server.abort();
+            assert!((&mut fixture.mock_server).await.unwrap_err().is_cancelled());
+        } else {
+            *fixture.mock.mode.lock().unwrap() = "broken_http_body".into();
+        }
+        let mut response = fixture.post(request()).await;
+        let id = response.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        if stage == "before_headers" {
+            assert_eq!(response.status(), 502);
+        } else {
+            assert_eq!(response.status(), 200);
+            assert!(response.chunk().await.unwrap().is_some());
+            fixture.mock.release.notify_one();
+            assert!(response
+                .text()
+                .await
+                .unwrap()
+                .contains("upstream_interrupted"));
+        }
+        let logs = std::fs::read_to_string(capture.path()).unwrap();
+        let failures: Vec<Value> = logs
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap()["fields"].clone())
+            .filter(|f| f["request_id"] == id && f["stage"] == stage)
+            .collect();
+        assert_eq!(failures.len(), 1, "{stage}");
+        let f = &failures[0];
+        if stage == "before_headers" {
+            assert_eq!(f["event"], "upstream_http_post_failed");
+            assert_eq!(f["transport_error_kind"], "connection_refused");
+            assert!(f["elapsed_ms"].is_u64());
+        } else {
+            assert_eq!(f["event"], "upstream_stream_interrupted");
+            assert_eq!(f["events_seen"], 1);
+            assert!(f["duration_ms"].is_u64());
+            assert!(matches!(
+                f["transport_error_kind"].as_str(),
+                Some(
+                    "unexpected_eof" | "incomplete_http_message" | "connection_reset" | "http_body"
+                )
+            ));
+        }
+        assert!(!logs.contains("synthetic-private-body-error"));
+    }
+}
+
+#[tokio::test]
 async fn pool_native_ws_handshake_failure_sends_an_error_without_inference_or_account_replay() {
     for limited in [false, true] {
+        let capture = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(std::sync::Mutex::new(capture.reopen().unwrap()))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
         let fixture = Fixture::start(false).await;
         fixture.add_account(&["gpt-test"], false).await;
         fixture
@@ -4058,6 +4269,30 @@ async fn pool_native_ws_handshake_failure_sends_an_error_without_inference_or_ac
             }
         );
         assert!(!error.to_string().contains("private handshake error"));
+        let logs = std::fs::read_to_string(capture.path()).unwrap();
+        let failures: Vec<Value> = logs
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|row| row["fields"]["event"] == "upstream_websocket_handshake_failed")
+            .collect();
+        assert_eq!(failures.len(), if limited { 2 } else { 1 });
+        for row in failures {
+            let fields = &row["fields"];
+            assert_eq!(fields["reason"], "http_status");
+            assert_eq!(fields["http_status"], if limited { 429 } else { 503 });
+            assert!(fields["elapsed_ms"].is_u64());
+            let span = &row["span"];
+            assert_eq!(span["frame_sequence"], 1);
+            let id = span["client_connection_id"].as_str().unwrap();
+            assert_eq!(hex::decode(id).unwrap().len(), 16);
+            if !limited {
+                assert!(error["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("client_connection_id={id}, frame_sequence=1")));
+            }
+        }
+        assert!(!logs.contains("private handshake error"));
         if limited {
             assert_eq!(error["status"], 429);
             assert!(error["error"]["retry_after"].as_i64().unwrap() > 0);

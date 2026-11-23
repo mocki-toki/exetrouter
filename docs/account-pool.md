@@ -12,9 +12,9 @@ follow the linked migration/rollback procedure.
 
 The visible model list is a union of active account catalogs. An independent full-context request chooses an eligible account for its model, respecting current credentials/catalog, cooldown, operational pauses, quota observations and active load. Explicit cache/session hints provide a stable soft preference among eligible accounts. Stale quota is not treated as confirmed current capacity; percentages are not combined across subscriptions.
 
-Optional [Platform routing](platform-api.md) appends distinct reviewed API models
-and permits an operator-controlled same-model fallback after all eligible Codex
-quotas are exhausted. It uses separate project context identities and health;
+Operators can select [Codex, Platform or both](platform-api.md#select-routing-resources).
+When both are enabled, distinct reviewed API models are appended, and same-model
+fallback requires exhaustion of all eligible Codex quotas. Platform uses separate project context identities and health;
 API failures never mutate OAuth state or Codex percentages. Cross-backend opaque
 state is not assumed portable, and operational/authentication failures are not
 quota exceptions. Accounting/client presence still identifies the parent account.
@@ -72,7 +72,7 @@ Large full generations may select upstream HTTP before submission without changi
 
 Recovery retains at most 16 MiB per current window under a shared 64 MiB representation budget, with 16,384 input/output items per WS. Small windows retain parsed input with serialized-byte accounting; larger windows use in-memory zstd and charge their encoded buffer capacity. Decoded recovery is separately bounded to 64 MiB, with an 8 MiB codec history window; exceeding this optional recovery capacity does not reject a complete inference input. Completed-item assembly remains bounded to 1 MiB. Ordinary operation can continue on its original native upstream socket without a snapshot. HTTP-backed incremental input requires the latest recoverable window; unavailable/older HTTP history returns local `previous_response_not_found` for client-controlled full input, while an unrecoverable native quota transfer returns `context_recovery_unavailable`. Older response branches require a full input on transfer. History is never written to disk and disappears when the connection closes or the router restarts. No compression worker, unbounded history cache or inference replay is introduced.
 
-Temporary catalog/refresh/Responses failures produce operation-specific durable backoff: 5, 10, 20, 40, 80, 160, then 300 seconds, extended by valid Retry-After. A new operation after expiry is the probe; there are no background probes. Any current pause excludes new operations. Known pauses return upstream_backoff and retry information, retaining account affinity.
+Temporary catalog/refresh/Responses failures produce operation-specific durable backoff: 5, 10, 20, 40, 80, 160, then 300 seconds, extended by valid Retry-After. A new operation after expiry is the probe; there are no background probes. Any current pause excludes new operations. HTTP generation admission, a native WebSocket upgrade and each new WebSocket turn may wait once for an operational pause with at most five seconds remaining. The router then checks availability again with the original affinity and concurrency limits. A longer or extended pause returns upstream_backoff with retry information. Quota cooldowns remain immediate. Stream interruptions and ambiguous submissions are never replayed by this wait.
 
 An upstream WS close with code 1009 is a request-specific message-size rejection, not an unavailable account. It returns `upstream_request_too_large` without publishing operational backoff, replaying the request or moving accounts. Other sessions on that account remain eligible. Its interrupted accounting still retains unknown usage when no counters were observed.
 

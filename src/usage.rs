@@ -445,6 +445,9 @@ pub fn usage_range_for_user(
 // Standard token prices, nanodollars per token. Shared with the frozen Platform
 // estimate; these are not invoices and exclude tool fees and tier adjustments.
 const TOKEN_PRICES: &[(&str, [i64; 6])] = &[
+    ("text-embedding-3-small", [20, 0, 20, 20, 0, 20]),
+    ("text-embedding-3-large", [130, 0, 130, 130, 0, 130]),
+    ("text-embedding-ada-002", [100, 0, 100, 100, 0, 100]),
     ("gpt-6-astra", [10000, 50000, 1000, 20000, 75000, 2000]),
     ("gpt-6.1-sol", [2000, 10000, 100, 4000, 15000, 200]),
     ("gpt-6.1-terra", [1000, 5000, 50, 2000, 7500, 100]),

@@ -5,6 +5,13 @@ use serde_json::{json, Map, Value};
 
 pub(crate) const CACHE_TTL_SECONDS: i64 = 15 * 60;
 
+pub(crate) fn embedding_model(id: &str) -> bool {
+    matches!(
+        id,
+        "text-embedding-3-small" | "text-embedding-3-large" | "text-embedding-ada-002"
+    )
+}
+
 pub(crate) fn fresh(updated_at: Option<i64>, now: i64) -> bool {
     updated_at.is_some_and(|at| at <= now && now.saturating_sub(at) < CACHE_TTL_SECONDS)
 }
@@ -246,6 +253,19 @@ impl Model {
                 let supported = fields.get(*field).and_then(Value::as_bool) == Some(true)
                     && right[*field].as_bool() == Some(true);
                 fields.insert((*field).into(), json!(supported));
+            } else if matches!(*field, "additional_speed_tiers" | "service_tiers") {
+                // Optional tiers can vary by account. Keep only shared entries;
+                // missing or unrecognized lists grant no advertised capability.
+                if fields.contains_key(*field) || right.get(*field).is_some() {
+                    let common = fields
+                        .get(*field)
+                        .and_then(Value::as_array)
+                        .zip(right.get(*field).and_then(Value::as_array))
+                        .map_or_else(Vec::new, |(a, b)| {
+                            a.iter().filter(|tier| b.contains(tier)).cloned().collect()
+                        });
+                    fields.insert((*field).into(), Value::Array(common));
+                }
             } else if matches!(
                 *field,
                 "supported_reasoning_levels" | "input_modalities" | "experimental_supported_tools"
@@ -283,7 +303,7 @@ impl Model {
             ) {
                 // Presentation fields do not change request shaping.
             } else if fields.get(*field) != right.get(*field) {
-                // Do not advertise a tool mode, instructions or service tier that
+                // Do not advertise a tool mode, instructions or default tier that
                 // depends on which account later receives the request.
                 self.metadata = None;
                 return;
@@ -313,6 +333,7 @@ impl Model {
 pub fn codex(models: &[Model]) -> Result<Value> {
     let metadata = models
         .iter()
+        .filter(|model| !embedding_model(&model.id))
         .map(|model| {
             let value = model
                 .metadata
@@ -337,7 +358,7 @@ pub fn opencode_v2(models: &[Model]) -> Result<Value> {
 
 fn opencode_projection(models: &[Model], v1: bool) -> Result<Value> {
     let mut entries = Map::new();
-    for model in models {
+    for model in models.iter().filter(|model| !embedding_model(&model.id)) {
         let meta = model
             .metadata
             .as_ref()
@@ -554,6 +575,51 @@ mod tests {
         row["shell_type"] = json!("default");
         left.merge(Model::parse(&row).unwrap());
         assert!(left.metadata.is_none());
+    }
+
+    #[test]
+    fn optional_speed_tiers_only_advertise_entries_shared_by_every_account() {
+        let row = json!({"slug":"a","context_window":500000,"shell_type":"shell_command",
+            "supported_reasoning_levels":[{"effort":"low"}],"input_modalities":["text","image"],
+            "experimental_supported_tools":[],"visibility":"list","supported_in_api":true,
+            "priority":1,"support_verbosity":false,"truncation_policy":{"mode":"tokens","limit":10000}});
+        let mut one = row.clone();
+        one["additional_speed_tiers"] = json!(["fast"]);
+        one["service_tiers"] = json!([{"id":"priority","name":"Fast"}]);
+        let mut two = row.clone();
+        two["additional_speed_tiers"] = json!(["ultrafast", "fast"]);
+        two["service_tiers"] =
+            json!([{"id":"ultrafast","name":"Ultrafast"},{"id":"priority","name":"Fast"}]);
+        let mut malformed = row.clone();
+        malformed["additional_speed_tiers"] = Value::Null;
+        malformed["service_tiers"] = json!({"id":"priority"});
+
+        for (first, second) in [(&one, &two), (&two, &one)] {
+            let mut model = Model::parse(first).unwrap();
+            model.merge(Model::parse(second).unwrap());
+            model.present();
+            assert_eq!(model.capabilities, ["reasoning", "tools", "image_input"]);
+            let catalog = codex(std::slice::from_ref(&model)).unwrap();
+            let metadata = &catalog["models"][0];
+            assert_eq!(metadata["context_window"], 500000);
+            for field in ["additional_speed_tiers", "service_tiers"] {
+                assert_eq!(metadata[field], one[field]);
+            }
+            let profile = opencode_v2(std::slice::from_ref(&model)).unwrap();
+            assert_eq!(
+                profile["providers"]["exetrouter"]["models"]["a"]["limit"]["context"],
+                500000
+            );
+            for third in [&row, &malformed] {
+                let mut model = model.clone();
+                model.merge(Model::parse(third).unwrap());
+                model.merge(Model::parse(&two).unwrap());
+                let metadata = model.metadata.unwrap();
+                assert_eq!(metadata["context_window"], 500000);
+                assert_eq!(metadata["additional_speed_tiers"], json!([]));
+                assert_eq!(metadata["service_tiers"], json!([]));
+            }
+        }
     }
 
     #[test]

@@ -572,8 +572,8 @@ async fn checks(session: &Session, model: &str, only: Option<&str>) -> Result<Va
     {
         return Err("smoke Chat marker missing".into());
     }
-    session.verify(tail_start, 1, "websocket").await?;
-    println!("smoke: Chat JSON passed over upstream WebSocket");
+    session.verify(tail_start, 1, "http_sse").await?;
+    println!("smoke: Chat JSON passed over upstream HTTP SSE");
 
     let chat=session.post("chat/completions",&json!({"model":model,"messages":[{"role":"system","content":"Return only the requested marker."},{"role":"user","content":"Return exactly EXETROUTER_SMOKE_OK."}],"stream":true,"stream_options":{"include_usage":true}})).await?;
     if !chat.status().is_success() {
@@ -609,7 +609,7 @@ async fn checks(session: &Session, model: &str, only: Option<&str>) -> Result<Va
     {
         return Err("Chat SSE marker, terminal or usage missing".into());
     }
-    session.verify(tail_start + 1, 1, "websocket").await?;
+    session.verify(tail_start + 1, 1, "http_sse").await?;
     println!("smoke: Chat SSE, finish and usage passed");
 
     let account = session

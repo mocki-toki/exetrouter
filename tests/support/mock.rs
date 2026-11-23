@@ -413,15 +413,19 @@ async fn responses(
             {
                 state.release.notified().await;
             }
+            if mode == "broken_http_body" && index == 1 {
+                state.release.notified().await;
+                return Some((
+                    Err(std::io::Error::other("synthetic-private-body-error")),
+                    (events, state, index + 1, mode),
+                ));
+            }
             let chunk = Bytes::from(format!(
                 "event: {}\ndata: {}\n\n",
                 event["type"].as_str().unwrap(),
                 event
             ));
-            Some((
-                Ok::<_, std::convert::Infallible>(chunk),
-                (events, state, index + 1, mode),
-            ))
+            Some((Ok(chunk), (events, state, index + 1, mode)))
         },
     );
     let mut response = (

@@ -329,7 +329,8 @@ mod tests {
             "overspend is not hidden or clamped to zero"
         );
         assert!(
-            crate::platform::spending_permitted(&conn, false).unwrap(),
+            crate::platform::routes::model_spending_permitted(&conn, "text-embedding-3-small")
+                .unwrap(),
             "manual balance does not gate routing"
         );
         assert!(usage::finish_request(

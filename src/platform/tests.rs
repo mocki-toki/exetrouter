@@ -88,7 +88,7 @@ async fn reply(
         state.reads += 1;
     }
     let path = uri.path();
-    if matches!(path, "/responses" | "/responses/compact") {
+    if matches!(path, "/responses" | "/responses/compact" | "/embeddings") {
         if headers.get("authorization").unwrap() == "Bearer synthetic-access" {
             state.native_inferences += 1;
             return (
@@ -122,6 +122,9 @@ async fn reply(
         }
         if path == "/responses/compact" {
             return Json(json!({"object":"response.compaction","id":"cmp_fixture","created_at":now,"output":[{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic compacted prefix"}]},{"type":"compaction","encrypted_content":"platform-checkpoint"}],"usage":{"input_tokens":8,"output_tokens":3,"total_tokens":11}})).into_response();
+        }
+        if path == "/embeddings" {
+            return Json(json!({"object":"list","model":model,"data":[{"object":"embedding","index":0,"embedding":"AACAPw=="}],"usage":{"prompt_tokens":7,"total_tokens":7}})).into_response();
         }
         let id = format!("resp_platform_{}", state.inferences.len());
         let events = [
@@ -186,7 +189,11 @@ async fn reply(
         assert_eq!(body["name"], "exetrouter");
         assert_eq!(
             body["scopes"],
-            json!(["api.model.read", "api.responses.write"])
+            json!([
+                "api.model.read",
+                "api.responses.write",
+                "api.model.embeddings.request"
+            ])
         );
         state.key = true;
         state.created_at = Some(now);
@@ -405,11 +412,10 @@ async fn real_costs_and_thirty_day_key_lifecycle_are_shared_bounded_encrypted_an
         assert!(count <= 91);
         let h = crate::quota_history::range(conn, 1, "90d", None, chrono::Utc::now().timestamp())?;
         assert!(h.platform.unwrap().points.len() > 80);
-        assert!(spending_permitted(conn, false)?);
-        assert!(!spending_permitted(conn, true)?);
-        set_codex_fallback(conn, true)?;
-        assert!(spending_permitted(conn, true)?);
-        assert!(spending_permitted(conn, false)?);
+        assert!(Policy::read(conn)?.platform());
+        assert!(!Policy::read(conn)?.shared_platform());
+        Resources::Both.set(conn)?;
+        assert!(Policy::read(conn)?.shared_platform());
         Ok(())
     })
     .await
@@ -531,9 +537,9 @@ async fn migration_rollback_keeps_unknown_mutations_keys_and_policy_and_retentio
         .await
         .unwrap();
     db.call(move|conn| {
-        set_codex_fallback(conn,true)?;
+        apply_legacy_fallback(conn,true)?;
         conn.pragma_update(None,"user_version",17)?;crate::init(conn)?;
-        verify_credentials(conn,&vault)?;assert!(codex_fallback_allowed(conn)?);
+        verify_credentials(conn,&vault)?;assert!(Policy::read(conn)?.shared_platform());
         let day=chrono::Utc::now().timestamp()/86400*86400;
         for n in 0..800 {conn.execute("INSERT OR REPLACE INTO platform_cost_history(account_id,generation,day,end_at,observed_at,usd_nanos) VALUES(1,1,?1,?2,?2,1)",params![day+n*86400,day+(n+1)*86400])?;}
         prune(conn,day+800*86400)?;prune(conn,day)?;

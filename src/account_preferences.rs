@@ -118,6 +118,7 @@ fn annotate_at(
     value["capabilities"]["ten_minute_quota_history"] = serde_json::json!(1);
     value["capabilities"]["historical_quota_forecast"] = serde_json::json!(1);
     if let Some(rows) = value["quota_accounts"].as_array_mut() {
+        let codex = crate::platform::Policy::read(conn)?.codex();
         let mut candidates = Vec::new();
         // Scan activity once per snapshot, not once per account.
         let mut clients = crate::usage::clients_by_account(conn, key, user, now)?;
@@ -144,7 +145,7 @@ fn annotate_at(
                 row["preference"] = serde_json::to_value(&preference)?;
                 let routing = crate::routing::decision(conn, id, now)?;
                 let reached = routing.reached(&quota);
-                let available = preference.enabled && !reached && quota.cooldown_until.is_none()
+                let available = codex && preference.enabled && !reached && quota.cooldown_until.is_none()
                     && conn.query_row("SELECT a.state='active' AND a.expires_at>?2+60 AND a.catalog_updated_at IS NOT NULL AND a.catalog_updated_at<=?2 AND a.catalog_updated_at>?2-?3 AND EXISTS(SELECT 1 FROM oauth_models m WHERE m.account_id=a.id) AND NOT EXISTS(SELECT 1 FROM oauth_health h WHERE h.account_id=a.id AND h.generation=a.generation AND h.retry_at>?2) FROM oauth_accounts a WHERE a.id=?1",params![id,now,crate::catalog::CACHE_TTL_SECONDS],|r|r.get::<_,bool>(0))?;
                 if available {
                     candidates.push(crate::pool::Candidate {

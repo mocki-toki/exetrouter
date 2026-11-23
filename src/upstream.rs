@@ -31,6 +31,117 @@ use tokio::sync::Mutex;
 // Catalog discovery revision; this does not claim full native-client compatibility.
 pub const CODEX_CLIENT_VERSION: &str = "0.169.0";
 pub const BACKEND: &str = "https://chatgpt.com/backend-api/codex";
+
+fn io_error_kind(error: &std::io::Error) -> Option<&'static str> {
+    use std::io::ErrorKind::*;
+    Some(match error.kind() {
+        ConnectionRefused => "connection_refused",
+        ConnectionReset => "connection_reset",
+        ConnectionAborted => "connection_aborted",
+        BrokenPipe => "broken_pipe",
+        TimedOut => "timed_out",
+        UnexpectedEof => "unexpected_eof",
+        NetworkUnreachable => "network_unreachable",
+        HostUnreachable => "host_unreachable",
+        _ => return None,
+    })
+}
+
+pub(crate) fn http_error_kind(error: &reqwest::Error) -> &'static str {
+    use std::error::Error;
+    if error.is_timeout() {
+        return "timed_out";
+    }
+    let connecting = error.is_connect();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if cause.is::<rustls::Error>() {
+            return "tls";
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            if let Some(kind) = io_error_kind(io) {
+                return kind;
+            }
+            // io::Error::source skips the wrapped error itself (including rustls).
+            source = io.get_ref().map(|e| e as &dyn Error);
+            continue;
+        }
+        if let Some(http) = cause.downcast_ref::<hyper::Error>() {
+            if http.is_incomplete_message() {
+                return "incomplete_http_message";
+            }
+            if http.is_parse() {
+                return "http_protocol";
+            }
+        }
+        // hyper-util's private ConnectError exposes only this fixed DNS marker.
+        if connecting && cause.source().is_some() && cause.to_string() == "dns error" {
+            return "dns";
+        }
+        source = cause.source();
+    }
+    if connecting {
+        "connect"
+    } else if error.is_builder() {
+        "request_build"
+    } else if error.is_body() || error.is_decode() {
+        "http_body"
+    } else {
+        "http_request"
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct HttpPostFailure {
+    pub(crate) kind: &'static str,
+    pub(crate) elapsed_ms: u64,
+}
+
+impl std::fmt::Display for HttpPostFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("upstream connection failed")
+    }
+}
+impl std::error::Error for HttpPostFailure {}
+
+async fn send_inference_post(
+    request: reqwest::RequestBuilder,
+) -> std::result::Result<reqwest::Response, HttpPostFailure> {
+    let start = std::time::Instant::now();
+    request.send().await.map_err(|error| HttpPostFailure {
+        elapsed_ms: start.elapsed().as_millis() as u64,
+        kind: http_error_kind(&error),
+    })
+}
+
+pub(crate) fn websocket_error_kind(error: &codex_tungstenite::Error) -> &'static str {
+    use codex_websocket::tungstenite::{error::ProtocolError, Error};
+    match error {
+        Error::ConnectionClosed => "connection_closed",
+        Error::AlreadyClosed => "already_closed",
+        Error::Io(error)
+            if error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<rustls::Error>()) =>
+        {
+            "tls"
+        }
+        Error::Io(error) => io_error_kind(error).unwrap_or("io_other"),
+        Error::Tls(_) => "tls",
+        Error::Capacity(_) => "capacity",
+        Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+            "reset_without_close_handshake"
+        }
+        Error::Protocol(_) => "protocol",
+        Error::WriteBufferFull(_) => "write_buffer_full",
+        Error::Http(_) => "http_status",
+        Error::HttpFormat(_) => "http_format",
+        Error::Url(_) => "url",
+        Error::Utf8(_) => "utf8",
+        _ => "other",
+    }
+}
+
 pub struct UpstreamSocket {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     pub(crate) compressed: bool,
@@ -243,6 +354,9 @@ impl Upstream {
         let accounts = self
             .db
             .call(|conn| {
+                if !crate::platform::Policy::read(conn)?.codex() {
+                    return Ok(Vec::new());
+                }
                 Ok(oauth::list(conn)?
                     .into_iter()
                     .filter(|info| info.state == "active")
@@ -250,9 +364,7 @@ impl Upstream {
                     .collect::<Vec<_>>())
             })
             .await?;
-        if accounts.is_empty() {
-            return Ok(Vec::new());
-        }
+        let has_codex_accounts = !accounts.is_empty();
         let mut results = futures_util::stream::iter(accounts)
             .map(|id| async move { (id, self.account_models(id).await) })
             .buffer_unordered(4)
@@ -265,7 +377,10 @@ impl Upstream {
             match result {
                 Ok(models) => {
                     successful += 1;
-                    for model in models {
+                    for model in models
+                        .into_iter()
+                        .filter(|m| !crate::catalog::embedding_model(&m.id))
+                    {
                         match available.entry(model.id.clone()) {
                             std::collections::btree_map::Entry::Vacant(entry) => {
                                 entry.insert(model);
@@ -282,8 +397,15 @@ impl Upstream {
         let platform =
             crate::platform::route_catalog(&self.db, &self.vault, &self.config.platform_base)
                 .await?;
-        if successful == 0 && platform.is_empty() {
+        let policy = self
+            .db
+            .call(|conn| crate::platform::Policy::read(conn))
+            .await?;
+        if policy.codex() && has_codex_accounts && successful == 0 && platform.is_empty() {
             return Err("all active account catalogs unavailable".into());
+        }
+        if !policy.codex() {
+            available.clear();
         }
         let mut models = available
             .into_values()
@@ -298,7 +420,9 @@ impl Upstream {
             .iter()
             .map(|m| m.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        models.extend(platform.into_iter().filter(|m| !ids.contains(&m.id)));
+        if policy.platform() {
+            models.extend(platform.into_iter().filter(|m| !ids.contains(&m.id)));
+        }
         Ok(models)
     }
 
@@ -415,16 +539,15 @@ impl Upstream {
     }
 
     pub async fn account_enabled(&self, id: i64) -> crate::Result<bool> {
-        if id < 0 {
-            return self
-                .db
-                .call(move |conn| crate::platform::routes::enabled(conn, id))
-                .await;
-        }
         self.db
             .call(move |conn| {
-                // Only explicit deactivation permits this availability transfer;
-                // authentication failures and operational pauses are checked separately.
+                if !crate::platform::Policy::read(conn)?.allows(id) {
+                    return Ok(false);
+                }
+                if id < 0 {
+                    return crate::platform::routes::enabled(conn, id);
+                }
+                // Explicit deactivation permits transfer; auth and backoff do not.
                 let disabled = conn.query_row(
                     "SELECT state='disabled' FROM oauth_accounts WHERE id=?1",
                     [id],
@@ -453,6 +576,9 @@ impl Upstream {
         affinity: Option<&str>,
         excluded: &[i64],
     ) -> std::result::Result<Selection, SelectError> {
+        if !self.routing_policy().await?.codex() {
+            return Err(SelectError::ModelUnavailable);
+        }
         let cached_model = model.to_owned();
         let cached_excluded = excluded.to_vec();
         let cached=self.db.call(move |conn| {
@@ -736,12 +862,18 @@ impl Upstream {
             .db
             .call(|conn| {
                 let now = Utc::now().timestamp();
+                if !crate::platform::Policy::read(conn)?.codex() {
+                    return Ok(Err(SelectError::UpstreamUnavailable));
+                }
                 let accounts = oauth::list(conn)?;
                 let mut wait = None;
                 for account in accounts
                     .into_iter()
                     .filter(|account| account.state == "active")
                 {
+                    if !crate::account_preferences::effective(conn, account.id)?.enabled {
+                        continue;
+                    }
                     let cooldown = account.cooldown_until.filter(|until| *until > now);
                     let health = account.health_until.filter(|until| *until > now);
                     let candidate = match (cooldown, health) {
@@ -772,6 +904,10 @@ impl Upstream {
             .db
             .call(move |conn| {
                 let now = Utc::now().timestamp();
+                let policy = crate::platform::Policy::read(conn)?;
+                if !policy.platform() {
+                    return Ok(false);
+                }
                 for owner in crate::platform::routes::owners(conn)? {
                     let Ok(account) = crate::platform::routes::account(conn, &vault, owner, now)
                     else {
@@ -783,7 +919,7 @@ impl Upstream {
                     }
                     if let Ok(models) = crate::platform::routes::models(conn, owner, now) {
                         for model in models {
-                            if crate::platform::routes::model_spending_permitted(conn, &model.id)? {
+                            if crate::platform::routes::fallback_eligible(conn, &model.id, now)? {
                                 return Ok(true);
                             }
                         }
@@ -818,6 +954,9 @@ impl Upstream {
         model: &str,
         id: i64,
     ) -> std::result::Result<Selection, SelectError> {
+        if !self.routing_policy().await?.allows(id) {
+            return Err(SelectError::UpstreamUnavailable);
+        }
         if id < 0 {
             let account = self
                 .account(id)
@@ -887,6 +1026,17 @@ impl Upstream {
         account: &Account,
         model: &str,
     ) -> std::result::Result<(), SelectError> {
+        if crate::catalog::embedding_model(model) {
+            return Err(SelectError::ModelUnavailable);
+        }
+        self.validate_model(account, model).await
+    }
+
+    async fn validate_model(
+        &self,
+        account: &Account,
+        model: &str,
+    ) -> std::result::Result<(), SelectError> {
         if account.info.id < 0 {
             let requested = model.to_owned();
             let permitted = self
@@ -928,6 +1078,9 @@ impl Upstream {
         let id = account.info.id;
         let generation = account.info.generation;
         if id < 0 {
+            if !self.routing_policy().await?.platform() {
+                return Err(SelectError::UpstreamUnavailable);
+            }
             let current = self
                 .account(id)
                 .await
@@ -949,6 +1102,7 @@ impl Upstream {
         match self
             .db
             .call(move |conn| {
+                if !crate::platform::Policy::read(conn)?.codex() { return Err("Codex routing is disabled".into()); }
                 let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts WHERE id=?1 AND generation=?2 AND state='active')",params![id,generation],|row|row.get(0))?;
                 if !valid { return Err("OAuth account changed".into()); }
                 let now=Utc::now().timestamp();
@@ -973,10 +1127,21 @@ impl Upstream {
         order: i64,
         options: InferenceHeaders<'_>,
     ) -> Result<reqwest::Response> {
+        let embedding = path == "embeddings";
+        if embedding
+            != body["model"]
+                .as_str()
+                .is_some_and(crate::catalog::embedding_model)
+            || (embedding && account.info.id >= 0)
+        {
+            return Err("model unavailable for this endpoint".into());
+        }
         if account.info.id < 0 {
             // Fixed public Responses endpoint, working key only. Codex account,
             // turn/session/Lite headers and the caller's bearer never cross over.
-            if !matches!(path, "responses" | "responses/compact") || body["generate"] == false {
+            if !matches!(path, "responses" | "responses/compact" | "embeddings")
+                || body["generate"] == false
+            {
                 return Err("unsupported Platform operation".into());
             }
             self.check_cooldown(account)
@@ -991,25 +1156,29 @@ impl Upstream {
                 .call(move |conn| crate::platform::routes::model_spending_permitted(conn, &model))
                 .await?
             {
-                return Err("Platform spending is disabled for Codex models".into());
+                return Err("Platform routing is disabled for this model".into());
             }
-            let body = crate::platform::inference_payload(body, path == "responses/compact")?;
-            let response = self
+            let prepared;
+            let body = if embedding {
+                body
+            } else {
+                prepared = crate::platform::inference_payload(body, path == "responses/compact")?;
+                &prepared
+            };
+            let request = self
                 .inference_client
                 .post(format!("{}/{path}", self.config.platform_base))
                 .bearer_auth(&account.credentials.access_token)
                 .header(
                     reqwest::header::ACCEPT,
-                    if path == "responses/compact" {
+                    if path != "responses" {
                         "application/json"
                     } else {
                         "text/event-stream"
                     },
                 )
-                .json(&body)
-                .send()
-                .await;
-            return match response {
+                .json(body);
+            return match send_inference_post(request).await {
                 Ok(response) => {
                     let status = response.status().as_u16();
                     if status == 401 {
@@ -1027,7 +1196,7 @@ impl Upstream {
                     }
                     Ok(response)
                 }
-                Err(_) => {
+                Err(failure) => {
                     let _ = self
                         .failure(
                             account,
@@ -1037,7 +1206,7 @@ impl Upstream {
                             None,
                         )
                         .await;
-                    Err("upstream connection failed".into())
+                    Err(failure.into())
                 }
             };
         }
@@ -1056,14 +1225,12 @@ impl Upstream {
         if let Some(session) = session {
             session_headers(&mut headers, session)?;
         }
-        let result = self
+        let request = self
             .inference_client
             .post(format!("{}/{path}", self.config.base_url))
             .headers(headers)
-            .json(body)
-            .send()
-            .await;
-        match result {
+            .json(body);
+        match send_inference_post(request).await {
             Ok(response) => {
                 let status = response.status().as_u16();
                 let observed = if status == 401 {
@@ -1086,7 +1253,7 @@ impl Upstream {
                 }
                 Ok(response)
             }
-            Err(_) => {
+            Err(failure) => {
                 let _ = self
                     .failure(
                         account,
@@ -1096,7 +1263,7 @@ impl Upstream {
                         None,
                     )
                     .await;
-                Err("upstream connection failed".into())
+                Err(failure.into())
             }
         }
     }
@@ -1185,6 +1352,15 @@ impl Upstream {
             Err(SelectError::Backoff(until)) => return Err(SocketError::Backoff(until)),
             Err(_) => return Err(SocketError::Storage),
         }
+        let started = std::time::Instant::now();
+        let log_failure = |reason: &'static str, http_status: Option<u16>| {
+            tracing::info!(
+                event = "upstream_websocket_handshake_failed",
+                reason,
+                http_status,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+            );
+        };
         let request: Result<_> = (|| {
             let mut url = Url::parse(&format!("{}/responses", self.config.base_url))?;
             url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
@@ -1200,7 +1376,10 @@ impl Upstream {
             );
             Ok(request)
         })();
-        let request = request.map_err(|_| SocketError::Unavailable)?;
+        let request = request.map_err(|_| {
+            log_failure("invalid_request", None);
+            SocketError::Unavailable
+        })?;
         let mut config = WebSocketConfig::default()
             .max_message_size(Some(crate::payload::UPSTREAM_WS_MESSAGE_BYTES))
             .max_frame_size(Some(crate::payload::UPSTREAM_WS_MESSAGE_BYTES));
@@ -1221,6 +1400,7 @@ impl Upstream {
         let result = match result {
             Ok(result) => result,
             Err(_) => {
+                log_failure("timed_out", None);
                 if !http_fallback {
                     self.failure(
                         account,
@@ -1235,6 +1415,13 @@ impl Upstream {
                 return Err(SocketError::Unavailable);
             }
         };
+        if let Err(error) = &result {
+            let status = match error {
+                codex_tungstenite::Error::Http(response) => Some(response.status().as_u16()),
+                _ => None,
+            };
+            log_failure(websocket_error_kind(error), status);
+        }
         let (socket, response) = match result {
             Ok(value) => value,
             Err(codex_websocket::tungstenite::Error::Http(response))
@@ -1502,16 +1689,6 @@ impl SseDecoder {
     }
 }
 
-pub(crate) async fn next_ws(
-    socket: &mut UpstreamSocket,
-) -> Result<Option<codex_websocket::tungstenite::Message>> {
-    tokio::time::timeout(INFERENCE_IDLE_TIMEOUT, socket.next())
-        .await
-        .map_err(|_| "upstream stream timed out")?
-        .transpose()
-        .map_err(|_| "upstream stream interrupted".into())
-}
-
 fn store_model_catalog(
     conn: &mut rusqlite::Connection,
     id: i64,
@@ -1576,6 +1753,27 @@ fn store_model_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_dns_lookup_has_a_fixed_http_category() {
+        use reqwest::dns::{Name, Resolve, Resolving};
+        struct UnavailableDns;
+        impl Resolve for UnavailableDns {
+            fn resolve(&self, _: Name) -> Resolving {
+                Box::pin(async { Err("private resolver detail".into()) })
+            }
+        }
+        let client = Client::builder()
+            .no_proxy()
+            .dns_resolver(std::sync::Arc::new(UnavailableDns))
+            .build()
+            .unwrap();
+        let failure = send_inference_post(client.post("http://upstream.invalid/responses"))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, "dns");
+        assert_eq!(failure.to_string(), "upstream connection failed");
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]

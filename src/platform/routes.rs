@@ -18,27 +18,18 @@ pub(crate) fn route_id(owner: i64) -> Result<i64> {
 }
 
 pub(crate) fn model_spending_permitted(conn: &Connection, model: &str) -> Result<bool> {
-    let codex = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM oauth_models WHERE model=?1)",
-        [model],
-        |r| r.get::<_, bool>(0),
-    )?;
-    if codex {
-        return super::spending_permitted(conn, true);
-    }
-    if super::codex_fallback_allowed(conn)? {
-        return Ok(true);
-    }
-    let now = chrono::Utc::now().timestamp();
-    let incomplete=conn.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts a LEFT JOIN account_policy p ON p.account_id=a.id WHERE a.state<>'disabled' AND COALESCE(p.enabled,1)=1 AND (a.state<>'active' OR a.catalog_updated_at IS NULL OR a.catalog_updated_at>?1 OR a.catalog_updated_at<=?1-?2))",params![now,catalog::CACHE_TTL_SECONDS],|r|r.get::<_,bool>(0))?;
-    Ok(!incomplete)
+    super::Policy::read(conn)?.platform_model(conn, model, chrono::Utc::now().timestamp())
 }
 
 /// Shared by admission and passive diagnostics: only actual native exhaustion
 /// authorizes replacing a known Codex route; operational/auth failures do not.
 pub(crate) fn fallback_eligible(conn: &Connection, model: &str, now: i64) -> Result<bool> {
-    if !model_spending_permitted(conn, model)? {
+    let policy = super::Policy::read(conn)?;
+    if !policy.platform_model(conn, model, now)? {
         return Ok(false);
+    }
+    if !policy.codex() || catalog::embedding_model(model) {
+        return Ok(true);
     }
     let known = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM oauth_models WHERE model=?1)",
@@ -47,7 +38,7 @@ pub(crate) fn fallback_eligible(conn: &Connection, model: &str, now: i64) -> Res
     )?;
     let incomplete=conn.query_row("SELECT EXISTS(SELECT 1 FROM oauth_accounts a LEFT JOIN account_policy p ON p.account_id=a.id WHERE a.state<>'disabled' AND COALESCE(p.enabled,1)=1 AND (a.state<>'active' OR a.catalog_updated_at IS NULL OR a.catalog_updated_at>?1 OR a.catalog_updated_at<=?1-?2))",params![now,catalog::CACHE_TTL_SECONDS],|r|r.get::<_,bool>(0))?;
     if !known {
-        return Ok(!incomplete || super::codex_fallback_allowed(conn)?);
+        return Ok(!incomplete || policy.shared_platform());
     }
     let mut stmt=conn.prepare("SELECT a.id,a.state,a.expires_at,a.catalog_updated_at FROM oauth_accounts a JOIN oauth_models m ON m.account_id=a.id LEFT JOIN account_policy p ON p.account_id=a.id WHERE m.model=?1 AND a.state<>'disabled' AND COALESCE(p.enabled,1)=1")?;
     let rows = stmt
@@ -87,13 +78,17 @@ pub(crate) fn fallback_eligible(conn: &Connection, model: &str, now: i64) -> Res
 
 /// Read only observed metadata, not credential ciphertext, for doctor/CLI/UI.
 pub(crate) fn observed(conn: &Connection, owner: i64, now: i64) -> Result<Vec<catalog::Model>> {
+    let policy = super::Policy::read(conn)?;
+    if !policy.platform() {
+        return Ok(Vec::new());
+    }
     let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM platform_routes r JOIN account_platform_credentials c ON c.account_id=r.account_id AND c.generation=r.credential_generation JOIN platform_settings s ON s.account_id=r.account_id AND s.project_id=r.project_id JOIN platform_working_keys k ON k.account_id=r.account_id AND k.generation=c.generation AND k.key_id=r.key_id AND k.project_id=r.project_id WHERE r.id=?1 AND k.state='active' AND k.expires_at>?2 AND r.observed_at<=?2 AND r.observed_at>?2-?3 AND NOT EXISTS(SELECT 1 FROM platform_key_operations o WHERE o.account_id=r.account_id AND o.status<>'confirmed'))",params![route_id(owner)?,now,catalog::CACHE_TTL_SECONDS],|r|r.get(0))?;
     if !valid || !enabled(conn, owner)? {
         return Ok(Vec::new());
     }
     let mut result = Vec::new();
     for model in models(conn, owner, now)? {
-        if model_spending_permitted(conn, &model.id)? {
+        if policy.platform_model(conn, &model.id, now)? {
             result.push(model);
         }
     }
@@ -121,6 +116,17 @@ pub(crate) fn available(conn: &Connection, owner: i64, now: i64) -> Result<bool>
 /// Reviewed public Responses models, intersected with actual key availability.
 /// Unknown inventory entries are never promoted by guessing endpoint support.
 fn descriptor(id: &str) -> Option<catalog::Model> {
+    if catalog::embedding_model(id) {
+        return Some(catalog::Model {
+            id: id.into(),
+            object: "model".into(),
+            owned_by: "openai".into(),
+            display_name: catalog::display_name(id),
+            source: "platform".into(),
+            capabilities: vec!["embeddings".into()],
+            metadata: None,
+        });
+    }
     let none = match id {
         "gpt-6.1-sol" | "gpt-6-astra" => false,
         "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna" | "gpt-5.6-sol" | "gpt-5.6-terra"
