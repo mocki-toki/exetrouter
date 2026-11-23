@@ -2,7 +2,7 @@ import { For, Show, createMemo, createSignal } from "solid-js"
 import { createLatest } from "@opencode/plugin/gui"
 import { Dashboard } from "./contract"
 import { count, date, lastUsed, shortDate } from "./format"
-import type { Profile, Tokens } from "./schemas"
+import type { Models, Profile, Tokens } from "./schemas"
 import { Badge, CopyButton, EmptyState, Fields, List, Notice, ReadState, Row, SearchField, Section, useDashboardState, useDialog, useHost } from "./ui"
 import { ClipboardNotice, confirmAction, configureConnection, loginAccount, tokenForm } from "./actions"
 import { ActionMenu } from "./action-menu"
@@ -42,10 +42,11 @@ export function ModelsView(props: { revision?: string }) {
   const ctx = useHost(), ui = ctx.ui
   const [query, setQuery] = createSignal("")
   const [selected, setSelected] = createSignal<readonly string[]>([])
-  const features = [{ id: "reasoning", label: "Reasoning" }, { id: "tools", label: "Tools" }, { id: "image_input", label: "Image input" }, { id: "image_generation", label: "Image generation" }, { id: "image_editing", label: "Image editing" }]
+  const features = [{ id: "reasoning", label: "Reasoning" }, { id: "tools", label: "Tools" }, { id: "image_input", label: "Image input" }, { id: "image_generation", label: "Image generation" }, { id: "image_editing", label: "Image editing" }, { id: "embeddings", label: "Embeddings" }]
   const live = createMemo((previous: string) => props.revision ?? previous, "initial")
   const report = createLatest(live, (_, signal) => ctx.main(Dashboard).models({ signal }))
-  const rows = createMemo(() => report.latest?.filter((model) => `${model.name} ${model.id} ${(model.capabilities ?? []).join(" ").replaceAll("_", " ")}`.toLowerCase().includes(query().trim().toLowerCase()) && selected().every((id) => model.capabilities?.includes(id))) ?? [])
+  const platform = (model: typeof Models.Type[number]) => model.source === "platform" ? "Platform API" : model.platformFallback ? "Platform API fallback" : ""
+  const rows = createMemo(() => report.latest?.filter((model) => `${model.name} ${model.id} ${platform(model)} ${(model.capabilities ?? []).join(" ").replaceAll("_", " ")}`.toLowerCase().includes(query().trim().toLowerCase()) && selected().every((id) => model.capabilities?.includes(id))) ?? [])
   return <div class="exr-view"><section class="exr-section">
     <SearchField label="Search models" value={query()} onInput={setQuery} />
     <div class="exr-model-filters" role="group" aria-label="Filter models by capability">
@@ -54,7 +55,7 @@ export function ModelsView(props: { revision?: string }) {
     </div>
     <ReadState loading={report.loading} error={report.error} hasData={report.latest !== undefined} noun="models" />
     <Show when={report.latest}><List><For each={rows()} fallback={<EmptyState icon="models" title={query() || selected().length ? "No matching models" : "No models available"} description={query() || selected().length ? "Try another model name, ID or capability selection." : "Refresh the catalog after connecting an account."} />}>
-      {(model) => <Row title={model.name || model.id} description={<><code class="exr-truncate" title={model.id}>{model.id}</code><span class="exr-inline-start"><For each={features.filter((feature) => model.capabilities?.includes(feature.id))}>{(feature) => <Badge>{feature.label}</Badge>}</For><Show when={model.source === "platform"}><Badge>Platform API</Badge></Show></span></>}>
+      {(model) => <Row title={model.name || model.id} description={<><code class="exr-truncate" title={model.id}>{model.id}</code><span class="exr-inline-start"><For each={features.filter((feature) => model.capabilities?.includes(feature.id))}>{(feature) => <Badge>{feature.label}</Badge>}</For><Show when={platform(model)}>{(label) => <Badge>{label()}</Badge>}</Show></span></>}>
         <ui.Tooltip value={`${count(model.context)} token context window`}><span class="exr-model-context">{count(model.context)}<span class="exr-caption">context</span></span></ui.Tooltip><CopyButton value={model.id} label={`Copy ${model.id} ID`} />
       </Row>}
     </For></List></Show>

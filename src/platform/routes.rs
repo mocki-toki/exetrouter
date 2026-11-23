@@ -123,32 +123,37 @@ fn descriptor(id: &str) -> Option<catalog::Model> {
             owned_by: "openai".into(),
             display_name: catalog::display_name(id),
             source: "platform".into(),
+            platform_fallback: false,
             capabilities: vec!["embeddings".into()],
             metadata: None,
         });
     }
-    let none = match id {
-        "gpt-6.1-sol" | "gpt-6-astra" => false,
+    const FULL: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
+    const REASONING: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+    const THROUGH_XHIGH: &[&str] = &["none", "low", "medium", "high", "xhigh"];
+    const PRO: &[&str] = &["medium", "high", "xhigh"];
+    let (context, efforts, default) = match id {
+        "gpt-6.2-astra" | "gpt-6.2-sol" | "gpt-6.1-sol" | "gpt-6-astra" => {
+            (1050000, REASONING, Some("medium"))
+        }
         "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna" | "gpt-5.6-sol" | "gpt-5.6-terra"
-        | "gpt-5.6-luna" | "gpt-5.5" => true,
+        | "gpt-5.6-luna" => (1050000, FULL, Some("medium")),
+        "gpt-5.5" => (1050000, THROUGH_XHIGH, Some("medium")),
+        "gpt-5.4" => (1050000, THROUGH_XHIGH, Some("none")),
+        "gpt-5.4-pro" => (1050000, PRO, Some("medium")),
+        "gpt-5.4-mini" | "gpt-5.2" => (400000, THROUGH_XHIGH, Some("none")),
+        "gpt-5.2-pro" => (400000, PRO, Some("medium")),
+        "chat-latest" => (400000, &[][..], None),
         _ => return None,
     };
-    let mut efforts = if none {
-        vec!["none", "low", "medium", "high", "xhigh", "max"]
-    } else {
-        vec!["low", "medium", "high", "xhigh", "max"]
-    };
-    if id == "gpt-5.5" {
-        efforts.retain(|effort| *effort != "max");
-    }
     let mut model = catalog::Model::parse(&json!({
         "slug":id,"display_name":catalog::display_name(id),
-        "context_window":1050000,"max_context_window":1050000,
-        "auto_compact_token_limit":922000,"max_output_tokens":128000,
-        "default_reasoning_level":"medium",
-        "supported_reasoning_levels":efforts.into_iter().map(|effort| json!({"effort":effort,"description":effort})).collect::<Vec<_>>(),
+        "context_window":context,"max_context_window":context,
+        "auto_compact_token_limit":context-128000,"max_output_tokens":128000,
+        "default_reasoning_level":default,
+        "supported_reasoning_levels":efforts.iter().map(|effort| json!({"effort":effort,"description":effort})).collect::<Vec<_>>(),
         "shell_type":"default","visibility":"list","supported_in_api":true,
-        "priority":1000,"support_verbosity":true,"truncation_policy":{"mode":"tokens","limit":10000},
+        "priority":1000,"support_verbosity":id!="chat-latest","truncation_policy":{"mode":"tokens","limit":10000},
         "experimental_supported_tools":[],"input_modalities":["text","image"]
     })).ok()?;
     model.source = "platform".into();
@@ -327,6 +332,8 @@ mod tests {
     #[test]
     fn reviewed_descriptors_are_explicit_responses_models_not_slug_inference() {
         let ids = [
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
             "gpt-6.1-sol",
             "gpt-6.1-terra",
             "gpt-6-astra",
@@ -359,7 +366,10 @@ mod tests {
                 .any(|level| level["effort"] == "none");
             assert_eq!(
                 has_none,
-                !matches!(model.id.as_str(), "gpt-6.1-sol" | "gpt-6-astra")
+                !matches!(
+                    model.id.as_str(),
+                    "gpt-6.2-astra" | "gpt-6.2-sol" | "gpt-6.1-sol" | "gpt-6-astra"
+                )
             );
             let has_max = meta["supported_reasoning_levels"]
                 .as_array()
@@ -371,7 +381,32 @@ mod tests {
         catalog::codex(&models).unwrap();
         catalog::opencode_v1(&models).unwrap();
         catalog::opencode_v2(&models).unwrap();
-        for id in ["gpt-6.1-sol-new", "gpt-image-2", "unknown-response-model"] {
+        for (id, context, effort) in [
+            ("gpt-5.4", 1050000, Some("none")),
+            ("gpt-5.4-pro", 1050000, Some("medium")),
+            ("gpt-5.4-mini", 400000, Some("none")),
+            ("gpt-5.2", 400000, Some("none")),
+            ("gpt-5.2-pro", 400000, Some("medium")),
+            ("chat-latest", 400000, None),
+        ] {
+            let m = descriptor(id).unwrap();
+            let meta = m.metadata.as_ref().unwrap();
+            assert_eq!(meta["context_window"], context);
+            assert_eq!(meta["default_reasoning_level"].as_str(), effort);
+            if id == "chat-latest" {
+                assert_eq!(m.capabilities, ["tools", "image_input"]);
+                let export = catalog::opencode_v2(&[m]).unwrap();
+                let entry = &export["providers"]["exetrouter"]["models"][id];
+                assert_eq!(entry["settings"], json!({}));
+                assert_eq!(entry["variants"], json!([]));
+            }
+        }
+        for id in [
+            "gpt-6.1-sol-new",
+            "gpt-image-2",
+            "gpt-5.5-pro",
+            "unknown-response-model",
+        ] {
             assert!(descriptor(id).is_none());
         }
     }

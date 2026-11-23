@@ -246,8 +246,8 @@ export function tokens(value: unknown): typeof Tokens.Type {
 export function models(value: unknown): typeof Models.Type {
   const rows = list(record(value).data, 16384).map((entry) => {
     const row = record(entry)
-    const allowed = ["reasoning", "tools", "image_input", "image_generation", "image_editing"]
-    return { id: text(row.id), name: string(row.display_name, "").replaceAll("-", " "), context: nullable(object(row.exetrouter).context_window), source: row.source === "platform" ? "platform" : "codex", capabilities: list(row.capabilities ?? [], 16).map((c) => text(c, 32)).filter((c) => allowed.includes(c)) }
+    const allowed = ["reasoning", "tools", "image_input", "image_generation", "image_editing", "embeddings"]
+    return { id: text(row.id), name: string(row.display_name, "").replaceAll("-", " "), context: nullable(object(row.exetrouter).context_window), source: row.source === "platform" ? "platform" : "codex", capabilities: list(row.capabilities ?? [], 16).map((c) => text(c, 32)).filter((c) => allowed.includes(c)), ...(row.source !== "platform" && row.platform_fallback === true ? { platformFallback: true } : {}) }
   })
   return [...rows.filter((row) => row.source === "codex").reverse(), ...rows.filter((row) => row.source === "platform")]
 }

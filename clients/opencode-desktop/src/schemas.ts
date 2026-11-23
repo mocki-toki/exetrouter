@@ -130,7 +130,7 @@ export const Tokens = Schema.Array(Schema.Struct({
   fastMode: Schema.NullOr(Schema.Boolean),
   createdAt: Schema.NullOr(Schema.Number), expiresAt: Schema.NullOr(Schema.Number), lastUsedAt: Schema.NullOr(Schema.Number),
 }))
-export const Models = Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, context: Schema.NullOr(Schema.Number), source: Schema.optionalKey(Schema.String), capabilities: Schema.optionalKey(Schema.Array(Schema.String)) }))
+export const Models = Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, context: Schema.NullOr(Schema.Number), source: Schema.optionalKey(Schema.String), capabilities: Schema.optionalKey(Schema.Array(Schema.String)), platformFallback: Schema.optionalKey(Schema.Boolean) }))
 export const Connection = Schema.Struct({
   mode: Schema.Literals(["remote", "standalone"]), host: Schema.String, port: Schema.Number, ssh_user: Schema.String,
   identity: Schema.String, api_url: Schema.NullOr(Schema.String), state_dir: Schema.String, listen: Schema.String,

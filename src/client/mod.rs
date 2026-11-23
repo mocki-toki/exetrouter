@@ -113,7 +113,7 @@ enum CommandLine {
         #[arg(long)]
         search: Option<String>,
         /// Require each selected capability (repeat to match all).
-        #[arg(long = "capability", value_parser = ["reasoning", "tools", "image-input", "image-generation", "image-editing"])]
+        #[arg(long = "capability", value_parser = ["reasoning", "tools", "image-input", "image-generation", "image-editing", "embeddings"])]
         capabilities: Vec<String>,
         #[arg(long, value_enum)]
         format: Option<ModelFormat>,

@@ -134,7 +134,11 @@ test("rendered panel has five native web views, account details, usage graph, to
   let tokenGate: ReturnType<typeof import("./fixtures").deferred<typeof tokenRows>> | undefined
   const bridge = {
     state:()=>available()?state():undefined, refresh: async () => {setState((old)=>({...old,revision:old.revision+1}))},
-    usage: async (input: typeof usageInputs[number]) => { calls.usage++; usageInputs.push(input); return {...usageReport,...(input.before === undefined ? {} : {to:input.before})} }, tokens: async () => { calls.tokens++; return tokenGate ? tokenGate.promise : tokenRows }, models: async () => { calls.models++; return models(modelList()) },
+    usage: async (input: typeof usageInputs[number]) => { calls.usage++; usageInputs.push(input); return {...usageReport,...(input.before === undefined ? {} : {to:input.before})} }, tokens: async () => { calls.tokens++; return tokenGate ? tokenGate.promise : tokenRows }, models: async () => { calls.models++; return models({ data: [
+      {...modelList().data[0], platform_fallback: true},
+      {id:"native-only"},
+      {id:"text-embedding-3-small",source:"platform",capabilities:["embeddings"]},
+    ] }) },
     quotaHistory: async (input: typeof historyInputs[number]) => { historyInputs.push(input); const h=report.accounts[0].history!; const to=input.before??h.to; const days=input.period==="24h"?1:Number(input.period.slice(0,-1)); return {...h,from:to-days*86400,to,points:h.points.filter((p)=>p.hour>=to-days*86400&&p.hour<to),platformBalance:input.before===undefined?platformHistory:undefined} },
     profile: async () => ({ mode: "Standalone", destination: "127.0.0.1:8787", fields: [{ label: "SSH host", value: "router.example.com" }], accounts: [{id:1,email:"account@example.com",state:"active"}], clientVersion: "0.0.0-test", connection: {mode:"standalone",host:"router.example.com",port:2222,ssh_user:"routercli",identity:"/synthetic/key",api_url:null,state_dir:"/synthetic/state",listen:"127.0.0.1:8787"} }),
     desktop: async (input: Record<string, unknown>) => { nativeActions.push(input); return {status:"saved",copied:input.action === "token_create" || input.action === "token_rotate",retryCopy:false,profile:null,update:null,login:input.action === "login_start" ? {url:"https://auth.openai.com/activate",code:"TEST-CODE"} : null} },
@@ -476,7 +480,17 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.match(root.textContent, /No matching models/)
     click("All")
     assert.match(root.textContent, /synthetic-model/)
+    const modelPane = root.querySelector('[role="tabpanel"]:not([hidden])')!
+    assert.match(modelPane.textContent, /Platform API fallback/)
+    click("Embeddings")
+    assert.match(modelPane.textContent, /text-embedding-3-small/)
+    assert.doesNotMatch(modelPane.textContent, /synthetic-model/)
+    click("All")
     const search = root.querySelector('input[aria-label="Search models"]')! as unknown as { value: string; dispatchEvent(event: unknown): void }
+    search.value = "platform api"
+    search.dispatchEvent(new window.Event("input", { bubbles: true }))
+    assert.match(modelPane.textContent, /synthetic-model.*text-embedding-3-small/)
+    assert.doesNotMatch(modelPane.textContent, /native-only/)
     search.value = "no matching model"
     search.dispatchEvent(new window.Event("input", { bubbles: true }))
     assert.match(root.textContent, /No matching models/)

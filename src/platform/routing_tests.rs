@@ -177,6 +177,10 @@ async fn platform_catalog_is_observed_source_ordered_and_fallback_is_only_for_al
         1050000
     );
     assert!(models[1].capabilities.contains(&"tools".into()));
+    assert!(serde_json::to_value(&models[0])
+        .unwrap()
+        .get("platform_fallback")
+        .is_none());
     catalog::codex(&models).unwrap();
     catalog::opencode_v1(&models).unwrap();
     catalog::opencode_v2(&models).unwrap();
@@ -189,6 +193,18 @@ async fn platform_catalog_is_observed_source_ordered_and_fallback_is_only_for_al
         "default policy preserves credit-backed Codex"
     );
     db.call(|conn| Resources::Both.set(conn)).await.unwrap();
+    let models = upstream.models().await.unwrap();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].source, "codex");
+    assert_eq!(
+        models[0].metadata.as_ref().unwrap()["context_window"],
+        500000
+    );
+    assert_eq!(
+        serde_json::to_value(&models[0]).unwrap()["platform_fallback"],
+        true
+    );
+    assert!(!models[1].platform_fallback);
     assert!(upstream.select("gpt-6.1-sol").await.unwrap().info.id < 0);
     db.call(|conn| {
         crate::health::failure(
@@ -225,6 +241,57 @@ async fn platform_catalog_is_observed_source_ordered_and_fallback_is_only_for_al
         0,
         "catalog and selection never submit inference"
     );
+}
+
+#[tokio::test]
+async fn newly_supported_platform_models_are_callable_only_when_observed() {
+    let (dir, db, mock, upstream) = fixture().await;
+    let ids = [
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+        "gpt-5.4",
+        "gpt-5.4-pro",
+        "gpt-5.4-mini",
+        "gpt-5.2",
+        "gpt-5.2-pro",
+        "chat-latest",
+    ];
+    assert!(!upstream
+        .models()
+        .await
+        .unwrap()
+        .iter()
+        .any(|m| ids.contains(&m.id.as_str())));
+    mock.state
+        .lock()
+        .unwrap()
+        .response_models
+        .extend(ids.map(str::to_owned));
+    inventory::read(
+        &db,
+        Vault::new([7; 32]),
+        &client::Client::new(&mock.base, true).unwrap(),
+        1,
+    )
+    .await
+    .unwrap();
+    let api = Api::open(&dir, &db, upstream.clone()).await;
+    let models = upstream.models().await.unwrap();
+    assert_eq!(mock.state.lock().unwrap().inferences.len(), 0);
+    assert!(!models.iter().any(|m| m.id == "unknown-do-not-route"));
+    for id in ids {
+        assert!(models.iter().any(|m| m.id == id && m.source == "platform"));
+        let response = api
+            .post(
+                "responses",
+                &json!({"model":id,"input":"synthetic Platform fixture"}),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{id}");
+    }
+    assert_eq!(mock.state.lock().unwrap().inferences.len(), ids.len());
 }
 
 #[tokio::test]
