@@ -56,11 +56,12 @@ does not expose account management through the OpenCode HTTP RPC surface.
    updated router/profile, the pill is absent. No inference is submitted to discover
    the account.
   Overview includes router/account status, credits, forecasts and detailed
-   routing/client activity. Account details include a shared short/weekly
-   [ten-minute quota chart](quota-history.md), current-window summaries and
-   a pointer/keyboard cursor that survives background snapshots. Missing hours
-   remain gaps; an updated router and native client are required to collect and
-   retain history. Usage includes the TUI periods/groups, fine multi-color charts
+    routing/client activity. Account details put Codex windows and the Platform
+    estimate in the same row where space allows. A shared [limit chart](quota-history.md)
+    shows percent remaining, with a pointer/keyboard cursor that survives
+    background snapshots. Desktop shows one current quota ETA (for example `-21h 30m`),
+    averaged with the historical ETA when both are available and cached until
+    the next snapshot. Usage includes the TUI periods/groups, fine multi-color charts
    and interval values. Tokens exposes metadata and native management actions; Models exposes
   the same catalog and clipboard action as the TUI.
 - Views use the host's menus, dialogs, search inputs, buttons, tooltips and

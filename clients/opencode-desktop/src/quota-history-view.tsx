@@ -1,13 +1,12 @@
 import { For, Show, createMemo, createSignal } from "solid-js"
 import type { Account } from "./schemas"
 import { activityIndex } from "./chart"
-import { quotaLeft, quotaTimeline, quotaX, quotaY } from "./quota-history"
+import { quotaTimeline, quotaX, quotaY } from "./quota-history"
 import { date, percent } from "./format"
 import { createLatest } from "@opencode/plugin/gui"
 import { Dashboard } from "./contract"
 import { RangeControls, type Period } from "./time-range"
 import { ReadState, useHost } from "./ui"
-import { PlatformHistoryChart } from "./platform-history"
 
 export function QuotaHistoryView(props: { account: Account }) {
   const ctx = useHost()
@@ -20,7 +19,10 @@ export function QuotaHistoryView(props: { account: Account }) {
     const fetched = report.latest?.key === `${props.account.id}:${period()}:${before() ?? "latest"}` ? report.latest.history : null
     const snapshot = period() === "7d" && before() === undefined ? props.account.history : null
     const newest = (h: Account["history"]) => Math.max(0, ...(h?.points.map((p) => p.observedAt) ?? []))
-    return snapshot && (!fetched || snapshot.to >= fetched.to && newest(snapshot) >= newest(fetched)) ? snapshot : fetched
+    if (snapshot && (!fetched || snapshot.to >= fetched.to && newest(snapshot) >= newest(fetched))) {
+      return { ...snapshot, platformBalance: fetched?.platformBalance && snapshot.interval === fetched.interval && snapshot.from === fetched.from && snapshot.to === fetched.to ? fetched.platformBalance : snapshot.platformBalance }
+    }
+    return fetched
   })
   const data = createMemo(() => quotaTimeline({...props.account,history:history()}))
   // Retain the selected absolute bucket through background snapshots, not its shifting index.
@@ -43,23 +45,20 @@ export function QuotaHistoryView(props: { account: Account }) {
   const day = (at: number) => new Date(at * 1000).toLocaleString("en", period() === "24h" ? {hour:"2-digit",minute:"2-digit"} : { month: "short", day: "numeric" })
   const ticks = createMemo(() => [...new Set([0, 1, 2, 3, 4, 5, 6, 7].map((i) => Math.round(i / 7 * (data().hours.length - 1))))])
   return <section class="exr-section exr-history">
-    <header class="exr-history-heading"><div><h3>Subscription history</h3><p class="exr-caption">{(history()?.interval ?? 3600) === 600 ? "10-minute" : "Hourly"} observations · unavailable intervals remain gaps</p></div><div class="exr-history-legend"><For each={data().series}>{(line) => <span><i style={{ background: line.color }} />{line.label}</span>}</For></div></header>
+    <header class="exr-history-heading"><h3>Limit history</h3><div class="exr-history-legend"><For each={data().series}>{(line) => <span><i style={{ background: line.color }} />{line.label}</span>}</For></div></header>
     <RangeControls label="Limit history" period={period()} before={before()} end={before() ?? history()?.to ?? latestEnd()} now={latestEnd()} loading={report.loading} onPeriod={(value) => { setBefore(undefined); setPeriod(value) }} onBefore={setBefore} />
     <ReadState loading={report.loading} error={report.error} hasData={!!history()} noun="limit history" />
-    <Show when={history()}>{(h) => <p class="exr-caption">{date(h().from)} – {date(h().to)}</p>}</Show>
     <Show when={data().series.length > 0} fallback={<p class="exr-caption">{props.account.history ? "No recorded observations yet." : "Limit history requires an updated router and native exr client."}</p>}>
-      <div class="exr-chart"><div class="exr-inline exr-caption"><span>Quota left</span><span>0–100%</span></div>
-        <div class="exr-chart-plot"><svg viewBox="0 0 668 240" role="img" tabindex="0" aria-label="Subscription quota left. Left and right select an interval; Home and End select the first and latest interval." onPointerMove={move} onPointerLeave={() => setSelected(undefined)} onKeyDown={keyboard} onBlur={() => setSelected(undefined)}>
+      <div class="exr-chart"><div class="exr-inline exr-caption"><span>Left</span></div>
+        <div class="exr-chart-plot"><svg viewBox="0 0 668 240" role="img" tabindex="0" aria-label="Limit history in percent remaining. Left and right select an interval; Home and End select the first and latest interval." onPointerMove={move} onPointerLeave={() => setSelected(undefined)} onKeyDown={keyboard} onBlur={() => setSelected(undefined)}>
           <For each={[0, 25, 50, 75, 100]}>{(value) => <g><line class="exr-chart-grid" x1="44" x2="644" y1={quotaY(value)} y2={quotaY(value)} /><text x="34" y={quotaY(value) + 4} text-anchor="end">{value}%</text></g>}</For>
           <For each={ticks()}>{(i) => <text x={quotaX(i, data().hours.length)} y="231" text-anchor={i === 0 ? "start" : i === data().hours.length - 1 ? "end" : "middle"}>{day(data().hours[i])}</text>}</For>
           <For each={data().series}>{(line) => <g data-window={line.kind}><For each={line.segments}>{(points) => <polyline points={points} fill="none" stroke={line.color} stroke-width="1.7" stroke-linejoin="round" />}</For><For each={line.isolated}>{(p) => <circle cx={p.x} cy={p.y} r="2.5" fill={line.color} />}</For></g>}</For>
-          <Show when={cursor() !== undefined}><g class="exr-chart-cursor"><line x1={cursor()} x2={cursor()} y1="20" y2="204" /><For each={data().series}>{(line) => <Show when={line.points.get(selected()!)}>{(p) => <circle cx={cursor()} cy={quotaY(quotaLeft(p().used))} r="3.5" fill={line.color} />}</Show>}</For></g></Show>
+          <Show when={cursor() !== undefined}><g class="exr-chart-cursor"><line x1={cursor()} x2={cursor()} y1="20" y2="204" /><For each={data().series}>{(line) => <Show when={line.points.has(selected()!)}><circle cx={cursor()} cy={quotaY(line.points.get(selected()!)!)} r="3.5" fill={line.color} /></Show>}</For></g></Show>
         </svg>
-        <Show when={cursor() !== undefined}><div class="exr-chart-tooltip exr-history-tooltip" role="status" style={{ left: cursor()! <= 334 ? `calc(${cursor()! / 668 * 100}% + 24px)` : "auto", right: cursor()! > 334 ? `calc(${100 - cursor()! / 668 * 100}% + 24px)` : "auto", "max-width": `calc(${Math.max(cursor()!, 668-cursor()!) / 668 * 100}% - 32px)` }}><strong>{date(selected())}</strong><For each={data().series}>{(line) => <div><span class="exr-inline-start"><i style={{ background: line.color }} />{line.label}</span><Show when={line.points.get(selected()!)} fallback={<span class="exr-caption">Not observed</span>}>{(p) => <span>{percent(quotaLeft(p().used))} left</span>}</Show></div>}</For></div></Show>
+        <Show when={cursor() !== undefined}><div class="exr-chart-tooltip exr-history-tooltip" role="status" style={{ left: cursor()! <= 334 ? `calc(${cursor()! / 668 * 100}% + 24px)` : "auto", right: cursor()! > 334 ? `calc(${100 - cursor()! / 668 * 100}% + 24px)` : "auto", "max-width": `calc(${Math.max(cursor()!, 668-cursor()!) / 668 * 100}% - 32px)` }}><strong>{date(selected())}</strong><For each={data().series}>{(line) => <div><span class="exr-inline-start"><i style={{ background: line.color }} />{line.label}</span><Show when={line.points.has(selected()!)} fallback={<span class="exr-caption">Not observed</span>}><span>{percent(line.points.get(selected()!)!)} left</span></Show></div>}</For></div></Show>
         </div>
-        <p class="exr-caption exr-history-caption">Latest observation · {date(data().latest)}</p>
       </div>
     </Show>
-    <Show when={props.account.platform && history()?.platform}>{(platform)=><PlatformHistoryChart history={platform()} />}</Show>
   </section>
 }
