@@ -3,13 +3,15 @@
 Codex models and capabilities come from the account-visible upstream catalog. Export verification is recorded in [compatibility](compatibility.md#opencode-model-import); reviewed revisions are pinned in [protocol-sources.json](protocol-sources.json).
 
 Configured [Platform routes](platform-api.md#read-only-model-availability) add
-distinct working-key-visible IDs only when an explicit reviewed Responses
-descriptor exists. These follow Codex models with `source: "platform"`. Unknown
-API inventory entries are inspection-only, not guessed routable models. Shared
-Codex/API IDs keep their Codex metadata and limits; the larger API context window
-does not change a native descriptor. The spending policy may prevent an API-only
-entry when native catalog availability is unknown. Synthetic export tests do not
-extend the live/native-client compatibility matrix.
+working-key-visible IDs with a reviewed Responses or embeddings descriptor.
+Platform-only models follow Codex models with `source: "platform"`. Shared IDs
+keep a single Codex descriptor and gain `platform_fallback: true` only when
+permitted by routing policy and observed for a usable Platform project. This
+marks a fallback route, not an override or a guarantee of current capacity.
+Search for `Platform API` in Models or `exr models --search 'Platform API'` to see
+both categories. Unknown inventory entries are inspection-only. Embeddings
+are listed in Models, not in generation-only client exports. Synthetic export
+tests do not extend the live/native-client compatibility matrix.
 
 Display names use spaces rather than hyphens; technical IDs and copied/requested
 model names remain unchanged. The ordinary model list also exposes `source` and

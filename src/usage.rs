@@ -448,6 +448,8 @@ const TOKEN_PRICES: &[(&str, [i64; 6])] = &[
     ("text-embedding-3-small", [20, 0, 20, 20, 0, 20]),
     ("text-embedding-3-large", [130, 0, 130, 130, 0, 130]),
     ("text-embedding-ada-002", [100, 0, 100, 100, 0, 100]),
+    ("gpt-6.2-astra", [8000, 40000, 400, 16000, 60000, 800]),
+    ("gpt-6.2-sol", [2000, 10000, 100, 4000, 15000, 200]),
     ("gpt-6-astra", [10000, 50000, 1000, 20000, 75000, 2000]),
     ("gpt-6.1-sol", [2000, 10000, 100, 4000, 15000, 200]),
     ("gpt-6.1-terra", [1000, 5000, 50, 2000, 7500, 100]),
@@ -457,6 +459,12 @@ const TOKEN_PRICES: &[(&str, [i64; 6])] = &[
     ("gpt-5.6-terra", [2000, 12000, 200, 4000, 18000, 400]),
     ("gpt-5.6-luna", [200, 1200, 20, 400, 1800, 40]),
     ("gpt-5.5", [5000, 30000, 500, 10000, 45000, 1000]),
+    ("gpt-5.4", [2500, 15000, 250, 5000, 22500, 500]),
+    ("gpt-5.4-pro", [30000, 180000, 30000, 60000, 270000, 60000]),
+    ("gpt-5.4-mini", [750, 4500, 75, 750, 4500, 75]),
+    ("gpt-5.2", [1750, 14000, 175, 1750, 14000, 175]),
+    ("gpt-5.2-pro", [21000, 168000, 21000, 21000, 168000, 21000]),
+    ("chat-latest", [5000, 30000, 500, 5000, 30000, 500]),
 ];
 
 pub(crate) fn token_cost_nanos(model: &str, counters: &Counters) -> Option<i64> {
@@ -552,6 +560,28 @@ fn aggregate(
 mod tests {
     use super::*;
     use crate::{create_token, create_user, init};
+
+    #[test]
+    fn platform_gpt_62_prices_include_cached_tokens_and_the_long_context_tier() {
+        let counters = |input| Counters {
+            input: Some(input),
+            output: Some(100),
+            cached_input: Some(100),
+            reasoning_output: None,
+        };
+        assert_eq!(
+            token_cost_nanos("gpt-6.2-astra", &counters(272000)),
+            Some(271900 * 8000_i64 + 100 * (400 + 40000))
+        );
+        assert_eq!(
+            token_cost_nanos("gpt-6.2-astra", &counters(272001)),
+            Some(271901 * 16000_i64 + 100 * (800 + 60000))
+        );
+        assert_eq!(
+            token_cost_nanos("gpt-6.2-sol", &counters(272001)),
+            Some(271901 * 4000_i64 + 100 * (200 + 15000))
+        );
+    }
 
     #[test]
     fn rolling_pages_have_exact_exclusive_boundaries_and_private_token_rows() {

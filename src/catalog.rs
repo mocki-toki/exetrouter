@@ -89,6 +89,9 @@ pub struct Model {
     pub display_name: String,
     #[serde(default = "codex_source")]
     pub source: String,
+    /// A configured Platform project can serve this Codex ID after quota fallback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub platform_fallback: bool,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(
@@ -207,6 +210,7 @@ impl Model {
             owned_by: "openai".into(),
             display_name: name.into(),
             source: codex_source(),
+            platform_fallback: false,
             capabilities: Vec::new(),
             metadata: Some(metadata),
         })

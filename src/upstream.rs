@@ -407,6 +407,18 @@ impl Upstream {
         if !policy.codex() {
             available.clear();
         }
+        let mut direct_platform = Vec::new();
+        if policy.platform() {
+            for model in platform {
+                if let Some(native) = available.get_mut(&model.id) {
+                    // The route catalog already applied the operator policy. Keep
+                    // the native descriptor, including its limits and priority.
+                    native.platform_fallback = true;
+                } else {
+                    direct_platform.push(model);
+                }
+            }
+        }
         let mut models = available
             .into_values()
             .map(|mut model| {
@@ -414,15 +426,7 @@ impl Upstream {
                 model
             })
             .collect::<Vec<_>>();
-        // Native descriptors remain authoritative for shared IDs; never merge
-        // Platform context limits into a Codex descriptor.
-        let ids = models
-            .iter()
-            .map(|m| m.id.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        if policy.platform() {
-            models.extend(platform.into_iter().filter(|m| !ids.contains(&m.id)));
-        }
+        models.extend(direct_platform);
         Ok(models)
     }
 
@@ -452,7 +456,7 @@ impl Upstream {
                 if !valid { return Err("OAuth account changed during catalog read".into()); }
                 let mut stmt=conn.prepare("SELECT model,display_name,metadata FROM oauth_models WHERE account_id=?1 ORDER BY model")?;
                 let rows=stmt.query_map([id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
-                let rows=rows.into_iter().map(|(id,display_name,metadata)|Ok(Model { id,display_name,object:"model".into(),owned_by:"openai".into(),source:"codex".into(),capabilities:Vec::new(),metadata:metadata.map(|value|serde_json::from_str(&value)).transpose()? })).collect::<Result<Vec<_>>>()?;
+                let rows=rows.into_iter().map(|(id,display_name,metadata)|Ok(Model { id,display_name,object:"model".into(),owned_by:"openai".into(),source:"codex".into(),platform_fallback:false,capabilities:Vec::new(),metadata:metadata.map(|value|serde_json::from_str(&value)).transpose()? })).collect::<Result<Vec<_>>>()?;
                 Ok(rows)
             }).await;
         }
@@ -1861,6 +1865,7 @@ mod tests {
             object: "model".into(),
             owned_by: "openai".into(),
             source: "codex".into(),
+            platform_fallback: false,
             capabilities: Vec::new(),
             metadata: None,
         }
