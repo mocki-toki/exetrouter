@@ -1,0 +1,6 @@
+**/*
+!dist/extension.js
+!assets/router.svg
+!package.json
+!README.md
+!LICENSE

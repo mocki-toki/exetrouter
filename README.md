@@ -138,6 +138,10 @@ V2 defaults to WebSocket and native compaction; `--standalone` starts a private 
 
 An optional [experimental OpenCode Desktop plugin](docs/opencode-desktop.md) adds dynamic model discovery and a native web dashboard with Overview, Usage, Tokens, Models and Settings tabs. It is built from source separately and targets OpenCode 2.2.0.
 
+### VS Code
+
+Build the [ExetRouter extension for VS Code](docs/vscode.md) as a local VSIX. It adds discovered models to the Chat picker, a dashboard in the Activity Bar and a status bar item for all accounts in your `exr` profile.
+
 ### OpenAI SDKs and other BYOK tools
 
 For a BYOK app, choose a custom OpenAI-compatible endpoint, enter your router token as the API key and select the model ID from **Models**. The app must use a [supported endpoint](docs/openai-api.md).

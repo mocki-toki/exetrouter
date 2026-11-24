@@ -1,0 +1,202 @@
+{
+  "name": "exetrouter",
+  "displayName": "ExetRouter",
+  "description": "ExetRouter models in VS Code Chat and a native account dashboard.",
+  "version": "0.1.0",
+  "publisher": "exetrouter",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mocki-toki/exetrouter.git",
+    "directory": "clients/vscode"
+  },
+  "engines": {
+    "vscode": "^1.146.0"
+  },
+  "categories": [
+    "Chat"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguageModelChatProvider:exetrouter"
+  ],
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "exetrouter",
+        "displayName": "ExetRouter",
+        "managementCommand": "exetrouter.connect"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "exetrouter",
+          "title": "ExetRouter",
+          "icon": "assets/router.svg"
+        }
+      ]
+    },
+    "views": {
+      "exetrouter": [
+        {
+          "id": "exetrouter.overview",
+          "name": "Overview"
+        },
+        {
+          "id": "exetrouter.usage",
+          "name": "Usage",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "exetrouter.tokens",
+          "name": "Tokens",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "exetrouter.models",
+          "name": "Models",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "exetrouter.settings",
+          "name": "Settings",
+          "visibility": "collapsed"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "exetrouter.manageToken",
+        "title": "Manage Profile Tokens",
+        "category": "ExetRouter",
+        "icon": "$(key)"
+      },
+      {
+        "command": "exetrouter.history",
+        "title": "Show Account Quota History",
+        "category": "ExetRouter",
+        "icon": "$(history)"
+      },
+      {
+        "command": "exetrouter.group",
+        "title": "Group Usage By",
+        "category": "ExetRouter",
+        "icon": "$(group-by-ref-type)"
+      },
+      {
+        "command": "exetrouter.copyModel",
+        "title": "Search Models and Copy ID",
+        "category": "ExetRouter",
+        "icon": "$(search)"
+      },
+      {
+        "command": "exetrouter.connect",
+        "title": "Connect API Token",
+        "category": "ExetRouter"
+      },
+      {
+        "command": "exetrouter.forget",
+        "title": "Forget API Token",
+        "category": "ExetRouter"
+      },
+      {
+        "command": "exetrouter.refresh",
+        "title": "Refresh Dashboard and Models",
+        "category": "ExetRouter",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "exetrouter.accounts",
+        "title": "Show All Accounts",
+        "category": "ExetRouter"
+      },
+      {
+        "command": "exetrouter.period",
+        "title": "Select Usage Period",
+        "category": "ExetRouter",
+        "icon": "$(calendar)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "exetrouter.manageToken",
+          "when": "view == exetrouter.tokens",
+          "group": "navigation"
+        },
+        {
+          "command": "exetrouter.history",
+          "when": "view == exetrouter.overview",
+          "group": "navigation"
+        },
+        {
+          "command": "exetrouter.group",
+          "when": "view == exetrouter.usage",
+          "group": "navigation"
+        },
+        {
+          "command": "exetrouter.copyModel",
+          "when": "view == exetrouter.models",
+          "group": "navigation"
+        },
+        {
+          "command": "exetrouter.refresh",
+          "when": "view == exetrouter.overview",
+          "group": "navigation"
+        },
+        {
+          "command": "exetrouter.period",
+          "when": "view == exetrouter.usage",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "ExetRouter",
+      "properties": {
+        "exetrouter.apiBaseUrl": {
+          "type": "string",
+          "scope": "application",
+          "default": "",
+          "description": "Exact API base URL, including /v1. Leave empty to use the local exr profile."
+        },
+        "exetrouter.executable": {
+          "type": "string",
+          "scope": "application",
+          "default": "exr",
+          "description": "Absolute path to exr, or exr on PATH."
+        },
+        "exetrouter.reasoningEffort": {
+          "type": "string",
+          "scope": "application",
+          "default": "",
+          "description": "Optional reasoning effort. Applied only when advertised by the selected model."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "npm run check && esbuild src/extension.ts --bundle --platform=node --target=node22 --external:vscode --outfile=dist/extension.js",
+    "vscode:prepublish": "npm run build",
+    "pretest": "npm run build",
+    "test": "tsx --test tests/*.test.ts",
+    "package": "npx --yes --package @vscode/vsce@4.1.1 vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "gpt-tokenizer": "4.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.7",
+    "@types/vscode": "1.146.0",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}
