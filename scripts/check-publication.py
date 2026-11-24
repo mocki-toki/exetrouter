@@ -12,6 +12,9 @@ ROOT_FILES = {"AGENTS.md", "CLAUDE.md", "Cargo.toml", "Cargo.lock", "README.md",
 SOURCE_DIRS = {"src", "tests", "docs", "deploy", "scripts", "skills", "prompts", ".github", "Formula", "nix"}
 DESKTOP_PLUGIN = "clients/opencode-desktop"
 DESKTOP_ROOT_FILES = {".gitignore", "README.md", "package.json", "package-lock.json", "tsconfig.json", "vite.config.ts"}
+VSCODE_EXTENSION = "clients/vscode"
+VSCODE_ROOT_FILES = {".gitignore", ".vscodeignore", "LICENSE", "README.md", "package.json", "package-lock.json", "tsconfig.json"}
+VSCODE_ICON = f"{VSCODE_EXTENSION}/assets/router.svg"
 V1_FILES = {"README.md", "package.json", "context.js", "context.test.js"}
 LOCKFILE_FUNDING_HOSTS = {"feross.org", "opencollective.com", "paypal.me", "tidelift.com", "www.patreon.com"}
 SECRET_PATTERNS = [
@@ -32,11 +35,19 @@ def allowed_path(name):
     if parts[0] == "clients":
         if len(parts) == 3 and parts[1] == "opencode-v1":
             return parts[2] in V1_FILES
-        if len(parts) < 3 or parts[1] != "opencode-desktop":
+        if len(parts) < 3:
             return False
-        if not (len(parts) == 3 and parts[2] in DESKTOP_ROOT_FILES) and not (
-            parts[2] in {"src", "tests"} and Path(name).suffix in {".ts", ".tsx", ".css", ".mjs", ".mts"}
-        ):
+        if parts[1] == "opencode-desktop":
+            if not (len(parts) == 3 and parts[2] in DESKTOP_ROOT_FILES) and not (
+                parts[2] in {"src", "tests"} and Path(name).suffix in {".ts", ".tsx", ".css", ".mjs", ".mts"}
+            ):
+                return False
+        elif parts[1] == "vscode":
+            if not (len(parts) == 3 and parts[2] in VSCODE_ROOT_FILES) and not (
+                (parts[2] in {"src", "tests"} and Path(name).suffix == ".ts") or name == VSCODE_ICON
+            ):
+                return False
+        else:
             return False
     elif parts[0] not in ROOT_FILES | SOURCE_DIRS:
         return False
@@ -79,7 +90,7 @@ def main():
             paths = [root / name for name in names if name]
         else:
             paths = []
-            for entry in ROOT_FILES | SOURCE_DIRS | {DESKTOP_PLUGIN, "clients/opencode-v1"}:
+            for entry in ROOT_FILES | SOURCE_DIRS | {DESKTOP_PLUGIN, VSCODE_EXTENSION, "clients/opencode-v1"}:
                 candidate = root / entry
                 if candidate.is_file():
                     paths.append(candidate)
@@ -106,12 +117,15 @@ def main():
             if any(pattern.search(text) for pattern in SECRET_PATTERNS):
                 errors.append((name, "credential or private workstation path"))
             for match in URL.finditer(text):
+                url = match.group().rstrip(".,;:")
                 try:
-                    host = urlsplit(match.group().rstrip(".,;:")).hostname
+                    parsed = urlsplit(url)
+                    host = parsed.hostname
                 except ValueError:
                     continue  # Deliberately malformed URL fixtures.
                 reviewed_funding = name == f"{DESKTOP_PLUGIN}/package-lock.json" and host in LOCKFILE_FUNDING_HOSTS
-                if not allowed_host(host) and not reviewed_funding:
+                svg_namespace = name == VSCODE_ICON and parsed == ("http", "www.w3.org", "/2000/svg", "", "")
+                if not allowed_host(host) and not (reviewed_funding or svg_namespace):
                     errors.append((name, "unreviewed concrete endpoint"))
                     break
     for name, rule in errors:

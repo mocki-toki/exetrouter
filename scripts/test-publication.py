@@ -45,6 +45,19 @@ class PublicationTests(unittest.TestCase):
         for name in ["clients/other/index.ts", "clients/opencode-desktop/dist/gui-experimental.cjs", "clients/opencode-desktop/node_modules/package/index.ts", "clients/opencode-desktop/src/private.key", "clients/opencode-desktop/.env", "clients/opencode-desktop/state.sqlite"]:
             self.assertFalse(audit.allowed_path(name))
 
+    def test_vscode_extension_only_allows_source_and_package_metadata(self):
+        for name in ["package.json", "package-lock.json", "README.md", "src/extension.ts", "tests/protocol.test.ts", "assets/router.svg"]:
+            self.assertTrue(audit.allowed_path(f"clients/vscode/{name}"))
+        for name in ["dist/extension.js", "out/extension.js", "exetrouter.vsix", "src/.env", "src/private.key", "tests/node_modules/example.ts", "state.sqlite"]:
+            self.assertFalse(audit.allowed_path(f"clients/vscode/{name}"))
+
+    def test_vscode_svg_exception_allows_only_the_icon_namespace(self):
+        icon = "clients/vscode/assets/router.svg"
+        namespace = "http://" + "www.w3.org/2000/svg"
+        self.assertEqual(self.check_file(icon, f'<svg xmlns="{namespace}"/>').returncode, 0)
+        self.assertNotEqual(self.check_file(icon, f'<svg xmlns="{namespace}/other"/>').returncode, 0)
+        self.assertNotEqual(self.check_file("docs/example.md", namespace).returncode, 0)
+
     def check_file(self, name, text):
         with tempfile.TemporaryDirectory(prefix="exetrouter-publication-") as temp:
             path = Path(temp) / name
