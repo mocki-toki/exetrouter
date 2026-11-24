@@ -786,10 +786,11 @@ async fn ws_turn_metadata_pins_http_and_new_ws_continuations_without_leaking_hea
 async fn backend_options_are_forwarded_over_http_and_websocket() {
     let fixture = Fixture::start(false).await;
     let mut socket = fixture.ws().await;
-    let options = json!({"max_output_tokens":64,"stream_id":"parallel","background":true,
+    let options = json!({"stream_id":"parallel","background":true,
         "conversation":null,"context_management":[{"type":"compaction","compact_threshold":100000}],
         "future_option":{"enabled":true},"store":true});
     let mut body = request();
+    body["max_output_tokens"] = json!(64);
     for (field, value) in options.as_object().unwrap() {
         body[field] = value.clone();
     }
@@ -809,11 +810,61 @@ async fn backend_options_are_forwarded_over_http_and_websocket() {
     let sent = fixture.mock.requests.lock().unwrap().clone();
     assert_eq!(sent.len(), 2);
     for request in sent {
+        assert!(request.get("max_output_tokens").is_none());
         for (field, value) in options.as_object().unwrap() {
             assert_eq!(&request[field], value, "{field}");
         }
     }
     socket.close(None).await.unwrap();
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn codex_responses_ignores_output_limit_through_a_stateless_tool_cycle() {
+    let fixture = Fixture::start(false).await;
+    fixture.mock.tools.store(true, Ordering::SeqCst);
+    let mut body = json!({
+        "model":"gpt-test", "stream":true, "max_output_tokens":25000,
+        "input":[{"type":"message","role":"system","content":[{"type":"input_text","text":"Synthetic tool cycle."}]},
+                 {"type":"message","role":"user","content":[{"type":"input_text","text":"Use the synthetic function."}]}],
+        "reasoning":{"effort":"medium"},
+        "include":["reasoning.encrypted_content"],
+        "tools":[{"type":"function","name":"shell","parameters":{"type":"object"},"strict":false}]
+    });
+    let reply = fixture.post(body.clone()).await;
+    assert_eq!(reply.status(), 200);
+    let sse = reply.text().await.unwrap();
+    let call = sse
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["type"] == "response.output_item.done")
+        .unwrap()["item"]
+        .clone();
+    assert_eq!(call["type"], "function_call");
+    let result = json!({"type":"function_call_output","call_id":call["call_id"],"output":"synthetic tool result"});
+    body["input"]
+        .as_array_mut()
+        .unwrap()
+        .extend([call, result.clone()]);
+    body["stream"] = json!(false);
+    let reply = fixture.post(body).await;
+    assert_eq!(reply.status(), 200);
+    let reply: Value = reply.json().await.unwrap();
+    assert_eq!(
+        reply["output"][0]["content"][0]["text"],
+        "EXETROUTER_SMOKE_OK"
+    );
+    {
+        let sent = fixture.mock.requests.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert!(sent
+            .iter()
+            .all(|body| body.get("max_output_tokens").is_none()));
+        assert_eq!(sent[0]["reasoning"]["effort"], "medium");
+        assert_eq!(sent[0]["input"][0]["role"], "developer");
+        assert_eq!(sent[1]["input"][3], result);
+    }
     fixture.stop().await;
 }
 
@@ -1075,6 +1126,7 @@ async fn large_histories_reach_upstream_over_http_compact_chat_and_websocket() {
     let history = "synthetic-long-history 🌍 ".repeat(700_000);
     let mut body = request();
     body["input"][0]["content"] = json!(history);
+    body["max_output_tokens"] = json!(64);
     assert!(body.to_string().len() > 16 * 1024 * 1024);
 
     let response = fixture.post(body.clone()).await;
@@ -1095,13 +1147,15 @@ async fn large_histories_reach_upstream_over_http_compact_chat_and_websocket() {
         compact.json::<Value>().await.unwrap()["object"],
         "response.compaction"
     );
-    assert_eq!(
-        fixture.mock.compactions.lock().unwrap()[0].1["input"][0]["content"],
-        history
-    );
+    {
+        let compactions = fixture.mock.compactions.lock().unwrap();
+        assert_eq!(compactions[0].1["input"][0]["content"], history);
+        assert!(compactions[0].1.get("max_output_tokens").is_none());
+    }
 
     let mut chat = chat_request(false);
     chat["messages"][0]["content"] = json!(history);
+    chat["max_completion_tokens"] = json!(64);
     let response = fixture.chat(chat).await;
     assert_eq!(response.status(), 200);
     assert_eq!(
@@ -1120,10 +1174,14 @@ async fn large_histories_reach_upstream_over_http_compact_chat_and_websocket() {
         terminal_with_timeout(&mut socket, Duration::from_secs(30)).await["type"],
         "response.completed"
     );
-    assert_eq!(
-        fixture.mock.requests.lock().unwrap().last().unwrap()["input"][0]["content"],
-        history
-    );
+    {
+        let sent = fixture.mock.requests.lock().unwrap();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent.last().unwrap()["input"][0]["content"], history);
+        assert!(sent
+            .iter()
+            .all(|body| body.get("max_output_tokens").is_none()));
+    }
     socket.close(None).await.unwrap();
     let rows = fixture.rows().await;
     assert_eq!(rows.len(), 4);
@@ -3471,9 +3529,17 @@ async fn native_custom_namespace_phase_images_and_opaque_items_keep_order_and_ow
 }
 
 #[tokio::test]
-async fn chat_caps_are_translated_and_other_options_are_forwarded() {
+async fn chat_caps_are_ignored_by_codex_and_other_options_are_forwarded() {
     let fixture = Fixture::start(false).await;
-    for field in ["max_tokens", "max_completion_tokens"] {
+    for (index, field) in ["max_tokens", "max_completion_tokens"]
+        .into_iter()
+        .enumerate()
+    {
+        // Exercise both the native WebSocket and the pre-submission HTTP fallback.
+        fixture
+            .mock
+            .reject_websocket
+            .store(index == 1, Ordering::SeqCst);
         let mut body = chat_request(false);
         body[field] = json!(64);
         body["temperature"] = json!(0.2);
@@ -3489,7 +3555,7 @@ async fn chat_caps_are_translated_and_other_options_are_forwarded() {
             .last()
             .unwrap()
             .clone();
-        assert_eq!(sent["max_output_tokens"], 64);
+        assert!(sent.get("max_output_tokens").is_none());
         assert!(sent.get(field).is_none());
         assert_eq!(sent["temperature"], 0.2);
         assert_eq!(sent["future_option"], json!({"mode":"new"}));
@@ -3551,7 +3617,7 @@ async fn reviewer_style_chat_options_preserve_the_responses_contract() {
         assert_eq!(sent["model"], "gpt-test");
         assert_eq!(sent["input"][0]["role"], "developer");
         assert_eq!(sent["reasoning"], json!({"effort":"high"}));
-        assert_eq!(sent["max_output_tokens"], 64);
+        assert!(sent.get("max_output_tokens").is_none());
         assert_eq!(sent["temperature"], 0.2);
         assert_eq!(sent["tools"][0]["name"], "inspect_change");
         assert_eq!(sent["tools"][0]["strict"], true);

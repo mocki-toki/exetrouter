@@ -56,7 +56,7 @@ JavaScript uses `new OpenAI({baseURL, apiKey})`. For remote access, use the oper
 | stream | Boolean, default false for JSON; true for Chat SSE. |
 | stream_options | Streaming only: include_usage boolean; include_obfuscation only false. |
 | n / store | n=1 is omitted during conversion; other n values and explicit store values pass to the backend. store defaults false. |
-| max_tokens / max_completion_tokens | Translated to max_output_tokens; max_completion_tokens takes precedence when both are present. |
+| max_tokens / max_completion_tokens | Translated to max_output_tokens; max_completion_tokens takes precedence when both are present. Forwarded to Platform and ignored on Codex. |
 | reasoning_effort | String translated to reasoning.effort; the backend validates available levels. |
 | prompt_cache_key | Optional scoped stable key; see catalog contract. |
 | response_format | text/json_object/json_schema; schema name/object and optional description/strict (default false), mapped to text.format. |
@@ -85,7 +85,9 @@ Prompt/input and completion/output correspond. Cached/reasoning counters are inc
 
 ## Responses input and compaction
 
-Supply full input as a string or array. Strings become user messages, `system` becomes `developer`, absent instructions becomes empty, and `store` defaults false without replacing an explicit value. Other options pass to the backend, including `max_output_tokens`, `context_management`, `background`, `conversation`, `stream_id` and future fields; no static capability denylist is applied.
+Supply full input as a string or array. Strings become user messages, `system` becomes `developer`, absent instructions becomes empty, and `store` defaults false without replacing an explicit value. Other options, including `context_management`, `background`, `conversation`, `stream_id` and future fields, pass to the backend for validation unless explicitly documented otherwise.
+
+**Output limits:** The Platform backend receives `max_output_tokens` unchanged. The Codex subscription backend does not accept it, so the router omits it from outbound Codex Responses requests, including translated Chat, compaction and WebSocket requests. It does not cap generated tokens or subscription quota on Codex. The original limit is kept for any otherwise eligible quota-only fallback to Platform; supplying a limit does not affect routing or enable fallback.
 
 HTTP JSON is assembled from upstream SSE/completed items; SSE preserves event fields while encoding authenticated opaque values. WS omits the HTTP `stream` field and preserves native event forwarding. Routing ownership, resource bounds and adapter checks still apply.
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Accept `max_output_tokens` from compatible clients and omit it on Codex subscriptions, including translated Chat and WebSocket requests. Platform receives the limit unchanged, including on otherwise eligible quota fallback.
 - Show a partial estimate of Platform funds after known costs when some requests are unpriced. Label the excluded requests and keep complete estimates unknown in JSON; billing observations and routing are unchanged.
 - Add interactive local reset-credit redemption through `exrd admin oauth reset` and standalone `exr account reset`. Require fresh weekly depletion and explicit confirmation, share automatic recovery fences, and leave automatic policy and remote management unchanged.
 - Add conditional weekly calendar estimates that include repeated short-window exhaustion pauses when fresh, aligned observations support both rates. Keep raw and historical pace separate, explicitly label unadjusted weekly fallbacks, validate the companion window in clients, and extend causal offline replay without changing routing, polling or reset-credit rules.
