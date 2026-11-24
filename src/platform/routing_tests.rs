@@ -663,7 +663,7 @@ async fn shared_api_routes_platform_json_sse_chat_compaction_and_ws_with_parent_
     use futures_util::{SinkExt, StreamExt};
     let (dir, db, mock, upstream) = fixture().await;
     let api = Api::open(&dir, &db, upstream).await;
-    let body = json!({"model":"gpt-6-astra","input":"synthetic request","client_metadata":{"session_id":"synthetic-session","thread_id":"synthetic-thread"}});
+    let body = json!({"model":"gpt-6-astra","input":"synthetic request","max_output_tokens":32,"client_metadata":{"session_id":"synthetic-session","thread_id":"synthetic-thread"}});
     let response = api.post("responses", &body).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let value: Value = response.json().await.unwrap();
@@ -698,7 +698,7 @@ async fn shared_api_routes_platform_json_sse_chat_compaction_and_ws_with_parent_
     let chat = api
         .post(
             "chat/completions",
-            &json!({"model":"gpt-6-astra","messages":[{"role":"user","content":"synthetic chat"}]}),
+            &json!({"model":"gpt-6-astra","messages":[{"role":"user","content":"synthetic chat"}],"max_tokens":16,"max_completion_tokens":64}),
         )
         .send()
         .await
@@ -708,6 +708,11 @@ async fn shared_api_routes_platform_json_sse_chat_compaction_and_ws_with_parent_
         chat.json::<Value>().await.unwrap()["choices"][0]["message"]["content"],
         "synthetic Platform output"
     );
+    {
+        let state = mock.state.lock().unwrap();
+        assert_eq!(state.inferences[0]["max_output_tokens"], 32);
+        assert_eq!(state.inferences[3]["max_output_tokens"], 64);
+    }
     let compact = api
         .post(
             "responses/compact",
@@ -1112,7 +1117,7 @@ async fn unsupported_platform_trigger_is_rejected_before_inference_on_http_and_w
 async fn quota_refusal_falls_back_same_model_only_when_enabled_and_keeps_each_attempt_durable() {
     let (dir, db, mock, upstream) = fixture().await;
     let api = Api::open(&dir, &db, upstream.clone()).await;
-    let body = json!({"model":"gpt-6.1-sol","input":"synthetic native quota refusal"});
+    let body = json!({"model":"gpt-6.1-sol","input":"synthetic native quota refusal","max_output_tokens":32});
     let refused = api.post("responses", &body).send().await.unwrap();
     assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(mock.state.lock().unwrap().inferences.is_empty());
@@ -1145,6 +1150,10 @@ async fn quota_refusal_falls_back_same_model_only_when_enabled_and_keeps_each_at
     );
     assert_eq!(mock.state.lock().unwrap().native_inferences, 2);
     assert_eq!(mock.state.lock().unwrap().inferences.len(), 2);
+    assert_eq!(
+        mock.state.lock().unwrap().inferences[1]["max_output_tokens"],
+        32
+    );
     let proof = affinity::issue(
         "synthetic-codex-checkpoint",
         affinity::Kind::Content,
@@ -1165,6 +1174,31 @@ async fn quota_refusal_falls_back_same_model_only_when_enabled_and_keeps_each_at
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM usage_events WHERE status='completed' AND account_id=1 AND upstream_transport='platform_http_sse' AND input_tokens=11",[],|r|r.get::<_,i64>(0))?,2);
         Ok(())
     }).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_validation_refusal_never_uses_platform_even_with_an_output_limit() {
+    let (dir, db, mock, upstream) = fixture().await;
+    db.call(|conn| Resources::Both.set(conn)).await.unwrap();
+    mock.state.lock().unwrap().native_inference_bad_request = true;
+    let api = Api::open(&dir, &db, upstream).await;
+    let reply = api
+        .post(
+            "responses",
+            &json!({"model":"gpt-6.1-sol","input":"synthetic invalid request","max_output_tokens":32}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), StatusCode::BAD_REQUEST);
+    assert!(!reply
+        .text()
+        .await
+        .unwrap()
+        .contains("synthetic invalid field"));
+    let state = mock.state.lock().unwrap();
+    assert_eq!(state.native_inferences, 1);
+    assert!(state.inferences.is_empty());
 }
 
 #[tokio::test]

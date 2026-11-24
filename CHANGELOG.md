@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Accept `max_output_tokens` from compatible clients and omit it on Codex subscriptions, including translated Chat and WebSocket requests. Platform receives the limit unchanged, including on otherwise eligible quota fallback.
+
 ## 0.12.1
 
 - OpenCode Desktop plugin 0.7.1 keeps the last catalog visible across plugin reloads while the router refreshes it. Reuse is limited to the same endpoint and unchanged active credential. Unchanged refreshes no longer invalidate the OpenCode model registry.

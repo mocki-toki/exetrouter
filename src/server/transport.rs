@@ -923,6 +923,24 @@ fn prepare(payload: &mut Value, compact: bool) -> Result<bool> {
     Ok(streaming)
 }
 
+fn upstream_responses_payload(
+    payload: &Value,
+    key: &[u8],
+    user_id: i64,
+    account_id: i64,
+) -> Result<Value> {
+    let mut dispatch = affinity::upstream_payload(payload, key, user_id)?;
+    // Codex does not accept this public API field. Adapt only the outbound
+    // copy so an independently eligible Platform fallback keeps the limit.
+    if account_id > 0 {
+        dispatch
+            .as_object_mut()
+            .expect("validated Responses request")
+            .remove("max_output_tokens");
+    }
+    Ok(dispatch)
+}
+
 fn lite_mode(identity: &Identity) -> Result<bool> {
     match &identity.lite_mode {
         None => Ok(false),
@@ -1749,11 +1767,11 @@ pub(super) async fn http(
     let session = cache.identity_session;
     let thread = cache.thread;
     let stopped = state.stopped.clone();
-    let dispatch_payload = match affinity::upstream_payload(&payload, &state.key, identity.user_id)
-    {
-        Ok(value) => value,
-        Err(_) => return ContextError::Missing.response(),
-    };
+    let mut dispatch_payload =
+        match upstream_responses_payload(&payload, &state.key, identity.user_id, account.info.id) {
+            Ok(value) => value,
+            Err(_) => return ContextError::Missing.response(),
+        };
     let socket = if chat_prefers_websocket
         && account.info.id > 0
         && !crate::upstream::prefer_http(&dispatch_payload)
@@ -1810,17 +1828,18 @@ pub(super) async fn http(
     let mut response_turn_state: Option<HeaderValue> = None;
     let mut response_headers = HeaderMap::new();
     let mut source = if let Some(mut socket) = socket {
-        payload["type"] = json!("response.create");
+        dispatch_payload["type"] = json!("response.create");
         // Streaming is inherent to response.create; Codex WS rejects the HTTP
         // stream parameter. Keep it only when using the HTTP fallback below.
-        payload
+        dispatch_payload
             .as_object_mut()
             .expect("validated payload")
             .remove("stream");
         let sent = tokio::select! {
             _=wait_for_stop(stopped.clone())=>Err(WsInterruption::new("service_stopping")),
-            sent=send_upstream(&mut socket,UpstreamMessage::Text(affinity::upstream_payload(&payload, &state.key, identity.user_id).expect("validated context").to_string().into()))=>sent,
+            sent=send_upstream(&mut socket,UpstreamMessage::Text(dispatch_payload.to_string().into()))=>sent,
         };
+        drop(dispatch_payload);
         if let Err(failure) = sent {
             log.ws_interrupted(&failure.at("request_write"), None);
             if !*stopped.borrow() {
@@ -1837,13 +1856,18 @@ pub(super) async fn http(
         }
         Source::WebSocket(Box::new(socket))
     } else {
+        drop(dispatch_payload);
         let mut excluded = Vec::new();
         let response = 'http_attempt: loop {
-            let dispatch_payload =
-                match affinity::upstream_payload(&payload, &state.key, identity.user_id) {
-                    Ok(value) => value,
-                    Err(_) => return ContextError::Missing.response(),
-                };
+            let dispatch_payload = match upstream_responses_payload(
+                &payload,
+                &state.key,
+                identity.user_id,
+                account.info.id,
+            ) {
+                Ok(value) => value,
+                Err(_) => return ContextError::Missing.response(),
+            };
             let dispatch_turn = turn_state
                 .as_ref()
                 .and_then(|v| v.to_str().ok())
@@ -4184,7 +4208,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     upstream_transport=log.transport,
                     frame_sequence=client_log.frames,preparation_ms=frame_received.elapsed().as_millis() as u64);
                 let write_started = Instant::now();
-                let mut dispatch = affinity::upstream_payload(&payload, &state.key, identity.user_id)
+                let mut dispatch = upstream_responses_payload(&payload, &state.key, identity.user_id, account.info.id)
                     .map_err(|_| WsInterruption::new("context_proof_invalid"))?;
                 let mut source = match connection {
                     ResponsesConnection::WebSocket(socket) => {

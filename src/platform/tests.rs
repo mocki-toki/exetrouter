@@ -38,6 +38,7 @@ struct Observations {
     inferences: Vec<Value>,
     inference_status: Option<StatusCode>,
     native_inferences: usize,
+    native_inference_bad_request: bool,
     native_success: bool,
     native_inputs: Vec<Value>,
     interrupt_inference: bool,
@@ -98,6 +99,16 @@ async fn reply(
     if matches!(path, "/responses" | "/responses/compact" | "/embeddings") {
         if headers.get("authorization").unwrap() == "Bearer synthetic-access" {
             state.native_inferences += 1;
+            if method == Method::POST {
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert!(body.get("max_output_tokens").is_none());
+                if state.native_inference_bad_request {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error":{"type":"invalid_request_error","code":"unsupported_parameter","message":"synthetic invalid field"}})),
+                    ).into_response();
+                }
+            }
             if state.native_success {
                 if let Ok(upgrade) = upgrade {
                     use axum::extract::ws::Message;
