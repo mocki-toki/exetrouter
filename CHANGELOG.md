@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.1
+
+- OpenCode Desktop plugin 0.7.1 keeps the last catalog visible across plugin reloads while the router refreshes it. Reuse is limited to the same endpoint and unchanged active credential. Unchanged refreshes no longer invalidate the OpenCode model registry.
+- The server uses the existing database schema 21. No migration is required from 0.12.0.
+
 ## 0.12.0
 
 - Raise default per-user capacity to 12 concurrent generations and 12 client WebSockets. Explicit server overrides and global limits are unchanged.

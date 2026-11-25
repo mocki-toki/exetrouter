@@ -63,8 +63,8 @@ For a checkout with no local changes, update to the reviewed release and rebuild
 
 ```sh
 cd /absolute/path/to/exetrouter
-git fetch origin tag v0.12.0
-git switch --detach v0.12.0
+git fetch origin tag v0.12.1
+git switch --detach v0.12.1
 cd clients/opencode-desktop
 npm ci --ignore-scripts --no-audit --no-fund
 npm run typecheck
@@ -85,7 +85,7 @@ reopen the panel if necessary. Nix users must update the ExetRouter flake input
 and rebuild their managed configuration, including its plugin directory and
 configured `exrBinary`.
 
-Router 0.12.0 uses schema 21. Review the [routing resource migration](../../docs/platform-api.md#select-routing-resources) before updating a schema-20 server or standalone state. Existing schema-21 servers can use the same-schema updater. Updating only a remote-mode client or GUI does not migrate the server.
+Router 0.12.1 uses schema 21, the same as 0.12.0. Review the [routing resource migration](../../docs/platform-api.md#select-routing-resources) before updating a schema-20 server or standalone state. Existing schema-21 servers can use the same-schema updater. Updating only a remote-mode client or GUI does not migrate the server.
 
 ## Using the provider
 
