@@ -22,7 +22,9 @@ content-free catalog-status/refresh RPC. It neither edits global configuration
 nor intercepts model requests. Account-specific inventory is bound to its
 OpenCode connection, refreshed after credential changes and atomically replaced.
 A temporary same-connection discovery failure keeps the last inventory marked
-stale. A connection change cannot retain the previous inventory.
+stale. A location reload can also reuse a recent in-memory inventory while
+discovery runs, only for the same endpoint and unchanged active credential.
+Nothing is persisted and a different connection cannot see the previous inventory.
 
 The desktop main process owns the bounded native-client adapter. It reuses
 exr's existing profile, SSH identity/host-key verification and private metadata

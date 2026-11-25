@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+import { isDeepStrictEqual } from "node:util"
 import { Model, Provider } from "@opencode/plugin"
 import type { ConnectionInfo } from "@opencode/client"
 import type { CatalogStatus } from "./schemas"
@@ -106,12 +108,21 @@ export interface Inventory {
   models: Model.Info[]
   connection: ConnectionInfo
 }
-function sameAuth(a: Auth | undefined, b: Auth | undefined): boolean {
-  const identity = (auth: Auth | undefined) => auth?.connection.type === "env"
-    ? `env:${auth.connection.name}`
-    : auth ? `credential:${auth.connection.id}` : undefined
-  return a?.token === b?.token && identity(a) === identity(b)
+function connectionIdentity({ connection }: Auth): string {
+  return connection.type === "env" ? `env:${connection.name}` : `credential:${connection.id}`
 }
+function sameAuth(a: Auth | undefined, b: Auth | undefined): boolean {
+  return a && b ? a.token === b.token && connectionIdentity(a) === connectionIdentity(b) : a === b
+}
+
+type Snapshot = { models: Model.Info[]; fetchedAt: number }
+const cacheKey = Symbol.for("exetrouter.opencode.catalog.v1")
+const host = globalThis as typeof globalThis & { [cacheKey]?: Map<string, Snapshot> }
+// OpenCode can reload the plugin module as well as its location. Retain only
+// bounded, validated metadata in the server process, never the bearer or a disk cache.
+const retained = host[cacheKey] ??= new Map()
+const maxRetained = 8
+const maxAge = 2 * 60 * 60 * 1000
 
 /** One bounded refresh, coalesced callers, no previous account's inventory after a credential change. */
 export class Catalog {
@@ -131,6 +142,30 @@ export class Catalog {
     this.status = { state: "needs_token", baseURL: config.baseURL, models: 0, fetchedAt: null }
   }
 
+  private key(auth: Auth): string {
+    return createHash("sha256").update(JSON.stringify([this.config.baseURL, connectionIdentity(auth), auth.token])).digest("hex")
+  }
+
+  private install(auth: Auth, snapshot: Snapshot, state: "ready" | "stale") {
+    this.inventory = { models: snapshot.models, connection: auth.connection }
+    this.status = { ...this.status, state, models: snapshot.models.length, fetchedAt: snapshot.fetchedAt }
+  }
+
+  /** Seed a new location before its background discovery, for the exact active connection only. */
+  async restore(): Promise<void> {
+    const auth = await this.auth().catch(() => undefined)
+    if (!auth || this.stop.signal.aborted) return
+    const key = this.key(auth)
+    const snapshot = retained.get(key)
+    if (!snapshot) return
+    retained.delete(key)
+    if (Date.now() - snapshot.fetchedAt > maxAge) return
+    retained.set(key, snapshot)
+    this.owner = auth
+    this.install(auth, snapshot, "stale")
+    await this.publish()
+  }
+
   refresh(): Promise<CatalogStatus> {
     if (this.stop.signal.aborted) return Promise.resolve(this.status)
     if (this.pending) { this.rerun = true; return this.pending }
@@ -141,20 +176,24 @@ export class Catalog {
   private async run(): Promise<CatalogStatus> {
     do {
       this.rerun = false
+      let published = this.inventory
       try {
         const auth = await this.auth()
         if (!auth) {
           this.owner = undefined
           this.inventory = undefined
           this.status = { ...this.status, models: 0, fetchedAt: null, state: "needs_token" }
-          await this.publish()
+          if (published) await this.publish()
           continue
         }
         if (!sameAuth(auth, this.owner)) {
           this.owner = auth
           this.inventory = undefined
           this.status = { ...this.status, models: 0, fetchedAt: null, state: "needs_token" }
-          await this.publish()
+          if (published) {
+            await this.publish()
+            published = undefined
+          }
         }
         const signal = AbortSignal.any([this.stop.signal, AbortSignal.timeout(15_000)])
         const models = await this.load(this.config.baseURL, auth.token, signal)
@@ -165,8 +204,12 @@ export class Catalog {
           this.status = { ...this.status, models: 0, fetchedAt: null, state: "needs_token" }
           this.rerun = true
         } else {
-          this.inventory = { models, connection: auth.connection }
-          this.status = { ...this.status, state: "ready", models: models.length, fetchedAt: Date.now() }
+          const snapshot = { models, fetchedAt: Date.now() }
+          const key = this.key(auth)
+          retained.delete(key)
+          retained.set(key, snapshot)
+          if (retained.size > maxRetained) retained.delete(retained.keys().next().value!)
+          this.install(auth, snapshot, "ready")
         }
       } catch {
         // A failed request must not retain another connection's cached inventory.
@@ -180,7 +223,7 @@ export class Catalog {
           ? { ...this.status, state: "stale" }
           : { ...this.status, state: "error", models: 0, fetchedAt: null }
       }
-      if (!this.stop.signal.aborted) await this.publish()
+      if (!this.stop.signal.aborted && !isDeepStrictEqual(published, this.inventory)) await this.publish()
     } while (this.rerun && !this.stop.signal.aborted)
     return this.status
   }

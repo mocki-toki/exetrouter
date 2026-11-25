@@ -100,6 +100,50 @@ test("retains same-connection inventory on a temporary failure, but drops it on 
   await source.close()
 })
 
+test("restores only a recent catalog for the exact endpoint and credential without fetching", async () => {
+  const original = auth("reload-fixture")
+  const source = new Catalog(config, async () => original, async () => {}, async () => parseModels(catalog()))
+  const ready = await source.refresh()
+  await source.close()
+  const noNetwork = async () => { throw new Error("restore must not fetch") }
+  let publications = 0
+  const restored = new Catalog(config, async () => original, async () => { publications++ }, noNetwork)
+  await restored.restore()
+  assert.equal(publications, 1)
+  assert.deepEqual(restored.status, { ...ready, state: "stale" })
+  assert.equal(restored.inventory?.models[0].id, "test-reasoner")
+  await restored.close()
+
+  for (const [endpoint, credential] of [
+    [config, auth("replacement")],
+    [config, { ...original, connection: { type: "env", name: "OTHER_TOKEN" } } satisfies Auth],
+    [{ ...config, baseURL: "https://other.example.com/v1" }, original],
+    [config, undefined],
+  ] as const) {
+    const isolated = new Catalog(endpoint, async () => credential, async () => assert.fail("published an unrelated catalog"), noNetwork)
+    await isolated.restore()
+    assert.equal(isolated.inventory, undefined)
+    await isolated.close()
+  }
+})
+
+test("unchanged refreshes do not invalidate the OpenCode model registry", async () => {
+  let publications = 0
+  let input = 80000
+  const source = new Catalog(config, async () => auth("steady-fixture"), async () => { publications++ }, async () => {
+    const value = catalog()
+    value.providers.exetrouter.models["test-reasoner"].limit.input = input
+    return parseModels(value)
+  })
+  await source.refresh()
+  await source.refresh()
+  assert.equal(publications, 1)
+  input = 60000
+  await source.refresh()
+  assert.equal(publications, 2)
+  await source.close()
+})
+
 test("an in-flight old token cannot publish inventory after replacement, even with the same connection id", async () => {
   let current = auth("first")
   const first = deferred<ReturnType<typeof parseModels>>()

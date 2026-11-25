@@ -39,6 +39,7 @@ export default Plugin.define({
         sourceConnection: catalog.inventory?.connection,
       })
     })
+    await catalog.restore()
     await ctx.rpc.register(ExetRouter, {
       status: async () => catalog.status,
       refresh: () => catalog.refresh(),

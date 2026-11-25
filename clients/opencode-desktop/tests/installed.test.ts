@@ -10,7 +10,7 @@ import { test } from "node:test"
 import { setTimeout as delay } from "node:timers/promises"
 import { OpenCode } from "@opencode/client"
 import { ExetRouter } from "../src/rpc"
-import { catalog } from "./fixtures"
+import { catalog, deferred } from "./fixtures"
 
 const binary = process.env.EXETROUTER_OPENCODE_PLUGIN_BIN
 
@@ -38,6 +38,8 @@ test("packed plugin loads in supported OpenCode 2.2–2.4 with native credential
 
   let generationRequests = 0
   const tokens: string[] = []
+  let pause: { started: ReturnType<typeof deferred<void>>; release: ReturnType<typeof deferred<void>> } | undefined
+  let firstLimit = 80000
   const router = createServer((req, res) => {
     if (req.url !== "/v1/models/opencode-v2" || req.method !== "GET") {
       generationRequests++
@@ -46,9 +48,15 @@ test("packed plugin loads in supported OpenCode 2.2–2.4 with native credential
     }
     tokens.push(req.headers.authorization ?? "")
     const value = catalog()
-    if (req.headers.authorization === "Bearer synthetic-second") value.providers.exetrouter.models["test-reasoner"].limit.input = 70000
-    res.setHeader("content-type", "application/json")
-    res.end(JSON.stringify(value))
+    value.providers.exetrouter.models["test-reasoner"].limit.input = req.headers.authorization === "Bearer synthetic-second" ? 70000 : firstLimit
+    const reply = () => {
+      res.setHeader("content-type", "application/json")
+      res.end(JSON.stringify(value))
+    }
+    if (pause) {
+      pause.started.resolve()
+      void pause.release.promise.then(reply)
+    } else reply()
   })
   await new Promise<void>((resolve) => router.listen(0, "127.0.0.1", resolve))
   closeRouter = () => { router.closeAllConnections(); router.close() }
@@ -95,7 +103,8 @@ test("packed plugin loads in supported OpenCode 2.2–2.4 with native credential
       if (match) { clearTimeout(timer); resolve(match[1]) }
     })
   })
-  const client = OpenCode.make({ baseUrl: url, headers: { authorization: `Basic ${Buffer.from("opencode:synthetic-server-password").toString("base64")}` } })
+  const authorization = `Basic ${Buffer.from("opencode:synthetic-server-password").toString("base64")}`
+  const client = OpenCode.make({ baseUrl: url, headers: { authorization } })
   const request = { signal: AbortSignal.timeout(30_000) }
   const location = { directory: work }
   // Plugin registration is asynchronous on recent hosts even after the first model read.
@@ -126,6 +135,24 @@ test("packed plugin loads in supported OpenCode 2.2–2.4 with native credential
   assert.equal(provider.settings?.transport, "websocket")
   assert.equal(provider.settings?.store, false)
   assert.deepEqual(provider.settings?.compaction, { type: "native" })
+
+  const blocked = pause = { started: deferred<void>(), release: deferred<void>() }
+  firstLimit = 75000
+  try {
+    const reload = await fetch(`${url}/api/location/reload`, { method: "POST", headers: { authorization, "x-opencode-directory": work }, ...request })
+    assert.ok(reload.ok, `Location reload returned HTTP ${reload.status}`)
+    await blocked.started.promise
+    const cached = (await client.model.list({ location }, request)).data.find((model) => model.providerID === "exetrouter")
+    assert.equal(cached?.id, "test-reasoner", "location reload must keep the model visible while discovery is blocked")
+    assert.equal(cached.limit.input, 80000)
+    assert.equal((await client.rpc(ExetRouter).status({}, { ...request, location })).state, "stale")
+  } finally {
+    pause = undefined
+    blocked.release.resolve()
+  }
+  await client.rpc(ExetRouter).refresh({}, { ...request, location })
+  models = (await client.model.list({ location }, request)).data.filter((model) => model.providerID === "exetrouter")
+  assert.equal(models[0].limit.input, 75000)
 
   await client.integration.connect.key({ integrationID: "exetrouter", key: "synthetic-second", location }, request)
   await client.rpc(ExetRouter).refresh({}, { ...request, location })
