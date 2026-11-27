@@ -61,9 +61,15 @@ export async function registerReplay(ctx: Context, baseURL: string, auth: () => 
         if (!available.some((model) => model.providerID === providerID && model.id === event.model.id && model.modelID === model.id)) return
         const credential = await auth()
         if (!credential) return
+        const rebuild = event.kind === "compaction" || history.some((message) =>
+          ((message.type === "compaction" && message.status === "failed") || message.type === "assistant") &&
+          contextMismatch(message.error))
         const response = await fetch(`${baseURL}/responses/replay`, {
           method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
-          headers: { authorization: `Bearer ${credential.token}`, "content-type": "application/json" },
+          headers: {
+            authorization: `Bearer ${credential.token}`, "content-type": "application/json",
+            ...(rebuild ? { "x-exetrouter-replay-mode": "rebuild" } : {}),
+          },
           body: JSON.stringify({ chat: digest(event.sessionID), model: event.model.id, checkpoint }),
         })
         await response.body?.cancel()
@@ -94,6 +100,15 @@ export async function registerReplay(ctx: Context, baseURL: string, auth: () => 
 
 function validTicket(value: unknown): value is string {
   return typeof value === "string" && value.length <= 512 && proof.test(value)
+}
+
+function contextMismatch(error: unknown): boolean {
+  const rejected = error as { type?: string; response?: { body?: unknown } } | undefined
+  if (rejected?.type !== "provider.invalid-request") return false
+  const body = rejected.response?.body
+  if (typeof body !== "string" || body.length > 4096) return false
+  try { return JSON.parse(body)?.error?.code === "context_account_mismatch" }
+  catch { return false }
 }
 
 function encryptedCheckpoint(messages: unknown): string | undefined {

@@ -40,8 +40,9 @@ test("packed plugin loads and recovers legacy history on stock OpenCode against 
 
   let generationRequests = 0
   let enableReplay = false
+  let alternateAvailable = true
   const requests: Array<{ input: unknown, model: string, prompt_cache_key: string, ticket: string | undefined }> = []
-  const exchanges: Array<{ chat: string, model: string, checkpoint: string }> = []
+  const exchanges: Array<{ chat: string, model: string, checkpoint: string, rebuild: boolean }> = []
   const syntheticProof = `exrctx1.${"x".repeat(86)}.synthetic-checkpoint`
   const syntheticTicket = `exrctx1.${"y".repeat(86)}.synthetic-ticket`
   const tokens: string[] = []
@@ -53,8 +54,9 @@ test("packed plugin loads and recovers legacy history on stock OpenCode against 
       for await (const chunk of req) buffer += chunk.toString()
       const body = JSON.parse(buffer)
       if (req.url.endsWith("/replay")) {
-        exchanges.push(body)
-        res.writeHead(204, { "x-exetrouter-replay-ticket": syntheticTicket }).end()
+        const rebuild = req.headers["x-exetrouter-replay-mode"] === "rebuild"
+        exchanges.push({ ...body, rebuild })
+        res.writeHead(204, alternateAvailable || rebuild ? { "x-exetrouter-replay-ticket": syntheticTicket } : {}).end()
         return
       }
       requests.push({ input: body.input, model: body.model, prompt_cache_key: body.prompt_cache_key, ticket: req.headers["x-exetrouter-replay-ticket"]?.toString() })
@@ -268,4 +270,38 @@ test("packed plugin loads and recovers legacy history on stock OpenCode against 
   assert.equal(exchanges.length, 1)
   assert.equal(requests[3]?.ticket, undefined)
   assert.match(JSON.stringify(requests[3]?.input), /Ordinary chat/)
+
+  // Manual compaction and a new turn after a saved context rejection both need
+  // to rebuild a fork even if only its original resource is eligible.
+  alternateAvailable = false
+  for (const kind of ["compaction", "primary"]) {
+    const forkID = `ses_synthetic_legacy_fork_${kind}`
+    await post("/api/experimental/session/import", {
+      location, info: { ...template, id: forkID, title: "Legacy fork", model: selected },
+      messages: [
+        { id: `msg_fork_user_${kind}`, type: "user", time, text: "Original fork text" },
+        { id: `msg_fork_checkpoint_${kind}`, type: "compaction", status: "completed", reason: "manual", time, model: selected,
+          summary: "", native: { messages: [{ role: "assistant", content: [{ type: "compaction", provider: "exetrouter", encrypted: syntheticProof }] }] } },
+        ...(kind === "primary" ? [{ id: "msg_fork_failed", type: "compaction", status: "failed", reason: "manual", time, error: {
+          type: "provider.invalid-request", status: 400, message: "Synthetic context rejection",
+          response: { body: JSON.stringify({ error: { code: "context_account_mismatch" } }) },
+        } }] : []),
+      ],
+    })
+    const requestCount: number = requests.length
+    const exchangeCount: number = exchanges.length
+    if (kind === "compaction") await client.session.compact({ sessionID: forkID })
+    else await client.session.prompt({ sessionID: forkID, text: "Continue the same fork" })
+    await client.experimental.session.wait({ sessionID: forkID }, { signal: AbortSignal.timeout(15_000) })
+    assert.equal(exchanges.length, exchangeCount + 1)
+    assert.equal(requests.length, requestCount + 1)
+    assert.equal(exchanges.at(-1)?.rebuild, true)
+    assert.equal(requests.at(-1)?.ticket, syntheticTicket)
+    assert.match(JSON.stringify(requests.at(-1)?.input), /Original fork text/)
+    assert.doesNotMatch(JSON.stringify(requests.at(-1)?.input), /synthetic-checkpoint/)
+    if (kind === "compaction") {
+      const messages = await client.session.context({ sessionID: forkID })
+      assert.ok(messages.some((message) => message.type === "compaction" && message.status === "completed" && message.summary.includes("Preserve saved context")))
+    }
+  }
 })

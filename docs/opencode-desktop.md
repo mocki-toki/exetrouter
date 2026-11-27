@@ -46,10 +46,12 @@ does not expose account management through the OpenCode HTTP RPC surface.
   The plugin uses summary compaction so new checkpoints can be replayed on either
   resource of the same linked account. With stock OpenCode 2.4.2+ and a router
   that supports replay tickets, it can also recover an existing encrypted
-  checkpoint automatically when the linked resource is eligible. OpenCode
-  rebuilds the transcript from its own history for that chat. Once a portable
-  summary replaces the old checkpoint, OpenCode uses its normal history selection
-  again. The selected model, tool settings and prompt cache key are preserved.
+  checkpoint automatically when the linked resource is eligible. Manual
+  compaction and recovery from an account-mismatch error can also rebuild on
+  the original resource if it is eligible. OpenCode rebuilds the transcript
+  from its own history for that chat. Once a portable summary replaces the old
+  checkpoint, OpenCode uses its normal history selection again. The selected
+  model, tool settings and prompt cache key are preserved.
 - The single panel contains Overview, Usage, Tokens, Models and Settings, with
   native web controls and no separate OpenCode Settings page. The native composer
    quota indicator shows the account actually serving this chat and opens account
