@@ -38,6 +38,7 @@ pub(crate) enum Kind {
     Arguments,
     Turn,
     Conversation,
+    Replay,
 }
 impl Kind {
     fn domain(self) -> &'static [u8] {
@@ -46,6 +47,7 @@ impl Kind {
             Self::Arguments => b"exetrouter/function-affinity/v1\0",
             Self::Turn => b"exetrouter/turn-affinity/v1\0",
             Self::Conversation => b"exetrouter/conversation-affinity/v1\0",
+            Self::Replay => b"exetrouter/client-replay-affinity/v1\0",
         }
     }
 }
@@ -137,6 +139,14 @@ pub(crate) fn reference(value: &str, kind: Kind, key: &[u8], user: i64) -> Resul
 
 pub(crate) fn reasoning_owner(value: &str, key: &[u8], user: i64) -> Result<i64> {
     Ok(open(value, Kind::Content, key, user)?.1)
+}
+
+pub(crate) fn replay_owner(value: &str, scope: &str, key: &[u8], user: i64) -> Result<i64> {
+    let (actual, account) = open(value, Kind::Replay, key, user)?;
+    if actual != scope {
+        return Err("replay scope mismatch".into());
+    }
+    Ok(account)
 }
 fn open<'a>(value: &'a str, kind: Kind, key: &[u8], user: i64) -> Result<(&'a str, i64)> {
     let encoded = value
