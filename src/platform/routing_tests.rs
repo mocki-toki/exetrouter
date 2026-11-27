@@ -839,6 +839,102 @@ async fn native_handshake_quota_fallback_keeps_downstream_ws_and_recovers_platfo
 }
 
 #[tokio::test]
+async fn existing_chat_uses_its_linked_project_and_returns_to_recovered_codex() {
+    use codex_websocket::tungstenite::{client::IntoClientRequest, Message};
+    use futures_util::{SinkExt, StreamExt};
+    for platform_only in [false, true] {
+        let (dir, db, mock, upstream) = fixture().await;
+        mock.state.lock().unwrap().native_success = true;
+        db.call(|conn| Resources::Both.set(conn)).await.unwrap();
+        let api = Api::open(&dir, &db, upstream).await;
+        let mut request = (api.base.replace("http://", "ws://") + "/v1/responses")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", api.token).parse().unwrap(),
+        );
+        let (mut socket, _) = codex_websocket::connect_async(request).await.unwrap();
+        let mut full = vec![json!({"role":"user","content":"original visible text"})];
+        let mut previous = None;
+        for (step, expected) in ["resp_native_1", "resp_platform_1", "resp_native_2"]
+            .into_iter()
+            .enumerate()
+        {
+            let input = if step == 0 {
+                full.clone()
+            } else {
+                vec![json!({"role":"user","content":format!("follow-up {step}")})]
+            };
+            if step != 0 {
+                full.extend(input.clone());
+            }
+            let body = json!({"type":"response.create","model":"gpt-6.1-sol","store":false,"input":input,"previous_response_id":previous});
+            socket
+                .send(Message::Text(body.to_string().into()))
+                .await
+                .unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let message = socket.next().await.unwrap().unwrap();
+                    if let Ok(text) = message.to_text() {
+                        let event: Value = serde_json::from_str(text).unwrap();
+                        assert_ne!(event["type"], "error", "{event}");
+                        if event["type"] == "response.completed" {
+                            break event["response"].clone();
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(response["id"], expected);
+            previous = Some(expected);
+            if step < 2 {
+                full.extend(response["output"].as_array().unwrap().iter().cloned());
+            }
+            if step == 0 {
+                exhausted(&db).await;
+                if platform_only {
+                    db.call(|conn| Resources::Platform.set(conn)).await.unwrap();
+                }
+            }
+            if step == 1 {
+                db.call(|conn| {
+                    Resources::Both.set(conn)?;
+                    conn.execute("UPDATE oauth_quota_windows SET used_percent=25,observed_at=?1 WHERE account_id=1", [chrono::Utc::now().timestamp()])?;
+                    Ok(())
+                }).await.unwrap();
+            }
+        }
+        socket.close(None).await.unwrap();
+        // A full resend after reconnect may still carry reasoning from both resources.
+        let reply = api
+            .post("responses", &json!({"model":"gpt-6.1-sol","input":full}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(reply.json::<Value>().await.unwrap()["id"], "resp_native_3");
+        let state = mock.state.lock().unwrap();
+        assert_eq!(state.inferences.len(), 1);
+        assert_eq!(state.native_inputs.len(), 3);
+        let platform = state.inferences[0].to_string();
+        let returned = state.native_inputs[1].to_string();
+        assert!(
+            platform.contains("original visible text")
+                && platform.contains("synthetic Codex output")
+        );
+        assert!(
+            returned.contains("original visible text")
+                && returned.contains("synthetic Platform output")
+        );
+        assert!(!platform.contains("codex-reasoning-fixture"));
+        assert!(!returned.contains("platform-opaque-fixture"));
+    }
+}
+
+#[tokio::test]
 async fn quota_refusal_falls_back_same_model_only_when_enabled_and_keeps_each_attempt_durable() {
     let (dir, db, mock, upstream) = fixture().await;
     let api = Api::open(&dir, &db, upstream.clone()).await;

@@ -4,6 +4,60 @@ use super::*;
 use crate::platform::routes;
 
 impl Upstream {
+    pub(crate) async fn linked_platform(
+        &self,
+        model: &str,
+        parent: i64,
+    ) -> std::result::Result<Selection, SelectError> {
+        let model_id = model.to_owned();
+        let route = self
+            .db
+            .call(move |conn| {
+                if !routes::fallback_eligible(conn, &model_id, Utc::now().timestamp())? {
+                    return Ok(None);
+                }
+                routes::linked_project(conn, parent)
+            })
+            .await
+            .map_err(|_| SelectError::UpstreamUnavailable)?;
+        self.select_pinned(model, route.ok_or(SelectError::ModelUnavailable)?)
+            .await
+    }
+
+    pub(crate) async fn recovered_codex(&self, model: &str, project: i64) -> Option<Selection> {
+        let parent = self
+            .db
+            .call(move |conn| {
+                let policy = crate::platform::Policy::read(conn)?;
+                if !policy.codex() {
+                    return Ok(None);
+                }
+                let parent = routes::parent(conn, project)?;
+                if routes::linked_project(conn, parent)? != Some(project) {
+                    return Ok(None);
+                }
+                let quota = crate::quota::summary(conn, parent, Utc::now().timestamp())?;
+                let ready = !policy.platform()
+                    || (quota.status == "observed"
+                        && quota.windows.iter().all(|w| w.remaining_percent > 0.));
+                Ok(ready.then_some(parent))
+            })
+            .await
+            .ok()
+            .flatten()?;
+        self.select_pinned(model, parent).await.ok()
+    }
+
+    pub(crate) async fn linked_resources(&self, first: i64, second: i64) -> crate::Result<bool> {
+        if (first < 0) == (second < 0) {
+            return Ok(false);
+        }
+        let (project, parent) = (first.min(second), first.max(second));
+        self.db
+            .call(move |conn| Ok(routes::linked_project(conn, parent)? == Some(project)))
+            .await
+    }
+
     pub(super) async fn routing_policy(
         &self,
     ) -> std::result::Result<crate::platform::Policy, SelectError> {

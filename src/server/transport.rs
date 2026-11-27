@@ -405,6 +405,28 @@ fn backend_event_error(event: &Value) -> Option<(StatusCode, Value)> {
 }
 
 impl RequestLog {
+    fn account_observation(&self) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-exetrouter-account",
+            HeaderValue::from_str(&crate::account_preferences::observation_key(
+                &self.context_key,
+                self.user_id,
+                self.observation_account_id,
+            ))
+            .expect("hex metadata"),
+        );
+        headers.insert(
+            "x-exetrouter-resource",
+            HeaderValue::from_static(if self.account_id < 0 {
+                "platform"
+            } else {
+                "codex"
+            }),
+        );
+        headers
+    }
+
     async fn begin(
         state: &AppState,
         mut record: RequestRecord,
@@ -1096,6 +1118,71 @@ async fn token_is_active(state: &AppState, identity: &Identity) -> bool {
     )
 }
 
+/// Use the latest backend's reasoning on a reconnect, or the existing socket's
+/// when available. A full transcript can carry both sides of the linked route.
+async fn project_mixed_reasoning(
+    state: &AppState,
+    identity: &Identity,
+    upstream: &crate::upstream::Upstream,
+    payload: &mut Value,
+    bound: Option<i64>,
+) -> std::result::Result<(), ContextError> {
+    if !crate::platform::replay_safe(payload) || !payload["previous_response_id"].is_null() {
+        return Ok(());
+    }
+    let owners = replay_owners(state, identity, payload)?;
+    let (Some(first), Some(last)) = (
+        owners.iter().flatten().copied().chain(bound).min(),
+        owners.iter().flatten().copied().chain(bound).max(),
+    ) else {
+        return Ok(());
+    };
+    if first == last {
+        return Ok(());
+    }
+    if owners.iter().flatten().any(|&id| id != first && id != last)
+        || !upstream
+            .linked_resources(first, last)
+            .await
+            .map_err(|_| ContextError::Storage)?
+    {
+        return Err(ContextError::Conflict);
+    }
+    let selected = bound
+        .filter(|&id| id == first || id == last)
+        .unwrap_or_else(|| *owners.iter().flatten().next_back().expect("observed owner"));
+    retain_reasoning(payload, owners, selected);
+    Ok(())
+}
+
+fn replay_owners(
+    state: &AppState,
+    identity: &Identity,
+    payload: &Value,
+) -> std::result::Result<Vec<Option<i64>>, ContextError> {
+    payload["input"]
+        .as_array()
+        .expect("replayable transcript")
+        .iter()
+        .map(|item| {
+            crate::platform::replay_reasoning(item)
+                .map(|proof| {
+                    affinity::reasoning_owner(proof, &state.key, identity.user_id)
+                        .map_err(|_| ContextError::Missing)
+                })
+                .transpose()
+        })
+        .collect()
+}
+
+fn retain_reasoning(payload: &mut Value, owners: Vec<Option<i64>>, target: i64) {
+    let mut owners = owners.into_iter();
+    payload["input"]
+        .as_array_mut()
+        .expect("replayable transcript")
+        .retain(|_| owners.next().flatten().is_none_or(|id| id == target));
+}
+
 async fn select_context_account(
     upstream: &crate::upstream::Upstream,
     model: &str,
@@ -1111,7 +1198,7 @@ async fn select_context_account(
         if let Some(id) =
             owner.filter(|id| *id != selected.info.id && (*id < 0 || selected.info.id < 0))
         {
-            if !crate::platform::transfer_safe(payload) {
+            if !crate::platform::transfer_safe(payload) && !crate::platform::replay_safe(payload) {
                 return upstream.select_pinned(model, id).await;
             }
         }
@@ -1141,13 +1228,37 @@ async fn transfer_context(
     state: &AppState,
     identity: &Identity,
     payload: &mut Value,
+    previous_account: i64,
     account: &Account,
     pending: &mut Vec<Value>,
 ) -> std::result::Result<(), ContextError> {
     if !payload["conversation"].is_null() {
         return Err(ContextError::Conflict);
     }
-    if account.info.id < 0 && !crate::platform::transfer_safe(payload) {
+    let target = account.info.id;
+    if (previous_account < 0) != (target < 0) {
+        if !payload["previous_response_id"].is_null()
+            || !state
+                .upstream
+                .as_ref()
+                .expect("configured upstream")
+                .linked_resources(previous_account, target)
+                .await
+                .map_err(|_| ContextError::Storage)?
+        {
+            return Err(ContextError::Conflict);
+        }
+        if !crate::platform::transfer_safe(payload) {
+            if !crate::platform::replay_safe(payload) {
+                return Err(ContextError::Conflict);
+            }
+            let owners = replay_owners(state, identity, payload)?;
+            if owners.iter().flatten().any(|&id| id != previous_account) {
+                return Err(ContextError::Conflict);
+            }
+            retain_reasoning(payload, owners, target);
+        }
+    } else if target < 0 && !crate::platform::transfer_safe(payload) {
         return Err(ContextError::Conflict);
     }
     let refs = affinity::references(&payload["input"], &state.key, identity.user_id)
@@ -1257,15 +1368,7 @@ fn ws_response_metadata(
 ) -> std::result::Result<Option<String>, WsInterruption> {
     let mut safe = response_metadata(headers);
     if observe_account {
-        safe.insert(
-            "x-exetrouter-account",
-            HeaderValue::from_str(&crate::account_preferences::observation_key(
-                &log.context_key,
-                log.user_id,
-                log.observation_account_id,
-            ))
-            .expect("hex metadata"),
-        );
+        safe.extend(log.account_observation());
     }
     if let Some(value) = headers.get("x-codex-turn-state") {
         let turn = value
@@ -1381,6 +1484,11 @@ pub(super) async fn http(
         Ok(account) => account,
         Err(err) => return err.response(),
     };
+    if let Err(err) =
+        project_mixed_reasoning(&state, &identity, &upstream, &mut payload, None).await
+    {
+        return err.response();
+    }
     if turn_account.is_some_and(|account| transferred_turn(&state, &identity, &payload, account)) {
         turn_account = None;
         turn_state = None;
@@ -1456,11 +1564,12 @@ pub(super) async fn http(
         }
     };
     let mut pending_routing = Vec::new();
-    if owner.is_some_and(|id| id != account.info.id) {
+    if let Some(previous) = owner.filter(|&id| id != account.info.id) {
         if let Err(err) = transfer_context(
             &state,
             &identity,
             &mut payload,
+            previous,
             &account,
             &mut pending_routing,
         )
@@ -1665,11 +1774,20 @@ pub(super) async fn http(
                     {
                         excluded.push(account.info.id);
                         if excluded.len() < 4 {
-                            if let Ok(alternate) =
+                            if let Ok(mut alternate) =
                                 upstream.select_excluding(&model, None, &excluded).await
                             {
+                                if account.info.id > 0 && alternate.info.id < 0 {
+                                    let Ok(linked) =
+                                        upstream.linked_platform(&model, account.info.id).await
+                                    else {
+                                        break 'platform_refusal;
+                                    };
+                                    alternate = linked;
+                                }
                                 if (account.info.id < 0 || alternate.info.id < 0)
                                     && !crate::platform::transfer_safe(&payload)
+                                    && !crate::platform::replay_safe(&payload)
                                 {
                                     break 'platform_refusal;
                                 }
@@ -1677,6 +1795,7 @@ pub(super) async fn http(
                                     &state,
                                     &identity,
                                     &mut payload,
+                                    account.info.id,
                                     &alternate,
                                     &mut pending_routing,
                                 )
@@ -1778,14 +1897,7 @@ pub(super) async fn http(
         tracing::info!(event="upstream_stream_opened",request_id=%log.id,turn_state_returned=response_turn_state.is_some());
         Source::Http(response)
     };
-    let observation = identity.observe_account.then(|| {
-        HeaderValue::from_str(&crate::account_preferences::observation_key(
-            &state.key,
-            identity.user_id,
-            log.observation_account_id,
-        ))
-        .expect("hex metadata")
-    });
+    let observation = identity.observe_account.then(|| log.account_observation());
     let (send, receive) = mpsc::channel::<Bytes>(crate::payload::SSE_QUEUE_CHUNKS);
     let (mut json_send, json_receive) = tokio::sync::oneshot::channel::<Result<JsonReply>>();
     state.jobs.spawn(async move {
@@ -1993,9 +2105,7 @@ pub(super) async fn http(
     };
     response.headers_mut().extend(response_headers);
     if let Some(observation) = observation.filter(|_| response.status().is_success()) {
-        response
-            .headers_mut()
-            .insert("x-exetrouter-account", observation);
+        response.headers_mut().extend(observation);
     }
     if let Some(value) = response_turn_state {
         response.headers_mut().insert("x-codex-turn-state", value);
@@ -2249,15 +2359,7 @@ async fn platform_compact(
 fn unary_json(value: Value, log: &RequestLog, observe_account: bool) -> Response {
     let mut response = Json(value).into_response();
     if observe_account {
-        response.headers_mut().insert(
-            "x-exetrouter-account",
-            HeaderValue::from_str(&crate::account_preferences::observation_key(
-                &log.context_key,
-                log.user_id,
-                log.observation_account_id,
-            ))
-            .expect("hex metadata"),
-        );
+        response.headers_mut().extend(log.account_observation());
     }
     response
 }
@@ -3175,6 +3277,18 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             // Codex replays its first turn token even after an authorized transfer.
             // Authenticate and discard retired state before comparing it with the
             // replacement account's opaque output in a full-context request.
+            if let Err(err) = project_mixed_reasoning(
+                &state,
+                &identity,
+                &upstream,
+                &mut payload,
+                binding.as_ref().map(|b| b.account.info.id),
+            )
+            .await
+            {
+                let _ = send_client(&mut client, ws_error(err.code(), err.message())).await;
+                continue 'frames;
+            }
             let (mut context, portable) = match context_account(&state, &identity, &payload).await {
                 Ok(context) => context,
                 Err(err) => {
@@ -3260,7 +3374,13 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                             continue 'frames;
                         }
                     };
-                    if disabled
+                    let prefer_codex = if id < 0 {
+                        upstream.recovered_codex(&model, id).await
+                    } else {
+                        None
+                    };
+                    if prefer_codex.is_some()
+                        || disabled
                         || upstream.quota_exhausted(id).await.unwrap_or(false)
                         || upstream.threshold_reached(id).await.unwrap_or(false)
                         || upstream
@@ -3268,11 +3388,16 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                             .await
                             .unwrap_or(false)
                     {
-                        if let Ok(account) =
-                            select_context_account(&upstream, &model, None, Some(id), &payload)
-                                .await
-                        {
+                        let selected = match prefer_codex {
+                            Some(account) => Ok(account),
+                            None => {
+                                select_context_account(&upstream, &model, None, Some(id), &payload)
+                                    .await
+                            }
+                        };
+                        if let Ok(account) = selected {
                             if account.info.id != id {
+                                let crosses_resource = (id < 0) != (account.info.id < 0);
                                 let required =
                                     disabled || upstream.quota_exhausted(id).await.unwrap_or(true);
                                 let previous = payload
@@ -3292,10 +3417,11 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                     if !required {
                                         break 'migration;
                                     }
-                                    let code = if bound
-                                        .connection
-                                        .as_ref()
-                                        .is_some_and(ResponsesConnection::is_http)
+                                    let code = if crosses_resource
+                                        || bound
+                                            .connection
+                                            .as_ref()
+                                            .is_some_and(ResponsesConnection::is_http)
                                     {
                                         "previous_response_not_found"
                                     } else {
@@ -3304,9 +3430,19 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                     let _ = send_client(&mut client, ws_error(code, "account unavailable; full current context required before switching accounts")).await;
                                     continue 'frames;
                                 }
-                                if (id < 0 || account.info.id < 0)
+                                if crosses_resource
                                     && !crate::platform::transfer_safe(&payload)
+                                    && !crate::platform::replay_safe(&payload)
                                 {
+                                    if required {
+                                        let err = ContextError::Conflict;
+                                        let _ = send_client(
+                                            &mut client,
+                                            ws_error(err.code(), err.message()),
+                                        )
+                                        .await;
+                                        continue 'frames;
+                                    }
                                     break 'migration;
                                 }
                                 // Keep only bounded routing metadata to restore a soft
@@ -3359,6 +3495,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                             &state,
                                             &identity,
                                             &mut payload,
+                                            id,
                                             &account,
                                             &mut pending_routing,
                                         )
@@ -3371,6 +3508,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                             .await;
                                             continue 'frames;
                                         }
+                                        retired_accounts.remove(&account.info.id);
                                         let mut old = binding
                                             .replace(WsBinding::new(account, socket, metadata))
                                             .expect("bound socket");
@@ -3569,6 +3707,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         &state,
                         &identity,
                         &mut payload,
+                        initial_id,
                         &account,
                         &mut pending_routing,
                     )
@@ -4094,10 +4233,19 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 if rejected_accounts.len() < 4
                     && upstream.account_enabled(old_id).await.unwrap_or(false)
                 {
-                    if let Ok(alternate) = upstream
+                    if let Ok(mut alternate) = upstream
                         .select_excluding(&model, None, &rejected_accounts)
                         .await
                     {
+                        if old_id > 0 && alternate.info.id < 0 {
+                            match upstream.linked_platform(&model, old_id).await {
+                                Ok(linked) => alternate = linked,
+                                Err(_) => {
+                                    let _ = send_client(&mut client, refusal).await;
+                                    break 'attempt;
+                                }
+                            }
+                        }
                         let recoverable = payload
                             .get("previous_response_id")
                             .is_none_or(Value::is_null)
@@ -4136,6 +4284,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                     &state,
                                     &identity,
                                     &mut payload,
+                                    old_id,
                                     &alternate,
                                     &mut pending_routing,
                                 )

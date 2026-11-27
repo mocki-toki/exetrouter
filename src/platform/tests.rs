@@ -38,6 +38,8 @@ struct Observations {
     inferences: Vec<Value>,
     inference_status: Option<StatusCode>,
     native_inferences: usize,
+    native_success: bool,
+    native_inputs: Vec<Value>,
     interrupt_inference: bool,
 }
 struct Mock {
@@ -67,6 +69,10 @@ async fn reply(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
+    upgrade: std::result::Result<
+        axum::extract::ws::WebSocketUpgrade,
+        axum::extract::ws::rejection::WebSocketUpgradeRejection,
+    >,
     body: Bytes,
 ) -> Response {
     let pause = if uri.path() == "/organization/costs" {
@@ -80,6 +86,7 @@ async fn reply(
         entered.notify_one();
         release.notified().await;
     }
+    let observations = state.clone();
     let mut state = state.lock().unwrap();
     let now = chrono::Utc::now().timestamp();
     if method == Method::POST {
@@ -91,6 +98,34 @@ async fn reply(
     if matches!(path, "/responses" | "/responses/compact" | "/embeddings") {
         if headers.get("authorization").unwrap() == "Bearer synthetic-access" {
             state.native_inferences += 1;
+            if state.native_success {
+                if let Ok(upgrade) = upgrade {
+                    use axum::extract::ws::Message;
+                    return upgrade.on_upgrade(move |mut socket| async move {
+                        while let Some(Ok(Message::Text(request))) = socket.recv().await {
+                            let events = native_events(
+                                &observations,
+                                serde_json::from_str(&request).unwrap(),
+                            );
+                            for event in events {
+                                if socket
+                                    .send(Message::Text(event.to_string().into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                    });
+                }
+                drop(state);
+                let sse = native_events(&observations, serde_json::from_slice(&body).unwrap())
+                    .iter()
+                    .map(|event| format!("data: {event}\n\n"))
+                    .collect::<String>();
+                return ([("content-type", "text/event-stream")], sse).into_response();
+            }
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}})),
@@ -229,6 +264,17 @@ async fn reply(
         return StatusCode::NOT_FOUND.into_response();
     };
     Json(value).into_response()
+}
+
+fn native_events(state: &Mutex<Observations>, body: Value) -> [Value; 2] {
+    let model = body["model"].clone();
+    let mut state = state.lock().unwrap();
+    state.native_inputs.push(body);
+    let id = format!("resp_native_{}", state.native_inputs.len());
+    [
+        json!({"type":"response.created","response":{"id":id,"model":model,"status":"in_progress"}}),
+        json!({"type":"response.completed","response":{"id":id,"model":model,"status":"completed","output":[{"type":"reasoning","summary":[],"encrypted_content":"codex-reasoning-fixture"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic Codex output","annotations":[]}]}],"usage":{"input_tokens":11,"output_tokens":5}}}),
+    ]
 }
 async fn database() -> (tempfile::TempDir, crate::store::Database, Vault) {
     let dir = tempfile::tempdir().unwrap();
