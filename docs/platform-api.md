@@ -92,11 +92,11 @@ cached input and the existing long-context tier. Each new finalized estimate is
 frozen atomically with usage, not repriced on dashboard reads. This is not an
 invoice: external activity, tool/storage fees and service-tier adjustments are
 excluded. When some requests are unpriced (for example, after an interruption),
-the dashboard and human-readable CLI show a **partial estimate**: the entered
-amount minus known costs, with the number of excluded requests. The figure may
-overstate remaining funds. Their costs remain unknown in accounting, and the
+the dashboard and human-readable CLI still show the entered amount minus known
+costs. This can overstate remaining funds. Unpriced costs remain unknown in accounting, and the
 complete `remaining_usd_nanos` stays null in JSON; `spent_usd_nanos` contains only
-the known subtotal. Negative estimates are not clamped or used to stop routing.
+the known subtotal and `unpriced_requests` reports the number excluded. Negative
+estimates are not clamped or used to stop routing.
 
 The operator's Platform status report additionally shows **Platform organization
 estimated remaining funds**. An independent Costs API query starts at the manual-entry

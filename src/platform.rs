@@ -295,14 +295,7 @@ pub fn render(value: &serde_json::Value) -> String {
         }
         .into();
     }
-    let mut text = format!(
-        "Platform API: Admin Key configured\nProvider balance: unavailable · API routing {}",
-        if value["inference_enabled"] == true {
-            "ready"
-        } else {
-            "not ready"
-        }
-    );
+    let mut text = balance::headline(value);
     if value["costs"].is_object() {
         let costs = &value["costs"];
         let spent = costs["spent_usd_nanos"]
@@ -315,19 +308,18 @@ pub fn render(value: &serde_json::Value) -> String {
             .unwrap_or_else(|| "Unknown".into());
         text.push_str(&format!("\nOrganization costs: {spent} / {budget} reference · UTC reporting window (not a remaining balance)"));
     }
-    text.push_str(&format!("\n{}", balance::detail(value)));
+    let balance = balance::detail(value);
+    if !balance.is_empty() {
+        text.push_str(&format!("\n{balance}"));
+    }
     if let Some(state) = value["key"]["state"].as_str() {
         // Only fixed local status strings, never provider text.
-        if [
-            "active",
-            "expired",
-            "inactive",
-            "missing",
-            "operation_uncertain",
-        ]
-        .contains(&state)
-        {
-            text.push_str(&format!("\nWorking key: {state}"));
+        match state {
+            "expired" => text.push_str("\nPlatform working key expired."),
+            "operation_uncertain" => {
+                text.push_str("\nPlatform working key operation outcome is unknown.")
+            }
+            _ => {}
         }
         let date = |value: &serde_json::Value| {
             use chrono::Datelike;
@@ -346,16 +338,12 @@ pub fn render(value: &serde_json::Value) -> String {
                 })
                 .unwrap_or_else(|| "Unknown".into())
         };
-        text.push_str(&format!(
-            "\nCreated {} · Expires {} · Used {}",
-            date(&value["key"]["created_at"]),
-            date(&value["key"]["expires_at"]),
-            if value["key"]["last_used_at"].is_null() {
-                "Never".into()
-            } else {
-                date(&value["key"]["last_used_at"])
-            }
-        ));
+        if value["key"]["expires_at"].is_i64() {
+            text.push_str(&format!(
+                "\nWorking key expires {}",
+                date(&value["key"]["expires_at"])
+            ));
+        }
     }
     if let Some(resources) = resource_text {
         text.push_str(&format!("\n{resources}"));
