@@ -21,8 +21,8 @@ export function subscriptionPlan(price: number | null | undefined): string | und
   if (price === 100 || price === 200) return `Pro ${dollars(price)}`
   return `${dollars(price)}/month`
 }
-export function percent(value: number | null): string {
-  return value === null ? "Unknown" : `${new Intl.NumberFormat("en", { maximumFractionDigits: 1 }).format(value)}%`
+export function percent(value: number | null, maximumFractionDigits = 1): string {
+  return value === null ? "Unknown" : `${new Intl.NumberFormat("en", { maximumFractionDigits }).format(value)}%`
 }
 export function date(seconds: number | null | undefined): string {
   if (seconds == null) return "Unknown"
