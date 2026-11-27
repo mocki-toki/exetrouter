@@ -1,8 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.12.2
 
+- Continue a chat on a linked Platform project when Codex quota is exhausted, and return to Codex on the first eligible request after recovery. Clients that send complete history or a textual summary need no plugin.
+- OpenCode Desktop plugin 0.7.2 uses portable summary compaction and can rebuild saved history for a legacy encrypted checkpoint. Manual compaction and recovery from a context ownership rejection can rebuild on the original eligible resource. The existing chat, selected model, tool settings, and prompt cache key are preserved.
+- Show the resource actually serving each OpenCode chat and round the composer's quota percentages to whole numbers. Simplify Platform balance displays; the dashboard preserves the last observed balance without adding refresh-error text.
+- Add a VS Code extension with ExetRouter chat models and a dashboard for account quotas, usage, tokens, and models. The extension can be built from source.
 - Accept `max_output_tokens` from compatible clients and omit it on Codex subscriptions, including translated Chat and WebSocket requests. Platform receives the limit unchanged, including on otherwise eligible quota fallback.
+- The server still uses database schema 21. No migration is required from 0.12.0 or 0.12.1.
 
 ## 0.12.1
 
