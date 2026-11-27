@@ -258,9 +258,13 @@ test("account quota meters show Platform percentage above the manual dollar esti
   ])
   assert.deepEqual(row.children?.at(-1)?.args, [1])
   assert.equal(row.children?.at(-1)?.description, "50% left")
-  const [unknown] = accountRows({ schema_version: 1, quota_accounts: [{ platform: { balance: null } }] })
+  assert.equal(row.children?.at(-1)?.detail, "$43 / $86")
+  const [unknown] = accountRows({ schema_version: 1, quota_accounts: [{
+    platform: { balance: null, refresh_error: "synthetic private error" },
+  }] })
   assert.equal(unknown.meters?.[0]?.remaining, null)
   assert.equal(unknown.meters?.[0]?.caption, "Unknown")
+  assert.equal(unknown.children?.at(-1)?.detail, "Unknown · Platform refresh failed")
 })
 
 test("usage charts keep missing counters unknown, distinguish zero and flag unpriced estimates", () => {
