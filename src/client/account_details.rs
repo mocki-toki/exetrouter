@@ -125,9 +125,6 @@ pub(super) fn platform_summary(platform: &Value) -> (String, Option<f64>) {
     if let Some(initial) = initial {
         amount.push_str(&format!(" / {}", dollars(initial)));
     }
-    if platform["refresh_error"].is_string() {
-        amount.push_str(" · Platform refresh failed");
-    }
     let percent = remaining
         .zip(initial)
         .filter(|(_, initial)| *initial > 0)

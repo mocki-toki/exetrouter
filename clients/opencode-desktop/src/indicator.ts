@@ -15,7 +15,7 @@ export function quotaIndicator(state: DashboardState | undefined, now: number, o
     return {
       id: account.id,
       label: `Platform API ${percent(platformPercent(platformRemaining(balance), balance?.initialUSD), 0)}`,
-      title: `${title} via Platform API${account.platform?.refreshError ? " · Platform refresh failed" : ""}`,
+      title: `${title} via Platform API`,
     }
   }
   const windows = visibleWindows(account)

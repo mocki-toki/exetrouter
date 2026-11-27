@@ -337,7 +337,8 @@ test("rendered panel has five native web views, account details, usage graph, to
     setState(old => ({ ...old, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map(a => ({
       ...a, platform: a.platform && { ...a.platform, refreshError: true },
     })) } }))
-    assert.match(root.querySelector('.exr-platform [role="status"]')!.textContent, /Platform refresh failed/)
+    assert.equal(root.querySelector('.exr-platform .exr-quota')?.getAttribute('data-tone'), 'neutral')
+    assert.equal(root.querySelector('.exr-platform .exr-inline.exr-caption')?.textContent, '$99 / $100')
     platformHistory=undefined
     setState(old=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map(a=>({...a,platform:null,history:a.history?{...a.history,platform:null}:a.history}))}}))
     assert.equal(history.querySelector('[data-window="platform"]'),null)

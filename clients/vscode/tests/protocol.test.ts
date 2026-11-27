@@ -264,7 +264,8 @@ test("account quota meters show Platform percentage above the manual dollar esti
   }] })
   assert.equal(unknown.meters?.[0]?.remaining, null)
   assert.equal(unknown.meters?.[0]?.caption, "Unknown")
-  assert.equal(unknown.children?.at(-1)?.detail, "Unknown · Platform refresh failed")
+  assert.equal(unknown.meters?.[0]?.historical, true)
+  assert.equal(unknown.children?.at(-1)?.detail, "Unknown")
 })
 
 test("usage charts keep missing counters unknown, distinguish zero and flag unpriced estimates", () => {

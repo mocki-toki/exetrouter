@@ -5,7 +5,6 @@ export interface QuotaMeter {
   remaining: number | null
   caption: string
   historical?: boolean
-  hint?: string
 }
 
 export interface Row {
@@ -56,7 +55,7 @@ function platformMeter(value: unknown): QuotaMeter {
     label: "Platform API",
     remaining: left !== null && initial !== null && initial > 0 ? Math.max(0, Math.min(100, left / initial * 100)) : null,
     caption: `${left === null ? "Unknown" : dollars(left)}${initial === null ? "" : ` / ${dollars(initial)}`}`,
-    ...(platform.refresh_error ? { hint: "Platform refresh failed", historical: true } : {}),
+    historical: typeof platform.refresh_error === "string",
   }
 }
 
@@ -114,7 +113,7 @@ export function accountRows(body: unknown): Row[] {
       children.push({
         label: meter.label,
         description: meter.remaining === null ? "Unknown remaining" : percent(meter.remaining),
-        detail: meter.hint ? `${meter.caption} · ${meter.hint}` : meter.caption,
+        detail: meter.caption,
         ...history,
       })
     }
