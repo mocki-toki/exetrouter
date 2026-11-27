@@ -321,6 +321,9 @@ test("rendered panel has five native web views, account details, usage graph, to
     const estimate={remainingUSD:99,spentUSD:1,through:report.checkedAt,observedAt:report.checkedAt,unpriced:0,status:"estimated"}
     setState(old=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map(a=>({...a,history:a.history?{...a.history}:a.history,platform:a.platform?{...a.platform,balance:{enteredAt,initialUSD:100,exetrouter:estimate,organization:{...estimate,remainingUSD:97,spentUSD:3,status:"delayed_report"}}}:a.platform}))}}))
     assert.match(root.querySelector('.exr-platform')!.textContent,/\$99 \/ \$100/)
+    assert.equal(root.querySelector('.exr-platform .exr-quota')?.getAttribute('data-tone'), 'success')
+    assert.equal(root.querySelector('.exr-platform strong')?.textContent, '99% left')
+    assert.equal(root.querySelector('.exr-platform .exr-inline.exr-caption')?.textContent, '$99 / $100')
     assert.match(accountDialog.querySelector('.exr-detail-quotas > .exr-platform')!.textContent,/\$99 \/ \$100/)
     assert.doesNotMatch(accountDialog.textContent,/ExetRouter only|Platform organization|Platform API costs|Organization-wide|Working key|Billing source|Set by the server operator|does not confirm|Tokens disappear|no automatic monthly refill/)
     await delay(10)

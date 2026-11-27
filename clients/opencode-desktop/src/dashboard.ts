@@ -16,12 +16,13 @@ export function visibleWindows(account: Account): readonly Window[] {
 }
 
 export function platformRemaining(balance: typeof PlatformBalance.Type | null | undefined) {
-  if (!balance) return { usd: null, excluded: 0 }
+  if (!balance) return null
   const estimate = balance.exetrouter
+  if (estimate.remainingUSD !== null) return estimate.remainingUSD
   if (estimate.status === "unpriced_requests" && estimate.unpriced > 0 && estimate.spentUSD !== null) {
-    return { usd: balance.initialUSD - estimate.spentUSD, excluded: estimate.unpriced }
+    return balance.initialUSD - estimate.spentUSD
   }
-  return { usd: estimate.remainingUSD, excluded: 0 }
+  return null
 }
 
 export function platformPercent(remainingUSD: number | null, initialUSD: number | undefined) {
