@@ -318,12 +318,15 @@ test("rendered panel has five native web views, account details, usage graph, to
     assert.match(accountDialog.querySelector('.exr-platform')!.textContent,/Unknown/)
     const bucket=report.accounts[0].history!.to-3600, enteredAt=bucket-3600
     platformHistory={enteredAt,initialUSD:100,throughBucket:bucket,points:[{hour:enteredAt,left:100},{hour:bucket,left:99}]}
-    const estimate={remainingUSD:99,spentUSD:1,through:report.checkedAt,observedAt:report.checkedAt,unpriced:0,status:"estimated"}
-    setState(old=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map(a=>({...a,history:a.history?{...a.history}:a.history,platform:a.platform?{...a.platform,balance:{enteredAt,initialUSD:100,exetrouter:estimate,organization:{...estimate,remainingUSD:97,spentUSD:3,status:"delayed_report"}}}:a.platform}))}}))
+    const estimate={remainingUSD:null,spentUSD:1,through:report.checkedAt,observedAt:report.checkedAt,unpriced:1,status:"unpriced_requests"}
+    setState(old=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map(a=>({...a,history:a.history?{...a.history}:a.history,platform:a.platform?{...a.platform,balance:{enteredAt,initialUSD:100,exetrouter:estimate,organization:{...estimate,remainingUSD:97,spentUSD:3,unpriced:0,status:"delayed_report"}}}:a.platform}))}}))
     assert.match(root.querySelector('.exr-platform')!.textContent,/\$99 \/ \$100/)
     assert.equal(root.querySelector('.exr-platform .exr-quota')?.getAttribute('data-tone'), 'success')
     assert.equal(root.querySelector('.exr-platform strong')?.textContent, '99% left')
     assert.equal(root.querySelector('.exr-platform .exr-inline.exr-caption')?.textContent, '$99 / $100')
+    const platformLabel = root.querySelector('.exr-platform .exr-inline > span')!
+    assert.equal(platformLabel.textContent, 'Platform API')
+    assert.equal(platformLabel.hasAttribute('title'), false)
     assert.match(accountDialog.querySelector('.exr-detail-quotas > .exr-platform')!.textContent,/\$99 \/ \$100/)
     assert.doesNotMatch(accountDialog.textContent,/ExetRouter only|Platform organization|Platform API costs|Organization-wide|Working key|Billing source|Set by the server operator|does not confirm|Tokens disappear|no automatic monthly refill/)
     await delay(10)
@@ -331,6 +334,10 @@ test("rendered panel has five native web views, account details, usage graph, to
     history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"End",bubbles:true}))
     assert.match(accountDialog.querySelector('[role="status"]')!.textContent,/Platform API.*99% left/)
     history.dispatchEvent(new window.KeyboardEvent("keydown",{key:"Home",bubbles:true}))
+    setState(old => ({ ...old, snapshot: { ...old.snapshot, accounts: old.snapshot.accounts.map(a => ({
+      ...a, platform: a.platform && { ...a.platform, refreshError: true },
+    })) } }))
+    assert.match(root.querySelector('.exr-platform [role="status"]')!.textContent, /Platform refresh failed/)
     platformHistory=undefined
     setState(old=>({...old,snapshot:{...old.snapshot,accounts:old.snapshot.accounts.map(a=>({...a,platform:null,history:a.history?{...a.history,platform:null}:a.history}))}}))
     assert.equal(history.querySelector('[data-window="platform"]'),null)
