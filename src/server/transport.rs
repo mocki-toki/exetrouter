@@ -1000,6 +1000,111 @@ impl ContextError {
         (if storage { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::BAD_REQUEST },Json(json!({"error":{"type":if storage {"storage_unavailable"} else {"invalid_request_error"},"code":self.code(),"message":self.message()}}))).into_response()
     }
 }
+
+fn replay_scope(chat: &str, model: &str) -> Option<String> {
+    (chat.len() == 64
+        && chat
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && !model.is_empty()
+        && model.len() <= 256
+        && model.bytes().all(|b| b.is_ascii_graphic()))
+    .then(|| format!("{chat}.{model}"))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReplayRequest {
+    chat: String,
+    model: String,
+    checkpoint: String,
+}
+
+/// Exchange an already issued, user-owned opaque proof for an account-only
+/// ticket. This endpoint never connects to either inference backend.
+pub(super) async fn replay_ticket(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    body: std::result::Result<Json<ReplayRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = body else {
+        return ContextError::Invalid.response();
+    };
+    let Some(scope) = replay_scope(&body.chat, &body.model) else {
+        return ContextError::Invalid.response();
+    };
+    let Ok(owner) = affinity::reasoning_owner(&body.checkpoint, &state.key, identity.user_id)
+    else {
+        return ContextError::Missing.response();
+    };
+    let Some(upstream) = &state.upstream else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    if upstream
+        .replay_replacement(&body.model, owner)
+        .await
+        .is_none()
+    {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    match affinity::issue(
+        &scope,
+        affinity::Kind::Replay,
+        &state.key,
+        identity.user_id,
+        owner,
+    ) {
+        Ok(ticket) => (
+            StatusCode::NO_CONTENT,
+            [
+                ("cache-control", "no-store"),
+                ("x-exetrouter-replay-ticket", ticket.as_str()),
+            ],
+        )
+            .into_response(),
+        Err(_) => ContextError::Storage.response(),
+    }
+}
+
+fn replay_owner(
+    state: &AppState,
+    identity: &Identity,
+    model: &str,
+) -> std::result::Result<Option<i64>, ContextError> {
+    match (&identity.replay_ticket, &identity.replay_chat) {
+        (None, None) => Ok(None),
+        (Some(ticket), Some(chat)) => {
+            let scope = chat
+                .to_str()
+                .ok()
+                .and_then(|chat| replay_scope(chat, model))
+                .ok_or(ContextError::Invalid)?;
+            let ticket = ticket.to_str().map_err(|_| ContextError::Invalid)?;
+            affinity::replay_owner(ticket, &scope, &state.key, identity.user_id)
+                .map(Some)
+                .map_err(|_| ContextError::Missing)
+        }
+        _ => Err(ContextError::Invalid),
+    }
+}
+
+async fn verify_replay_owner(
+    upstream: &crate::upstream::Upstream,
+    replay: Option<i64>,
+    context: Option<i64>,
+) -> std::result::Result<(), ContextError> {
+    if let Some((replay, context)) = replay.zip(context).filter(|(a, b)| a != b) {
+        if !upstream
+            .linked_resources(replay, context)
+            .await
+            .map_err(|_| ContextError::Storage)?
+        {
+            return Err(ContextError::Conflict);
+        }
+    }
+    Ok(())
+}
+
 async fn context_account(
     state: &AppState,
     identity: &Identity,
@@ -1127,12 +1232,20 @@ async fn select_context_account(
     session: Option<&str>,
     owner: Option<i64>,
     payload: &Value,
+    replay: Option<i64>,
 ) -> std::result::Result<crate::upstream::Selection, crate::upstream::SelectError> {
     if !payload["conversation"].is_null() {
         let id = owner.ok_or(crate::upstream::SelectError::UpstreamUnavailable)?;
         upstream.select_pinned(model, id).await
     } else {
-        let selected = upstream.select_continuation(model, session, owner).await?;
+        let owner = owner.or(replay);
+        let selected = if replay.is_some() {
+            upstream
+                .select_replay(model, owner.expect("replay owner"))
+                .await?
+        } else {
+            upstream.select_continuation(model, session, owner).await?
+        };
         if let Some(id) =
             owner.filter(|id| *id != selected.info.id && (*id < 0 || selected.info.id < 0))
         {
@@ -1466,12 +1579,20 @@ pub(super) async fn http(
         return ContextError::Conflict.response();
     }
     let owner = context.or(turn_account);
+    let replay = match replay_owner(&state, &identity, &model) {
+        Ok(replay) => replay,
+        Err(err) => return err.response(),
+    };
+    if let Err(err) = verify_replay_owner(&upstream, replay, owner).await {
+        return err.response();
+    }
     let selected = select_context_account(
         &upstream,
         &model,
         cache.preferred.then_some(cache.session.as_str()),
         owner,
         &payload,
+        replay,
     )
     .await;
     let mut account = match selected {
@@ -1718,17 +1839,15 @@ pub(super) async fn http(
                     {
                         excluded.push(account.info.id);
                         if excluded.len() < 4 {
-                            if let Ok(mut alternate) =
-                                upstream.select_excluding(&model, None, &excluded).await
+                            if let Ok(alternate) = upstream
+                                .select_after_quota_refusal(
+                                    &model,
+                                    account.info.id,
+                                    &excluded,
+                                    replay.is_some(),
+                                )
+                                .await
                             {
-                                if account.info.id > 0 && alternate.info.id < 0 {
-                                    let Ok(linked) =
-                                        upstream.linked_platform(&model, account.info.id).await
-                                    else {
-                                        break 'platform_refusal;
-                                    };
-                                    alternate = linked;
-                                }
                                 if (account.info.id < 0 || alternate.info.id < 0)
                                     && !crate::platform::transfer_safe(&payload)
                                     && !crate::platform::replay_safe(&payload)
@@ -3109,6 +3228,13 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             .await;
             continue;
         };
+        let replay = match replay_owner(&state, &identity, &model) {
+            Ok(replay) => replay,
+            Err(err) => {
+                let _ = send_client(&mut client, ws_error(err.code(), err.message())).await;
+                continue;
+            }
+        };
         normalize_messages(&mut payload);
         if enforce_fast_mode(&state, &identity, &mut payload)
             .await
@@ -3276,6 +3402,10 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 continue 'frames;
             }
             let context = context.or(owner);
+            if let Err(err) = verify_replay_owner(&upstream, replay, context).await {
+                let _ = send_client(&mut client, ws_error(err.code(), err.message())).await;
+                continue 'frames;
+            }
             if let Some(value) = &frame_turn {
                 let metadata = payload
                     .as_object_mut()
@@ -3344,8 +3474,15 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         let selected = match prefer_codex {
                             Some(account) => Ok(account),
                             None => {
-                                select_context_account(&upstream, &model, None, Some(id), &payload)
-                                    .await
+                                select_context_account(
+                                    &upstream,
+                                    &model,
+                                    None,
+                                    Some(id),
+                                    &payload,
+                                    replay,
+                                )
+                                .await
                             }
                         };
                         if let Ok(account) = selected {
@@ -3420,6 +3557,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                             )
                                             .expect("validated context"),
                                             responses_lite,
+                                            replay.is_some(),
                                         )
                                         .instrument(client_log.handshake_span())
                                         .await
@@ -3524,6 +3662,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     cache.preferred.then_some(cache.session.as_str()),
                     context,
                     &payload,
+                    replay,
                 )
                 .await;
                 let account = match selected {
@@ -3599,6 +3738,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         &mut affinity::upstream_payload(&payload, &state.key, identity.user_id)
                             .expect("validated context"),
                         responses_lite,
+                        replay.is_some(),
                     )
                     .instrument(client_log.handshake_span())
                     .await
@@ -4163,19 +4303,15 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 if rejected_accounts.len() < 4
                     && upstream.account_enabled(old_id).await.unwrap_or(false)
                 {
-                    if let Ok(mut alternate) = upstream
-                        .select_excluding(&model, None, &rejected_accounts)
+                    if let Ok(alternate) = upstream
+                        .select_after_quota_refusal(
+                            &model,
+                            old_id,
+                            &rejected_accounts,
+                            replay.is_some(),
+                        )
                         .await
                     {
-                        if old_id > 0 && alternate.info.id < 0 {
-                            match upstream.linked_platform(&model, old_id).await {
-                                Ok(linked) => alternate = linked,
-                                Err(_) => {
-                                    let _ = send_client(&mut client, refusal).await;
-                                    break 'attempt;
-                                }
-                            }
-                        }
                         let recoverable = payload
                             .get("previous_response_id")
                             .is_none_or(Value::is_null)
@@ -4206,6 +4342,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                     )
                                     .expect("validated context"),
                                     responses_lite,
+                                    replay.is_some(),
                                 )
                                 .instrument(client_log.handshake_span())
                                 .await

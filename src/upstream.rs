@@ -1290,6 +1290,7 @@ impl Upstream {
         identity: (&str, &str),
         payload: &mut Value,
         responses_lite: bool,
+        same_pair: bool,
     ) -> std::result::Result<(Selection, ResponsesConnection, HeaderMap), SocketError> {
         let mut excluded = Vec::new();
         loop {
@@ -1303,16 +1304,10 @@ impl Upstream {
                     if excluded.len() >= 4 {
                         return Err(SocketError::Cooldown(until));
                     }
-                    let mut alternate = self
-                        .select_excluding(model, None, &excluded)
+                    let alternate = self
+                        .select_after_quota_refusal(model, account.info.id, &excluded, same_pair)
                         .await
                         .map_err(|_| SocketError::Cooldown(until))?;
-                    if account.info.id > 0 && alternate.info.id < 0 {
-                        alternate = self
-                            .linked_platform(model, account.info.id)
-                            .await
-                            .map_err(|_| SocketError::Cooldown(until))?;
-                    }
                     if (account.info.id < 0 || alternate.info.id < 0)
                         && !crate::platform::transfer_safe(payload)
                         && !crate::platform::replay_safe(payload)
