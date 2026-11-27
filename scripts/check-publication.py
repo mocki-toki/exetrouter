@@ -15,6 +15,8 @@ DESKTOP_ROOT_FILES = {".gitignore", "README.md", "package.json", "package-lock.j
 VSCODE_EXTENSION = "clients/vscode"
 VSCODE_ROOT_FILES = {".gitignore", ".vscodeignore", "LICENSE", "README.md", "package.json", "package-lock.json", "tsconfig.json"}
 VSCODE_ICON = f"{VSCODE_EXTENSION}/assets/router.svg"
+VSCODE_CHART_SCRIPT = f"{VSCODE_EXTENSION}/assets/charts.js"
+VSCODE_ASSETS = {VSCODE_ICON, VSCODE_CHART_SCRIPT, f"{VSCODE_EXTENSION}/assets/charts.css"}
 V1_FILES = {"README.md", "package.json", "context.js", "context.test.js"}
 LOCKFILE_FUNDING_HOSTS = {"feross.org", "opencollective.com", "paypal.me", "tidelift.com", "www.patreon.com"}
 SECRET_PATTERNS = [
@@ -44,7 +46,7 @@ def allowed_path(name):
                 return False
         elif parts[1] == "vscode":
             if not (len(parts) == 3 and parts[2] in VSCODE_ROOT_FILES) and not (
-                (parts[2] in {"src", "tests"} and Path(name).suffix == ".ts") or name == VSCODE_ICON
+                (parts[2] in {"src", "tests"} and Path(name).suffix == ".ts") or name in VSCODE_ASSETS
             ):
                 return False
         else:
@@ -124,7 +126,7 @@ def main():
                 except ValueError:
                     continue  # Deliberately malformed URL fixtures.
                 reviewed_funding = name == f"{DESKTOP_PLUGIN}/package-lock.json" and host in LOCKFILE_FUNDING_HOSTS
-                svg_namespace = name == VSCODE_ICON and parsed == ("http", "www.w3.org", "/2000/svg", "", "")
+                svg_namespace = name in {VSCODE_ICON, VSCODE_CHART_SCRIPT} and parsed == ("http", "www.w3.org", "/2000/svg", "", "")
                 if not allowed_host(host) and not (reviewed_funding or svg_namespace):
                     errors.append((name, "unreviewed concrete endpoint"))
                     break

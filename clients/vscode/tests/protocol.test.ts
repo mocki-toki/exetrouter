@@ -4,7 +4,8 @@ import { createServer, type RequestListener } from "node:http"
 import { once } from "node:events"
 import { AddressInfo } from "node:net"
 import { baseUrl, catalog, discover, secretKey } from "../src/catalog"
-import { accountRows, statusSummary, usageRows } from "../src/dashboard"
+import { accountRows, statusSummary, tokenRows } from "../src/dashboard"
+import { quotaChart, usageChart } from "../src/charts"
 import { generate, history, type Emission } from "../src/responses"
 
 async function fixture(handler: RequestListener) {
@@ -188,6 +189,19 @@ test("catalog projects actual limits, routes and capabilities; secret keys isola
   assert.throws(() => baseUrl("https://router.example/responses"))
 })
 
+test("catalog reports authorization, wrong endpoint, and invalid JSON without exposing the response", async (t) => {
+  let request = 0
+  const api = await fixture((_req, res) => {
+    res.writeHead([401, 404, 200][request++])
+    res.end("private synthetic response")
+  })
+  t.after(api.close)
+  const fetch = () => discover(api.base, "fixture", new AbortController().signal)
+  await assert.rejects(fetch, { message: "API token rejected (HTTP 401).", status: 401 })
+  await assert.rejects(fetch, { message: "The configured API address does not serve /v1/models.", status: 404 })
+  await assert.rejects(fetch, { message: "The configured endpoint did not return a valid model catalog." })
+})
+
 test("distinguishes router quota failures and preserves upstream error privacy", async (t) => {
   let requests = 0
   const api = await fixture((_req, res) => {
@@ -230,8 +244,38 @@ test("all account statuses remain visible, including unknowns and disabled accou
   )
   assert.match(rows[0].detail!, /Unknown remaining · stale/)
   assert.equal(statusSummary(rows), "3 accounts · 3 states")
-  assert.match(
-    usageRows({ rows: [{ name: "one", requests: 1, cached_input_tokens: 0, output_tokens: null }] })[0].detail!,
-    /Cached input: 0 · Output: Unknown/,
-  )
+})
+
+test("usage charts keep missing counters unknown, distinguish zero and flag unpriced estimates", () => {
+  const row = { name: "one", requests: 1, total_tokens: null, cached_input_tokens: 0, unknown_usage: 1, unpriced_requests: 1 }
+  const report = { from_utc: 100, to_utc: 400, rows: [row], timeline: [
+    { from_utc: 100, to_utc: 200, rows: [row] }, { from_utc: 300, to_utc: 400, rows: [] },
+  ] }
+  assert.deepEqual(usageChart(report, "tokens").series[0]?.points, [[100, null, false], [300, 0, true]])
+  assert.deepEqual(usageChart(report, "requests").series[0]?.points, [[100, 1, false], [300, 0, true]])
+  assert.equal(usageChart(report, "tokens").breakdown?.[0]?.cached, 0)
+  assert.equal(usageChart(report, "tokens").breakdown?.[0]?.output, null)
+  assert.match(usageChart(report, "usd").summary!, /no price estimate/)
+})
+
+test("quota chart uses actual durations and leaves gaps and Platform estimate boundaries intact", () => {
+  const chart = quotaChart({ from_utc: 0, to_utc: 5000, interval_seconds: 600, points: [
+    { hour: 0, kind: "primary", used_percent: 0, window_minutes: 480 },
+    { hour: 600, kind: "primary", used_percent: 50, window_minutes: 480 },
+    { hour: 600, kind: "secondary", used_percent: 80, window_minutes: 10080 },
+    { hour: 1800, kind: "primary", used_percent: 100, window_minutes: 480 },
+  ], platform_balance: { through_bucket: 2400, points: [{ hour: 600, remaining_percent: 99 }, { hour: 1200, remaining_percent: 90 }] } })
+  assert.equal(chart.series[0]?.label, "8-hour window")
+  assert.deepEqual(chart.series[0]?.points, [[0, 100, false], [600, 50, false], [1800, 0, true]])
+  assert.equal(chart.series[1]?.label, "Weekly")
+  assert.deepEqual(chart.series[2]?.points, [[600, 99], [1200, 90], [2400, 90]])
+  assert.equal(chart.series[2]?.step, true)
+})
+
+test("token rows separate lifecycle status and the saved Fast override", () => {
+  const [a, b, c] = tokenRows([{ fast_mode: true }, { fast_mode: false, disabled: true }, {}])
+  assert.equal(a.description, "Active · Fast allowed")
+  assert.equal(b.tokenState, "Disabled")
+  assert.equal(b.description, "Disabled · Fast blocked")
+  assert.equal(c.fastMode, null)
 })

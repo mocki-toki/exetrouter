@@ -1,0 +1,30 @@
+* { box-sizing: border-box; }
+body { color: var(--vscode-foreground); padding: 0; }
+main { max-width: 1100px; margin: auto; padding: 12px; }
+header, #controls, #legend { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+header { justify-content: space-between; margin-bottom: 10px; }
+h1 { font-size: 1.3em; margin: 0; font-weight: 600; }
+#range, #notice, #cursor { color: var(--vscode-descriptionForeground); line-height: 1.45; }
+#range, #notice { margin: 4px 0 8px; }
+button, select { font: inherit; border: 1px solid var(--vscode-contrastBorder, transparent); border-radius: 3px; padding: 3px 6px; }
+button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; }
+button:hover { background: var(--vscode-button-secondaryHoverBackground); }
+select { background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border-color: var(--vscode-dropdown-border, transparent); }
+:is(button, select, svg):focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+label { display: inline-flex; align-items: baseline; gap: 4px; }
+#legend { margin: 8px 0; }
+#legend button { display: inline-flex; align-items: center; gap: 4px; }
+#legend button[aria-pressed=false] { opacity: .55; }
+#legend svg { width: 10px; height: 10px; }
+#plot { margin: 8px 0; border: 1px solid var(--vscode-panel-border); border-radius: 4px; }
+#chart { display: block; width: 100%; height: clamp(210px, 43vh, 390px); cursor: crosshair; }
+#chart text { fill: var(--vscode-descriptionForeground); font-size: 10px; }
+.grid { stroke: var(--vscode-chart-line, var(--vscode-panel-border)); opacity: .5; }
+.marker { stroke: var(--vscode-focusBorder); stroke-dasharray: 3 3; }
+#cursor { min-height: 24px; display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 0 8px 5px; }
+table { border-collapse: collapse; margin: 10px 0; width: 100%; }
+caption, th { font-weight: 600; text-align: left; }
+th, td { border-bottom: 1px solid var(--vscode-panel-border); text-align: right; padding: 5px 3px; }
+th:first-child, td:first-child { text-align: left; overflow-wrap: anywhere; }
+td small { display: block; color: var(--vscode-descriptionForeground); }
+@media (min-width: 520px) { main { padding: 20px 24px; } }

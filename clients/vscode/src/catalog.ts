@@ -69,28 +69,42 @@ export function catalog(body: unknown) {
 }
 export type Model = ReturnType<typeof catalog>[number]
 
+export class CatalogError extends Error {
+  constructor(message: string, readonly status?: number) { super(message) }
+}
+
 export async function discover(base: string, token: string, signal: AbortSignal) {
-  const r = await fetch(`${baseUrl(base)}/models`, {
-    headers: { Authorization: `Bearer ${token}` },
-    redirect: "error",
-    signal,
-  })
+  let r: Response
   try {
-    if (!r.ok || !r.body) throw new Error(`Model discovery failed (HTTP ${r.status}).`)
+    r = await fetch(`${baseUrl(base)}/models`, {
+      headers: { Authorization: `Bearer ${token}` },
+      redirect: "error",
+      signal,
+    })
+  } catch (error) {
+    if (signal.aborted) throw error
+    throw new CatalogError("Could not reach the ExetRouter API. Check the address, network and TLS.")
+  }
+  try {
+    if (!r.ok || !r.body) throw new CatalogError(
+      r.status === 401 || r.status === 403 ? `API token rejected (HTTP ${r.status}).`
+        : r.status === 404 ? "The configured API address does not serve /v1/models."
+        : `The API could not return its model catalog (HTTP ${r.status}).`, r.status)
     const chunks: Buffer[] = []
     let bytes = 0
     for await (const chunk of r.body as unknown as AsyncIterable<Uint8Array>) {
       bytes += chunk.length
-      if (bytes > 8 * 1024 * 1024) throw new Error("Model catalog exceeds the metadata limit.")
+      if (bytes > 8 * 1024 * 1024) throw new CatalogError("The model catalog exceeded the metadata limit.")
       chunks.push(Buffer.from(chunk))
     }
     let parsed: unknown
     try {
       parsed = JSON.parse(Buffer.concat(chunks).toString())
     } catch {
-      throw new Error("Invalid model catalog.")
+      throw new CatalogError("The configured endpoint did not return a valid model catalog.")
     }
-    return catalog(parsed)
+    try { return catalog(parsed) }
+    catch { throw new CatalogError("The configured endpoint did not return a valid model catalog.") }
   } finally {
     await r.body?.cancel().catch(() => {})
   }

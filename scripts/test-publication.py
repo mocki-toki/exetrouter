@@ -46,15 +46,16 @@ class PublicationTests(unittest.TestCase):
             self.assertFalse(audit.allowed_path(name))
 
     def test_vscode_extension_only_allows_source_and_package_metadata(self):
-        for name in ["package.json", "package-lock.json", "README.md", "src/extension.ts", "tests/protocol.test.ts", "assets/router.svg"]:
+        for name in ["package.json", "package-lock.json", "README.md", "src/extension.ts", "tests/protocol.test.ts", "assets/router.svg", "assets/charts.js", "assets/charts.css"]:
             self.assertTrue(audit.allowed_path(f"clients/vscode/{name}"))
         for name in ["dist/extension.js", "out/extension.js", "exetrouter.vsix", "src/.env", "src/private.key", "tests/node_modules/example.ts", "state.sqlite"]:
             self.assertFalse(audit.allowed_path(f"clients/vscode/{name}"))
 
-    def test_vscode_svg_exception_allows_only_the_icon_namespace(self):
+    def test_vscode_svg_exception_allows_only_the_svg_namespace(self):
         icon = "clients/vscode/assets/router.svg"
         namespace = "http://" + "www.w3.org/2000/svg"
         self.assertEqual(self.check_file(icon, f'<svg xmlns="{namespace}"/>').returncode, 0)
+        self.assertEqual(self.check_file("clients/vscode/assets/charts.js", f'createSvg("{namespace}")').returncode, 0)
         self.assertNotEqual(self.check_file(icon, f'<svg xmlns="{namespace}/other"/>').returncode, 0)
         self.assertNotEqual(self.check_file("docs/example.md", namespace).returncode, 0)
 

@@ -7,6 +7,8 @@ export interface Row {
   args?: unknown[]
   accountId?: number
   tokenId?: string
+  tokenState?: string
+  fastMode?: boolean | null
   children?: Row[]
 }
 export function statusSummary(accounts: Row[]) {
@@ -80,79 +82,23 @@ export function accountRows(body: unknown): Row[] {
     }
   })
 }
-export function usageRows(body: unknown): Row[] {
-  const r = record(body)
-  if (!Array.isArray(r.rows)) throw new Error("Invalid usage report.")
-  return r.rows.map((v) => {
-    const m = record(v)
-    return {
-      label: text(m.display_name ?? m.name),
-      description: `${count(m.requests)} requests`,
-      detail: `Input: ${count(m.input_tokens)} · Cached input: ${count(m.cached_input_tokens)} · Output: ${count(m.output_tokens)} · Unknown usage: ${count(m.unknown_usage)}`,
-    }
-  })
-}
 export function tokenRows(body: unknown): Row[] {
   if (!Array.isArray(body)) throw new Error("Invalid token report.")
   return body.map((v) => {
     const t = record(v)
+    const state = t.revoked_at != null ? "Revoked"
+      : typeof t.expires_at === "number" && t.expires_at <= Date.now() / 1000 ? "Expired"
+      : t.disabled === true ? "Disabled" : "Active"
+    const fastMode = typeof t.fast_mode === "boolean" ? t.fast_mode : null
     return {
       label: text(t.name, "Unlabelled token"),
       ...(typeof t.id === "string" && t.id.length > 0 && t.id.length <= 256
         ? { tokenId: t.id, command: "exetrouter.manageToken", args: [t.id] }
         : {}),
-      description:
-        t.revoked_at != null
-          ? "Revoked"
-          : typeof t.expires_at === "number" && t.expires_at <= Date.now() / 1000
-            ? "Expired"
-            : t.disabled === true
-              ? "Disabled"
-              : "Active",
-      detail: `${text(t.id)} · Created: ${date(t.created_at)} · Expires: ${date(t.expires_at)} · Last used: ${date(t.last_used_at)}`,
+      tokenState: state,
+      fastMode,
+      description: `${state}${fastMode === null ? "" : fastMode ? " · Fast allowed" : " · Fast blocked"}`,
+      detail: `${text(t.id)} · Fast: ${fastMode === null ? "Server default" : fastMode ? "Allow" : "Block"} · Created: ${date(t.created_at)} · Expires: ${date(t.expires_at)} · Last used: ${date(t.last_used_at)}`,
     }
   })
-}
-
-export function historyRows(value: unknown): Row[] {
-  const h = record(value),
-    points = h.points
-  if (!Array.isArray(points) || points.length > 25920 || ![600, 3600].includes(Number(h.interval_seconds)))
-    throw new Error("Invalid quota history.")
-  const entries: { at: number; row: Row }[] = []
-  for (const raw of points) {
-    const p = record(raw)
-    if (typeof p.observed_at !== "number" || !["primary", "secondary"].includes(String(p.kind)))
-      throw new Error("Invalid quota point.")
-    const used = p.used_percent
-    entries.push({
-      at: p.observed_at,
-      row: {
-        label: date(p.observed_at),
-        description: `${text(p.kind)} · ${typeof used === "number" && used >= 0 && used <= 100 ? `${count(100 - used)}% left` : "Unknown remaining"}`,
-        detail: `Window: ${count(p.window_minutes)} min · Resets: ${date(p.reset_at)}`,
-      },
-    })
-  }
-  for (const key of ["platform_balance", "platform"] as const) {
-    const pp = record(h[key]).points
-    if (!Array.isArray(pp)) continue
-    if (pp.length > 12960) throw new Error("Invalid Platform history.")
-    for (const raw of pp) {
-      const p = record(raw),
-        at = key === "platform" ? p.from_utc : p.hour
-      if (typeof at !== "number") throw new Error("Invalid Platform observation.")
-      entries.push({
-        at,
-        row: {
-          label: date(at),
-          description:
-            key === "platform"
-              ? `Platform spend · ${typeof p.usd_nanos === "number" ? `$${count(p.usd_nanos / 1e9)}` : "Unknown"}`
-              : `Platform balance · ${typeof p.remaining_percent === "number" ? `${count(p.remaining_percent)}% left` : "Unknown"}`,
-        },
-      })
-    }
-  }
-  return entries.sort((a, b) => b.at - a.at).map((e) => e.row)
 }

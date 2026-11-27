@@ -15,6 +15,7 @@ export type TokenAction =
   | { action: "token_rename"; id: string; name: string }
   | { action: "token_rotate" | "token_revoke"; id: string; confirmed: true }
   | { action: "token_set_enabled"; id: string; enabled: boolean; confirmed: true }
+  | { action: "token_fast_mode"; id: string; enabled: boolean | null; confirmed: true }
   | { action: "copy_retry" | "copy_discard" }
 type ReplyStatus = "copied" | "copy_failed" | "clipboard_unavailable" | "discarded" | "saved" | "revoked"
 export const periods = ["24h", "7d", "30d", "90d"] as const

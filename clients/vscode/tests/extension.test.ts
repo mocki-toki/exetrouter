@@ -8,11 +8,10 @@ import { EventEmitter as NodeEmitter } from "node:events"
 import { PassThrough, Writable } from "node:stream"
 import type * as vscode from "vscode"
 import { secretKey } from "../src/catalog"
-import { historyRows } from "../src/dashboard"
 
 // Exercise the packed entrypoint and public API adapter with synthetic host services.
 // Never inherit a real exr, user profile, extension storage, or external endpoint.
-test("bundled host adapter registers five views, scopes secrets and forwards native tool turns", async (t) => {
+test("bundled host registers overview, usage, tokens and models and scopes chat credentials", async (t) => {
   const manifests = JSON.parse(readFileSync("package.json", "utf8"))
   const requests: Record<string, any>[] = []
   const api = createServer(async (req, res) => {
@@ -132,6 +131,10 @@ test("bundled host adapter registers five views, scopes secrets and forwards nat
         views.push(id)
         return disposable
       },
+      registerWebviewViewProvider: (id: string) => {
+        views.push(id)
+        return disposable
+      },
     },
     commands: {
       registerCommand: (id: string, cb: () => unknown) => {
@@ -172,8 +175,8 @@ test("bundled host adapter registers five views, scopes secrets and forwards nat
     },
   })
   assert.deepEqual(
-    views,
-    manifests.contributes.views.exetrouter.map((v: { id: string }) => v.id),
+    views.sort(),
+    manifests.contributes.views.exetrouter.map((v: { id: string }) => v.id).sort(),
   )
   const token = { isCancellationRequested: false, onCancellationRequested: () => disposable }
   const infos = await provider.provideLanguageModelChatInformation({ silent: true }, token)
@@ -219,12 +222,15 @@ test("bundled host adapter registers five views, scopes secrets and forwards nat
 test("dashboard retains stale reports only within profile and confirms native mutations", async (t) => {
   let fail = false,
     stamp = 1n,
-    confirmed = false
+    confirmed = false,
+    address = ""
   const actions: Record<string, unknown>[] = [],
     choices: string[] = [],
-    warnings: string[] = []
+    warnings: string[] = [],
+    inputs: string[] = []
   const args: string[][] = [],
     registered = new Map<string, (id?: unknown) => Promise<unknown>>()
+  const saved = new Map<string, string>()
   const views = new Map<
     string,
     { getChildren: () => Promise<Array<{ label: string; description?: string }>> }
@@ -233,6 +239,26 @@ test("dashboard retains stale reports only within profile and confirms native mu
   t.after(() => subscriptions.forEach((o) => o.dispose()))
   const noop = { dispose() {} }
   const status = { ...noop, text: "", tooltip: "", show() {} }
+  const charts: ReturnType<typeof webview>[] = []
+  let resolveUsage: ((view: ReturnType<typeof webview>) => void) | undefined
+  function webview() {
+    let receive: ((value: unknown) => void) | undefined
+    const events = new NodeEmitter()
+    const sent: Record<string, any>[] = []
+    return {
+      sent,
+      webview: {
+        cspSource: "synthetic-resource",
+        asWebviewUri: (uri: string) => uri,
+        onDidReceiveMessage(fn: typeof receive) { receive = fn; return noop },
+        postMessage(value: Record<string, unknown>) { sent.push(value); return Promise.resolve(true) },
+      },
+      onDidDispose(fn: () => void) { events.on("dispose", fn); return noop },
+      dispose() { events.emit("dispose") },
+      message(value: unknown) { receive?.(value) },
+    }
+  }
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve))
   const doctor = {
     schema_version: 1,
     quota_accounts: [
@@ -248,7 +274,16 @@ test("dashboard retains stale reports only within profile and confirms native mu
   const host = {
     EventEmitter,
     StatusBarAlignment: { Right: 1 },
-    workspace: { getConfiguration: () => ({ get: () => "" }), onDidChangeConfiguration: () => noop },
+    ViewColumn: { Active: 1 },
+    ConfigurationTarget: { Global: 1 },
+    Uri: { joinPath: (...paths: string[]) => paths.join("/") },
+    workspace: {
+      getConfiguration: () => ({
+        get: (key: string) => key === "apiBaseUrl" ? address : "",
+        update: async (key: string, value: string) => { assert.equal(key, "apiBaseUrl"); address = value },
+      }),
+      onDidChangeConfiguration: () => noop,
+    },
     lm: { registerLanguageModelChatProvider: () => noop },
     commands: {
       registerCommand: (name: string, cb: (id?: unknown) => Promise<unknown>) => {
@@ -262,12 +297,21 @@ test("dashboard retains stale reports only within profile and confirms native mu
         views.set(a, v)
         return noop
       },
+      registerWebviewViewProvider: (_: string, p: { resolveWebviewView: typeof resolveUsage }) => {
+        resolveUsage = p.resolveWebviewView
+        return noop
+      },
+      createWebviewPanel() {
+        const panel = webview()
+        charts.push(panel)
+        return panel
+      },
       showQuickPick: async (list: unknown[]) => {
         const choice = choices.shift()
         assert.ok(choice)
         return list.find((i) => i === choice || (i as { label: string }).label === choice)
       },
-      showInputBox: async () => "New label",
+      showInputBox: async () => inputs.shift() ?? "New label",
       showWarningMessage: async (msg: string, opts: unknown, yes: string) => {
         warnings.push(msg)
         return confirmed ? yes : undefined
@@ -308,10 +352,11 @@ test("dashboard retains stale reports only within profile and confirms native mu
                 ? [{ id: "tok_fixture", name: "Old label" }]
                 : a[0] === "quota-history"
                   ? {
+                      from_utc: 1700000000, to_utc: 1700000600,
                       interval_seconds: 600,
-                      points: [{ kind: "primary", used_percent: 32, observed_at: 1700000000 }],
+                      points: [{ kind: "primary", used_percent: 32, hour: 1700000000 }],
                     }
-                  : { rows: [{ name: "Fixture model", requests: 1 }] },
+                  : { from_utc: 1700000000, to_utc: 1700000600, rows: [{ name: "Fixture model", requests: 1, total_tokens: 5 }], timeline: [{ from_utc: 1700000000, to_utc: 1700000600, rows: [{ name: "Fixture model", requests: 1, total_tokens: 5 }] }] },
           ),
         ),
       )
@@ -330,11 +375,19 @@ test("dashboard retains stale reports only within profile and confirms native mu
     mod,
     mod.exports,
   )
-  mod.exports.activate({ subscriptions, secrets: { onDidChange: () => noop } })
+  mod.exports.activate({ extensionUri: "extension", subscriptions, secrets: {
+    onDidChange: () => noop,
+    store: async (key: string, value: string) => saved.set(key, value),
+  } })
   const run = (s: string, arg?: unknown) => registered.get(`exetrouter.${s}`)!(arg),
     rows = (s: string) => views.get(`exetrouter.${s}`)!.getChildren()
   await run("refresh")
-  await rows("usage")
+  assert.match((await rows("models"))[0].label, /API address is missing/)
+  const usage = webview(), selectUsage = (group: string) => usage.message({ type: "chart", period: "7d", metric: "tokens", group })
+  resolveUsage!(usage)
+  selectUsage("model")
+  await settle()
+  assert.equal(usage.sent.at(-1)?.chart.series[0]?.label, "Fixture model")
   await rows("tokens")
   assert.match(status.tooltip, /First.*\nSecond/)
   choices.push("Rename")
@@ -350,26 +403,35 @@ test("dashboard retains stale reports only within profile and confirms native mu
     enabled: false,
     confirmed: true,
   })
-  choices.push("First", "7d")
-  choices.push("unused observation")
+  choices.push("Fast Mode…", "Allow")
+  await run("manageToken", "tok_fixture")
+  assert.deepEqual(actions.at(-1), { action: "token_fast_mode", id: "tok_fixture", enabled: true, confirmed: true })
+  inputs.push("New token", "90")
+  await run("createToken")
+  assert.deepEqual(actions.at(-1), { action: "token_create", name: "New token", days: 90 })
+  assert.ok((await rows("tokens")).every((r) => r.label !== "Manage profile tokens"))
+  choices.push("First")
   await run("history")
+  charts[0].message({ type: "chart", period: "7d" })
+  await settle()
   assert.ok(args.some((a) => a.join(" ") === "quota-history 7 --period 7d --json"))
-  assert.match(
-    historyRows({ interval_seconds: 600, points: [{ kind: "primary", used_percent: 32, observed_at: 1 }] })[0]
-      .description!,
-    /68% left/,
-  )
+  assert.equal(charts[0].sent.at(-1)?.chart.series[0].points[0][1], 68)
   fail = true
   await run("refresh")
   assert.match(status.text, /stale/)
   assert.match(status.tooltip, /First.*\nSecond/)
-  assert.ok((await rows("usage")).some((r) => r.label === "Stale report"))
+  await settle()
+  assert.match(usage.sent.at(-1)?.notice, /Stale report/)
   assert.ok((await rows("tokens")).some((r) => r.label === "Old label"))
-  choices.push("token")
-  await run("group")
-  assert.ok(!(await rows("usage")).some((r) => r.label === "Fixture model"))
+  selectUsage("token")
+  await settle()
+  assert.equal(usage.sent.at(-1)?.chart, undefined)
   stamp++
   await run("refresh")
   assert.doesNotMatch(status.tooltip, /First|Second/)
   assert.ok(!(await rows("tokens")).some((r) => r.label === "Old label"))
+  inputs.push("https://router.example/v1", "synthetic token")
+  await run("connect")
+  assert.equal(address, "https://router.example/v1")
+  assert.equal(saved.get(secretKey(address)), "synthetic token")
 })

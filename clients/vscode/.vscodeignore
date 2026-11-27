@@ -1,6 +1,8 @@
 **/*
 !dist/extension.js
 !assets/router.svg
+!assets/charts.js
+!assets/charts.css
 !package.json
 !README.md
 !LICENSE

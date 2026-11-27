@@ -9,12 +9,14 @@ The [desktop extension](../clients/vscode/README.md) contributes the `exetrouter
 | Chat picker and Models view | Authenticated `GET /v1/models`; limits, routes, reasoning efforts, tool and image capabilities come from the selected API endpoint. Non-chat inventory stays out of the picker. |
 | Chat | `POST /v1/responses` with SSE, full ordered history and `store: false`. Each request has independent cancellation. The extension never replays a failed POST. |
 | Overview and status bar | Local `exr doctor --json`, including every reported profile account. Hover or click to see accounts individually. Refreshed every minute. |
-| Quota history | `exr quota-history ACCOUNT --period … --json`. Select an account and interval to inspect timestamped quota windows and available Platform observations. Missing intervals are not filled. |
-| Usage | `exr usage --period … --json` for totals, or `--by model`, `--by user`, `--by token`. Missing counters remain unknown. |
-| Tokens | `exr token list --json` loads metadata. Confirmed create/rename/pause/resume/rotate/revoke and clipboard retry/discard run through the private bridge. |
-| Settings | Private `exr desktop` profile action. The child remains attached for standalone mode, where it may host the listener. Changes to the native profile file invalidate cached reports and bridge identity. |
+| Quota history | `exr quota-history ACCOUNT --period … --json`. The editor chart plots quota windows on a shared 0–100% axis and shows the Platform balance estimate when available. Missing observations remain gaps. |
+| Usage | `exr usage --period … --json` for totals, or `--by model`, `--by user`, `--by token`. Plot tokens, requests, or estimated API-equivalent USD in the sidebar or editor. Missing counters remain unknown. |
+| Tokens | `exr token list --json` loads metadata. Confirmed create/rename/pause/resume/rotate/revoke/Fast and clipboard retry/discard run through the private bridge. |
+| Native profile | Private `exr desktop` profile action. The child remains attached for standalone mode, where it may host the listener. Changes to the native profile file invalidate cached reports and bridge identity. Extension preferences are in standard VS Code Settings. |
 
 The profile bridge and passive reports reuse the same [native interface as the OpenCode dashboard](opencode-desktop.md). If the bridge is unavailable, set the user-scoped API base explicitly; older native clients may still provide individual reports. A failed doctor, token list or usage read retains the previous same-profile snapshot with its timestamp and a stale label. An empty successful report replaces it. Token actions re-read the current list and bind confirmation to the current native bridge; uncertain mutations are never retried automatically. Only `exr` handles newly issued secrets and clipboard recovery. Local reports and the HTTP catalog remain in memory. An explicit chat endpoint may differ from the native profile behind the dashboard.
+
+Chart webviews use bundled SVG rendering and receive only formatted labels and numeric report data. They do not make network requests, receive API tokens, or expose a management message channel. Legends toggle individual series, and keyboard and pointer inspection report actual interval values.
 
 ## Compatibility and limits
 
