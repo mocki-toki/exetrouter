@@ -191,6 +191,13 @@ pub(crate) fn parent(conn: &Connection, owner: i64) -> Result<i64> {
     )?)
 }
 
+pub(crate) fn linked_project(conn: &Connection, parent: i64) -> Result<Option<i64>> {
+    Ok(conn.query_row(
+        "SELECT -r.id FROM platform_routes r JOIN platform_settings s ON s.account_id=r.account_id AND s.project_id=r.project_id WHERE r.account_id=?1",
+        [parent], |row| row.get(0),
+    ).optional()?)
+}
+
 pub(crate) fn enabled(conn: &Connection, owner: i64) -> Result<bool> {
     let id = parent(conn, owner)?;
     let active: bool = conn.query_row(

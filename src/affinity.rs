@@ -134,6 +134,10 @@ pub(crate) fn reference(value: &str, kind: Kind, key: &[u8], user: i64) -> Resul
         receipt: false,
     })
 }
+
+pub(crate) fn reasoning_owner(value: &str, key: &[u8], user: i64) -> Result<i64> {
+    Ok(open(value, Kind::Content, key, user)?.1)
+}
 fn open<'a>(value: &'a str, kind: Kind, key: &[u8], user: i64) -> Result<(&'a str, i64)> {
     let encoded = value
         .strip_prefix(PROOF_PREFIX)

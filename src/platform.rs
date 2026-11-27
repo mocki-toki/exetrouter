@@ -70,30 +70,60 @@ pub(crate) fn inference_payload(
 /// Cross-backend fallback needs self-contained text/tool input, not opaque
 /// state, project-owned files/containers or saved backend history.
 pub(crate) fn transfer_safe(payload: &serde_json::Value) -> bool {
-    fn input_safe(value: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Object(fields) => fields.iter().all(|(name, value)| {
-                if name == "encrypted_function_args" && value.as_array().is_some_and(Vec::is_empty)
-                {
-                    return true;
-                }
-                if matches!(
-                    name.as_str(),
-                    "encrypted_content" | "encrypted_function_args" | "file_id" | "container_id"
-                ) && !value.is_null()
-                {
-                    return false;
-                }
-                if name == "type" && value == "item_reference" {
-                    return false;
-                }
-                input_safe(value)
-            }),
-            serde_json::Value::Array(items) => items.iter().all(input_safe),
-            _ => true,
-        }
+    transfer_input_safe(&payload["input"]) && payload["conversation"].is_null()
+}
+
+fn transfer_input_safe(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => fields.iter().all(|(name, value)| {
+            if name == "encrypted_function_args" && value.as_array().is_some_and(Vec::is_empty) {
+                return true;
+            }
+            if matches!(
+                name.as_str(),
+                "encrypted_content" | "encrypted_function_args" | "file_id" | "container_id"
+            ) && !value.is_null()
+            {
+                return false;
+            }
+            if name == "type" && value == "item_reference" {
+                return false;
+            }
+            transfer_input_safe(value)
+        }),
+        serde_json::Value::Array(items) => items.iter().all(transfer_input_safe),
+        _ => true,
     }
-    payload["conversation"].is_null() && input_safe(&payload["input"])
+}
+
+pub(crate) fn replay_reasoning(item: &serde_json::Value) -> Option<&str> {
+    if item["type"] != "reasoning"
+        || crate::affinity::is_transfer_item(item)
+        || item
+            .as_object()?
+            .iter()
+            .any(|(key, value)| match key.as_str() {
+                "encrypted_content" => false,
+                "id" | "type" | "status" | "summary" | "content" => !transfer_input_safe(value),
+                _ => true,
+            })
+    {
+        return None;
+    }
+    item["encrypted_content"].as_str()
+}
+
+/// Only a caller-carried transcript can replace optional provider reasoning.
+/// Checkpoints, saved conversations and project-owned tool references cannot.
+pub(crate) fn replay_safe(payload: &serde_json::Value) -> bool {
+    payload["conversation"].is_null()
+        && payload["store"] != true
+        && payload["input"].as_array().is_some_and(|items| {
+            items.iter().any(|item| item["role"] == "user")
+                && items
+                    .iter()
+                    .all(|item| replay_reasoning(item).is_some() || transfer_input_safe(item))
+        })
 }
 pub mod balance;
 pub mod costs;
