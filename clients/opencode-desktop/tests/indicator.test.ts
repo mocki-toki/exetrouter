@@ -28,4 +28,12 @@ test("quota indicator uses only the chat's actual account, never the Best recomm
   assert.equal(quotaIndicator(state,now,{...observation,key:"c".repeat(64)}),undefined,"foreign profile/user must not match")
   assert.equal(indicator(undefined),undefined)
   assert.equal(indicator({...state,snapshot:{...report,accounts:[{...account,observationKey:null}]}}),undefined,"old servers cannot attribute the chat")
+  const estimate = { remainingUSD: 98, spentUSD: 2, unpriced: 0, observedAt: now, through: now, status: "estimated" }
+  const balance = { initialUSD: 100, enteredAt: now, exetrouter: estimate, organization: estimate }
+  const platform = { configuredAt: now, inferenceEnabled: true, creditStatus: "unverified", codexFallbackAllowed: true, balance }
+  const sameParent = { ...state, snapshot: { ...report, accounts: [{ ...actual, windows: [{...weekly, remaining: 0}], platform }] } }
+  const usedPlatform = { ...observation, resource: "platform" as const }
+  assert.equal(quotaIndicator(sameParent, now, usedPlatform)?.label, "Platform API 98%")
+  assert.equal(quotaIndicator(sameParent, now, {...observation, resource: "codex"})?.label, "Weekly 0%")
+  assert.equal(quotaIndicator(state, now, usedPlatform)?.label, "Platform API Unknown")
 })
