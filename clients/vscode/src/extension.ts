@@ -5,6 +5,7 @@ import {
   routerRow,
   statusSummary,
   tokenRows,
+  type QuotaMeter,
   type Row,
 } from "./dashboard"
 import { Native, periods, groups, profileStamp, type Group, type TokenAction } from "./native"
@@ -242,7 +243,7 @@ export function activate(ctx: v.ExtensionContext) {
   const attachChart = (
     view: v.WebviewView | v.WebviewPanel,
     kind: Chart["kind"], title: string,
-    load: (selection: { period: (typeof periods)[number]; group: Group; metric: Metric }, refresh: boolean) => Promise<{ chart?: Chart; notice?: string }>,
+    load: (selection: { period: (typeof periods)[number]; group: Group; metric: Metric }, refresh: boolean) => Promise<{ chart?: Chart; notice?: string; meters?: QuotaMeter[]; staleMeters?: boolean }>,
   ) => {
     const webview = view.webview
     const assets = v.Uri.joinPath(ctx.extensionUri, "assets")
@@ -300,7 +301,7 @@ export function activate(ctx: v.ExtensionContext) {
     panel.onDidDispose(() => { if (usagePanel === panel) usagePanel = undefined })
     attachChart(panel, "usage", "Usage", loadUsage)
   })
-  register("history", async () => {
+  register("history", async (id) => {
     await refreshAccounts()
     const n = client(),
       choices = (accounts ?? []).filter((a) => a.accountId)
@@ -308,7 +309,7 @@ export function activate(ctx: v.ExtensionContext) {
       await v.window.showInformationMessage("No profile accounts with quota history are available.")
       return
     }
-    const a = await v.window.showQuickPick(choices, {
+    const a = typeof id === "number" ? choices.find((row) => row.accountId === id) : await v.window.showQuickPick(choices, {
       title: `Select an account for quota history${stale ? " · stale account list" : ""}`,
     })
     if (!a?.accountId) return
@@ -318,16 +319,26 @@ export function activate(ctx: v.ExtensionContext) {
     const panel = v.window.createWebviewPanel("exetrouter.quotaChart", "ExetRouter Quota History", v.ViewColumn.Active, { retainContextWhenHidden: true })
     historyPanel = panel
     panel.onDidDispose(() => { if (historyPanel === panel) historyPanel = undefined })
-    attachChart(panel, "quota", a.label, async ({ period }) => {
+    attachChart(panel, "quota", a.label, async ({ period }, fresh) => {
+      if (fresh) await refreshAccounts()
+      if (n !== client()) return {}
       const key = `${account}:${period}`
+      const summary = () => ({
+        meters: accounts?.find((row) => row.accountId === account)?.meters ?? [],
+        staleMeters: stale,
+        notice: stale ? `Stale account report · ${new Date(lastRead).toLocaleString()}` : "",
+      })
       try {
         const chart = quotaChart(await n.history(account, period))
         if (n !== client()) return {}
         lastHistory = { key, chart, at: Date.now() }
-        return { chart }
+        return { chart, ...summary() }
       } catch {
-        if (n !== client() || lastHistory?.key !== key) return { notice: "Quota history unavailable." }
-        return { chart: lastHistory.chart, notice: `Stale report · ${new Date(lastHistory.at).toLocaleString()}` }
+        if (n !== client()) return {}
+        const accountSummary = summary()
+        const cached = lastHistory?.key === key ? lastHistory : undefined
+        const historyNotice = cached ? `Stale quota history · ${new Date(cached.at).toLocaleString()}` : "Quota history unavailable."
+        return { ...accountSummary, chart: cached?.chart, notice: [accountSummary.notice, historyNotice].filter(Boolean).join(" · ") }
       }
     })
   })

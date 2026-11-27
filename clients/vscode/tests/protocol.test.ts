@@ -246,6 +246,23 @@ test("all account statuses remain visible, including unknowns and disabled accou
   assert.equal(statusSummary(rows), "3 accounts · 3 states")
 })
 
+test("account quota meters show Platform percentage above the manual dollar estimate", () => {
+  const [row] = accountRows({ schema_version: 1, quota_accounts: [{ id: 1,
+    quota: { windows: [{ window_minutes: 10080, remaining_percent: 72, status: "current" }] },
+    platform: { balance: { initial_usd_nanos: 86e9,
+      exetrouter: { remaining_usd_nanos: null, spent_usd_nanos: 43e9, unpriced_requests: 1, status: "unpriced_requests" },
+    } },
+  }] })
+  assert.deepEqual(row.meters?.map((m) => [m.label, m.remaining, m.caption]), [
+    ["Weekly", 72, "Resets Unknown"], ["Platform API · partial estimate", 50, "$43 / $86"],
+  ])
+  assert.deepEqual(row.children?.at(-1)?.args, [1])
+  assert.equal(row.children?.at(-1)?.description, "50% left")
+  const [unknown] = accountRows({ schema_version: 1, quota_accounts: [{ platform: { balance: null } }] })
+  assert.equal(unknown.meters?.[0]?.remaining, null)
+  assert.equal(unknown.meters?.[0]?.caption, "Unknown")
+})
+
 test("usage charts keep missing counters unknown, distinguish zero and flag unpriced estimates", () => {
   const row = { name: "one", requests: 1, total_tokens: null, cached_input_tokens: 0, unknown_usage: 1, unpriced_requests: 1 }
   const report = { from_utc: 100, to_utc: 400, rows: [row], timeline: [
