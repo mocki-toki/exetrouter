@@ -632,6 +632,7 @@ async fn embeddings_are_discovered_and_charged_only_to_the_observed_project() {
     let result = api.post("embeddings", &body).send().await.unwrap();
     assert_eq!(result.status(), StatusCode::OK);
     assert!(result.headers().contains_key("x-exetrouter-account"));
+    assert_eq!(result.headers()["x-exetrouter-resource"], "platform");
     assert_eq!(
         result.json::<Value>().await.unwrap()["data"][0]["embedding"],
         "AACAPw=="
@@ -722,6 +723,7 @@ async fn shared_api_routes_platform_json_sse_chat_compaction_and_ws_with_parent_
         .await
         .unwrap();
     assert_eq!(compact.status(), StatusCode::OK);
+    assert_eq!(compact.headers()["x-exetrouter-resource"], "platform");
     let compact: Value = compact.json().await.unwrap();
     assert_eq!(compact["object"], "response.compaction");
     assert_eq!(
@@ -804,7 +806,11 @@ async fn native_handshake_quota_fallback_keeps_downstream_ws_and_recovers_platfo
         "authorization",
         format!("Bearer {}", api.token).parse().unwrap(),
     );
+    request
+        .headers_mut()
+        .insert("x-exetrouter-observe-account", "true".parse().unwrap());
     let (mut ws, _) = codex_websocket::connect_async(request).await.unwrap();
+    let parent = crate::account_preferences::observation_key(&[7; 32], 1, 1);
     for turn in 0..2 {
         let mut body = json!({"type":"response.create","model":"gpt-6.1-sol","input":[{"role":"user","content":"synthetic fallback WS context"}]});
         if turn == 1 {
@@ -813,6 +819,7 @@ async fn native_handshake_quota_fallback_keeps_downstream_ws_and_recovers_platfo
         ws.send(Message::Text(body.to_string().into()))
             .await
             .unwrap();
+        let mut observed = false;
         loop {
             let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
                 .await
@@ -824,7 +831,13 @@ async fn native_handshake_quota_fallback_keeps_downstream_ws_and_recovers_platfo
             }
             let event: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
             assert_ne!(event["type"], "error", "{event}");
+            if event["type"] == "response.metadata" {
+                assert_eq!(event["headers"]["x-exetrouter-account"], parent);
+                assert_eq!(event["headers"]["x-exetrouter-resource"], "platform");
+                observed = true;
+            }
             if event["type"] == "response.completed" {
+                assert!(observed);
                 break;
             }
         }

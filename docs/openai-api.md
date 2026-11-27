@@ -178,9 +178,11 @@ Additional metadata is limited to bounded `openai-model`, `x-openai-model`, `x-m
 
 Clients may opt into content-free account observation with
 `x-exetrouter-observe-account: true`. Successful HTTP replies add
-`x-exetrouter-account`; native WS adds it in `response.metadata` after each
+`x-exetrouter-account` and `x-exetrouter-resource` (`codex` or `platform`);
+native WS adds both in `response.metadata` after each
 generation's `response.created`, including reused connections and account
-transfers. It is a domain-separated user/account HMAC alias matching that user's
+transfers. The resource is the one actually serving the request. Both resources
+of one parent account report the same `x-exetrouter-account`, a domain-separated user/account HMAC alias matching that user's
 authenticated management `quota_accounts[].observation_key`, not an upstream
 identity, account selector, ownership proof or credential. Other users receive
 different aliases. The opt-in header is not forwarded upstream; ordinary clients

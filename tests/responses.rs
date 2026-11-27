@@ -575,6 +575,7 @@ async fn opt_in_account_observations_match_user_scoped_diagnostics_on_http_reuse
         .unwrap()
         .to_owned();
     assert!(aliases.contains(&alias));
+    assert_eq!(response.headers()["x-exetrouter-resource"], "codex");
     response.bytes().await.unwrap();
     let response = client
         .post(format!("{}/v1/responses", fixture.url))
@@ -587,6 +588,7 @@ async fn opt_in_account_observations_match_user_scoped_diagnostics_on_http_reuse
         !response.headers().contains_key("x-exetrouter-account"),
         "ordinary clients keep the existing wire contract"
     );
+    assert!(!response.headers().contains_key("x-exetrouter-resource"));
     response.bytes().await.unwrap();
     let mut upgrade = format!("{}/v1/responses", fixture.url.replace("http://", "ws://"))
         .into_client_request()
@@ -626,6 +628,7 @@ async fn opt_in_account_observations_match_user_scoped_diagnostics_on_http_reuse
                             .to_owned(),
                     );
                     assert!(!event.to_string().contains("upstream-account"));
+                    assert_eq!(event["headers"]["x-exetrouter-resource"], "codex");
                 }
                 Some("response.completed") => break,
                 Some("error" | "response.failed") => panic!("synthetic request failed"),

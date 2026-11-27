@@ -49,7 +49,11 @@ does not expose account management through the OpenCode HTTP RPC surface.
    metadata and publishes a bounded, in-memory per-session projection via RPC.
    A user-scoped HMAC alias matches the authenticated native doctor's account,
    without exposing upstream identities, credentials, content or turn state.
-   Account transfers update immediately; auxiliary calls and parallel chats stay
+    When the primary response uses the account's linked Platform project, the
+    indicator shows the Platform balance percentage instead of the Codex windows.
+    Without a usable estimate it shows `Platform API Unknown`. Routers that only
+    report the account alias retain the previous subscription-window display.
+    Account transfers update immediately; auxiliary calls and parallel chats stay
    isolated. The last confirmed account remains visible after completion and while
    idle; metadata lacking an account alias cannot clear it. An explicit switch to
    another provider still clears attribution. Without an observation or a matching

@@ -2,6 +2,7 @@ import type { SessionAccount } from "./schemas"
 
 export const observationHeader = "x-exetrouter-account"
 export const observeHeader = "x-exetrouter-observe-account"
+export const resourceHeader = "x-exetrouter-resource"
 
 type Request = { sessionID: string; kind: string; model: { providerID: string; id: string } }
 
@@ -17,7 +18,7 @@ export class SessionAccounts {
 
   http(event: Request & { response: Response }) {
     if (!event.response.ok) return
-    this.observe(event, event.response.headers.get(observationHeader))
+    this.observe(event, event.response.headers.get(observationHeader), event.response.headers.get(resourceHeader))
   }
 
   websocket(event: Request & { frame: string }) {
@@ -26,17 +27,20 @@ export class SessionAccounts {
     // consume/clone an HTTP body or modify either transport's response.
     try {
       const value = JSON.parse(event.frame)
-      if (value?.type === "response.metadata") this.observe(event, value.headers?.[observationHeader])
+      if (value?.type === "response.metadata") this.observe(event, value.headers?.[observationHeader], value.headers?.[resourceHeader])
     } catch { /* Invalid/non-metadata input is left entirely to the provider driver. */ }
   }
 
-  private observe(event: Request, key: unknown) {
+  private observe(event: Request, key: unknown, resource: unknown) {
     if (event.kind !== "primary" || event.model.providerID !== "exetrouter") return
     // Other metadata frames can carry only turn state or timing. Their missing
     // alias says nothing about account selection: keep the last confirmation
     // through completion/idle until another valid alias or provider switch.
     if (typeof key !== "string" || !/^[a-f0-9]{64}$/.test(key)) return
-    this.set(event.sessionID, { key, model: event.model.id, observedAt: Math.floor(Date.now() / 1000) })
+    this.set(event.sessionID, {
+      key, model: event.model.id, observedAt: Math.floor(Date.now() / 1000),
+      ...(resource === "codex" || resource === "platform" ? { resource } : {}),
+    })
   }
 
   private set(sessionID: string, account: SessionAccount | null) {

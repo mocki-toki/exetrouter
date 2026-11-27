@@ -8,7 +8,10 @@ export const CatalogStatus = Schema.Struct({
 })
 export type CatalogStatus = typeof CatalogStatus.Type
 
-export const SessionAccount = Schema.Struct({ key: Schema.String, model: Schema.String, observedAt: Schema.Number })
+export const SessionAccount = Schema.Struct({
+  key: Schema.String, model: Schema.String, observedAt: Schema.Number,
+  resource: Schema.optionalKey(Schema.Literals(["codex", "platform"])),
+})
 export type SessionAccount = typeof SessionAccount.Type
 
 export const Window = Schema.Struct({

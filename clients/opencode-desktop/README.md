@@ -86,8 +86,9 @@ alone does not reload the server plugin. Reopen the panel afterward.
 Select an `exetrouter/<model>` through the normal model picker. No default model
 is forcibly selected. **Open ExetRouter** opens the panel in the current session.
 The side panel's **+** menu also offers ExetRouter. A native quota indicator above
-the composer shows the short/weekly windows of the account actually used by this
-chat; click it for live account details. It follows primary HTTP/WS response
+the composer shows the short/weekly windows when the chat uses Codex, or the
+linked account's estimated Platform balance percentage when it uses Platform.
+Click it for live account details. It follows primary HTTP/WS response
 observations, including account transfers, not the global Best recommendation or
 token activity. Title/compaction/auxiliary requests and other chats do not change it.
 This requires router/native `exr` version 0.8.3 or later and a matching

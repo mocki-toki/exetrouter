@@ -405,6 +405,28 @@ fn backend_event_error(event: &Value) -> Option<(StatusCode, Value)> {
 }
 
 impl RequestLog {
+    fn account_observation(&self) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-exetrouter-account",
+            HeaderValue::from_str(&crate::account_preferences::observation_key(
+                &self.context_key,
+                self.user_id,
+                self.observation_account_id,
+            ))
+            .expect("hex metadata"),
+        );
+        headers.insert(
+            "x-exetrouter-resource",
+            HeaderValue::from_static(if self.account_id < 0 {
+                "platform"
+            } else {
+                "codex"
+            }),
+        );
+        headers
+    }
+
     async fn begin(
         state: &AppState,
         mut record: RequestRecord,
@@ -1195,15 +1217,7 @@ fn ws_response_metadata(
 ) -> std::result::Result<Option<String>, WsInterruption> {
     let mut safe = response_metadata(headers);
     if observe_account {
-        safe.insert(
-            "x-exetrouter-account",
-            HeaderValue::from_str(&crate::account_preferences::observation_key(
-                &log.context_key,
-                log.user_id,
-                log.observation_account_id,
-            ))
-            .expect("hex metadata"),
-        );
+        safe.extend(log.account_observation());
     }
     if let Some(value) = headers.get("x-codex-turn-state") {
         let turn = value
@@ -1707,14 +1721,7 @@ pub(super) async fn http(
         tracing::info!(event="upstream_stream_opened",request_id=%log.id,turn_state_returned=response_turn_state.is_some());
         Source::Http(response)
     };
-    let observation = identity.observe_account.then(|| {
-        HeaderValue::from_str(&crate::account_preferences::observation_key(
-            &state.key,
-            identity.user_id,
-            log.observation_account_id,
-        ))
-        .expect("hex metadata")
-    });
+    let observation = identity.observe_account.then(|| log.account_observation());
     let (send, receive) = mpsc::channel::<Bytes>(crate::payload::SSE_QUEUE_CHUNKS);
     let (mut json_send, json_receive) = tokio::sync::oneshot::channel::<Result<JsonReply>>();
     state.jobs.spawn(async move {
@@ -1922,9 +1929,7 @@ pub(super) async fn http(
     };
     response.headers_mut().extend(response_headers);
     if let Some(observation) = observation.filter(|_| response.status().is_success()) {
-        response
-            .headers_mut()
-            .insert("x-exetrouter-account", observation);
+        response.headers_mut().extend(observation);
     }
     if let Some(value) = response_turn_state {
         response.headers_mut().insert("x-codex-turn-state", value);
@@ -2178,15 +2183,7 @@ async fn platform_compact(
 fn unary_json(value: Value, log: &RequestLog, observe_account: bool) -> Response {
     let mut response = Json(value).into_response();
     if observe_account {
-        response.headers_mut().insert(
-            "x-exetrouter-account",
-            HeaderValue::from_str(&crate::account_preferences::observation_key(
-                &log.context_key,
-                log.user_id,
-                log.observation_account_id,
-            ))
-            .expect("hex metadata"),
-        );
+        response.headers_mut().extend(log.account_observation());
     }
     response
 }
