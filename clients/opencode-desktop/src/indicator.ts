@@ -15,13 +15,13 @@ export function quotaIndicator(state: DashboardState | undefined, now: number, o
     const { usd, excluded } = platformRemaining(balance)
     return {
       id: account.id,
-      label: `Platform API ${percent(platformPercent(usd, balance?.initialUSD))}`,
+      label: `Platform API ${percent(platformPercent(usd, balance?.initialUSD), 0)}`,
       title: `${title} via Platform API · ${excluded ? "partial balance estimate" : "estimated balance"}${cached ? "; cached snapshot" : ""}`,
     }
   }
   const windows = visibleWindows(account)
   const short = windows.find((w) => w.minutes! < 10080), weekly = windows.find((w) => w.minutes === 10080)
   const selected = [short, weekly].filter((w) => w !== undefined)
-  const label = selected.map((w) => `${duration(w.minutes)} ${w.status === "current" && fresh(w.observedAt, report.checkedAt) && (w.resetAt === null || w.resetAt > report.checkedAt) ? percent(w.remaining) : "Unknown"}`).join(" · ")
+  const label = selected.map((w) => `${duration(w.minutes)} ${w.status === "current" && fresh(w.observedAt, report.checkedAt) && (w.resetAt === null || w.resetAt > report.checkedAt) ? percent(w.remaining, 0) : "Unknown"}`).join(" · ")
   return { id: account.id, label: label || "ExetRouter", title: `${title}${cached ? "; cached quota snapshot" : ""}` }
 }
