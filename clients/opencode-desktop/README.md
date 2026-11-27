@@ -209,7 +209,7 @@ running. This is not an OS service installer or supervisor.
 ## Safety and limits
 
 - Generation goes directly through OpenCode's native OpenAI Responses provider,
-  with `store=false` and native compaction. There are no inference hooks, retries,
+  with `store=false` and portable summary compaction. There are no inference hooks, retries,
   prompt/response logging, or JavaScript routing proxy.
 - Catalog GETs use the native connection's bearer, refuse redirects, have a
   15-second deadline and a 2 MiB metadata bound. Only model limits, modalities,

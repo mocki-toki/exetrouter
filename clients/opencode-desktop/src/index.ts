@@ -32,7 +32,8 @@ export default Plugin.define({
             baseURL: config.baseURL,
             transport: config.transport,
             store: false,
-            compaction: { type: "native" },
+            // Keep the checkpoint portable across Codex and its linked Platform project.
+            compaction: { type: "summary" },
           },
         },
         models: catalog.inventory?.models ?? [],

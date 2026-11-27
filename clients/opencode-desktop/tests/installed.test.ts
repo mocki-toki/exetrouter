@@ -134,7 +134,7 @@ test("packed plugin loads in supported OpenCode 2.2–2.4 with native credential
   assert.equal(provider.package, "@opencode/ai/providers/openai/responses")
   assert.equal(provider.settings?.transport, "websocket")
   assert.equal(provider.settings?.store, false)
-  assert.deepEqual(provider.settings?.compaction, { type: "native" })
+  assert.deepEqual(provider.settings?.compaction, { type: "summary" })
 
   const blocked = pause = { started: deferred<void>(), release: deferred<void>() }
   firstLimit = 75000
