@@ -201,8 +201,10 @@ running. This is not an OS service installer or supervisor.
 ## Safety and limits
 
 - Generation goes directly through OpenCode's native OpenAI Responses provider,
-  with `store=false` and portable summary compaction. There are no inference hooks, retries,
-  prompt/response logging, or JavaScript routing proxy.
+  with `store=false` and portable summary compaction. On stock OpenCode 2.4.2+
+  an eligible legacy session can use OpenCode's native history replay while the
+  router keeps it on its linked account. The plugin does not alter messages or
+  tools, start inference, retry inference or proxy provider requests.
 - Catalog GETs use the native connection's bearer, refuse redirects, have a
   15-second deadline and a 2 MiB metadata bound. Only model limits, modalities,
   reasoning options and names are imported; remote executable/endpoint overlays
@@ -239,13 +241,14 @@ management HTTP API is exposed; ordinary CLI terminal/secret guards are intact.
 ## Native package smoke test
 
 After building, an optional isolated test packs and installs the package, then
-loads it in an exact OpenCode 2.2.0 binary against a synthetic loopback catalog:
+loads it in stock OpenCode 2.2.0 or 2.4.2 against a synthetic loopback router.
+The 2.4.2 run also checks legacy replay, compaction and the wire cache key:
 
 ```sh
 EXETROUTER_OPENCODE_PLUGIN_BIN=/absolute/path/to/opencode npm test
 ```
 
-It does not use real accounts, the normal OpenCode profile, inference or reset
+It does not use real accounts, the normal OpenCode profile, real inference or reset
 credits. npm installation in the test is offline and needs dependencies already
 cached by `npm ci`. The regular tests use only synthetic data and loopback HTTP.
 The native test does not verify the rendered Electron UI or renew ExetRouter's

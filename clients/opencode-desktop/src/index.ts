@@ -3,6 +3,7 @@ import { Catalog, providerID, providerPackage } from "./catalog"
 import { options } from "./options"
 import { Accounts, ExetRouter } from "./rpc"
 import { SessionAccounts, observeHeader } from "./session-account"
+import { registerReplay } from "./replay"
 
 export default Plugin.define({
   id: "exetrouter",
@@ -13,12 +14,13 @@ export default Plugin.define({
       editor.method.update({ integrationID: providerID, method: { type: "env", names: ["EXETROUTER_TOKEN"] } })
       editor.update(providerID, (integration) => { integration.name = "ExetRouter" })
     })
-    const catalog = new Catalog(config, async () => {
+    const auth = async () => {
       const connection = await ctx.integration.connection.active(providerID)
       if (!connection) return undefined
       const credential = await ctx.integration.connection.resolve(connection)
       return credential?.type === "key" && credential.key ? { connection, token: credential.key } : undefined
-    }, () => ctx.provider.reload())
+    }
+    const catalog = new Catalog(config, auth, () => ctx.provider.reload())
 
     await ctx.provider.transform((editor) => {
       editor.add({
@@ -40,13 +42,15 @@ export default Plugin.define({
         sourceConnection: catalog.inventory?.connection,
       })
     })
+    const replayHeaders = await registerReplay(ctx, config.baseURL, auth)
     await ctx.rpc.register(ExetRouter, {
       status: async () => catalog.status,
       refresh: () => catalog.refresh(),
     })
     const accounts = new SessionAccounts((sessionID, account) => { void accountRpc.events.emit("changed", { sessionID, account }).catch(() => {}) })
     const accountRpc = await ctx.rpc.register(Accounts, { get: async ({ sessionID }) => accounts.get(sessionID) })
-    await ctx.session.hook("model.request", (event) => {
+    await ctx.session.hook("model.request", async (event) => {
+      await replayHeaders?.(event)
       accounts.request(event)
       if (event.kind === "primary" && event.model.providerID === providerID) event.headers[observeHeader] = "true"
     })
