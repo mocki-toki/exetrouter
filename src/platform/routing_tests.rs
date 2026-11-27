@@ -953,6 +953,48 @@ async fn existing_chat_uses_its_linked_project_and_returns_to_recovered_codex() 
 }
 
 #[tokio::test]
+async fn unsupported_platform_trigger_is_rejected_before_inference_on_http_and_ws() {
+    use codex_websocket::tungstenite::{client::IntoClientRequest, Message};
+    use futures_util::{SinkExt, StreamExt};
+    let (dir, db, mock, upstream) = fixture().await;
+    let api = Api::open(&dir, &db, upstream).await;
+    let mut body = json!({"model":"gpt-6-astra","stream":true,"input":[{"role":"user","content":"synthetic"},{"type":"compaction_trigger"}]});
+    let reply = api.post("responses", &body).send().await.unwrap();
+    assert_eq!(reply.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        reply.json::<Value>().await.unwrap()["error"]["type"],
+        "unsupported_parameter"
+    );
+    let mut request = (api.base.replace("http://", "ws://") + "/v1/responses")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", api.token).parse().unwrap(),
+    );
+    let (mut socket, _) = codex_websocket::connect_async(request).await.unwrap();
+    body["type"] = json!("response.create");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    let error: Value =
+        serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(error["error"]["code"], "unsupported_parameter");
+    socket.close(None).await.unwrap();
+    assert!(mock.state.lock().unwrap().inferences.is_empty());
+    assert_eq!(
+        db.call(|conn| Ok(
+            conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r
+                .get::<_, i64>(0))?
+        ))
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn quota_refusal_falls_back_same_model_only_when_enabled_and_keeps_each_attempt_durable() {
     let (dir, db, mock, upstream) = fixture().await;
     let api = Api::open(&dir, &db, upstream.clone()).await;

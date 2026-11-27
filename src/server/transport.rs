@@ -1232,14 +1232,21 @@ async fn transfer_context(
     Ok(())
 }
 
-fn routing_outputs<'a>(payload: &Value, pending: &'a [Value]) -> &'a [Value] {
-    // A compaction checkpoint replaces the preceding context, so it needs no
-    // separate receipt and must retain its exact one-checkpoint output contract.
-    if payload["input"].as_array().is_some_and(|items| {
+const PLATFORM_TRIGGER_UNSUPPORTED: &str =
+    "Platform API requires /v1/responses/compact or client-side summary compaction";
+
+fn has_compaction_trigger(payload: &Value) -> bool {
+    payload["input"].as_array().is_some_and(|items| {
         items
             .iter()
             .any(|item| item["type"] == "compaction_trigger")
-    }) {
+    })
+}
+
+fn routing_outputs<'a>(payload: &Value, pending: &'a [Value]) -> &'a [Value] {
+    // A compaction checkpoint replaces the preceding context, so it needs no
+    // separate receipt and must retain its exact one-checkpoint output contract.
+    if has_compaction_trigger(payload) {
         &[]
     } else {
         pending
@@ -1486,6 +1493,14 @@ pub(super) async fn http(
             )
         }
     };
+    let trigger_requires_codex = !compact && has_compaction_trigger(&payload);
+    if trigger_requires_codex && account.info.id < 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "unsupported_parameter",
+            PLATFORM_TRIGGER_UNSUPPORTED,
+        );
+    }
     let mut pending_routing = Vec::new();
     if let Some(previous) = owner.filter(|&id| id != account.info.id) {
         if let Err(err) = transfer_context(
@@ -1719,6 +1734,13 @@ pub(super) async fn http(
                                     && !crate::platform::replay_safe(&payload)
                                 {
                                     break 'platform_refusal;
+                                }
+                                if trigger_requires_codex && alternate.info.id < 0 {
+                                    return error(
+                                        StatusCode::BAD_REQUEST,
+                                        "unsupported_parameter",
+                                        PLATFORM_TRIGGER_UNSUPPORTED,
+                                    );
                                 }
                                 if let Err(err) = transfer_context(
                                     &state,
@@ -3873,6 +3895,14 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         continue 'frames;
                     }
                 }
+            }
+            if account.info.id < 0 && has_compaction_trigger(&payload) {
+                let _ = send_client(
+                    &mut client,
+                    ws_error("unsupported_parameter", PLATFORM_TRIGGER_UNSUPPORTED),
+                )
+                .await;
+                continue 'frames;
             }
             let connection = connection.as_mut().expect("connected transport");
             let http = connection.is_http();
