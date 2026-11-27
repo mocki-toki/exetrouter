@@ -963,6 +963,15 @@ async fn replay_ticket_preserves_parent_and_cache_key_on_http_and_ws() {
     let healthy = api.post("responses/replay", &scope).send().await.unwrap();
     assert_eq!(healthy.status(), StatusCode::NO_CONTENT);
     assert!(!healthy.headers().contains_key("x-exetrouter-replay-ticket"));
+    let rebuild = api
+        .post("responses/replay", &scope)
+        .header("x-exetrouter-replay-mode", "rebuild")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rebuild.status(), StatusCode::NO_CONTENT);
+    assert!(rebuild.headers().contains_key("x-exetrouter-replay-ticket"));
+    assert_eq!(mock.state.lock().unwrap().native_inputs.len(), 1);
     exhausted(&db).await;
     let foreign = affinity::issue(
         "foreign-checkpoint",
@@ -976,6 +985,7 @@ async fn replay_ticket_preserves_parent_and_cache_key_on_http_and_ws() {
     invalid["checkpoint"] = json!(foreign);
     assert_eq!(
         api.post("responses/replay", &invalid)
+            .header("x-exetrouter-replay-mode", "rebuild")
             .send()
             .await
             .unwrap()

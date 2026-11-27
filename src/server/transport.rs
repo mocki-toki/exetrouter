@@ -1025,6 +1025,7 @@ pub(super) struct ReplayRequest {
 pub(super) async fn replay_ticket(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
     body: std::result::Result<Json<ReplayRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let Ok(Json(body)) = body else {
@@ -1040,11 +1041,20 @@ pub(super) async fn replay_ticket(
     let Some(upstream) = &state.upstream else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    if upstream
-        .replay_replacement(&body.model, owner)
-        .await
-        .is_none()
-    {
+    // Explicit rebuilding can be necessary even when the checkpoint's original
+    // resource is usable (for example, when compacting a mixed-history fork).
+    let rebuild = headers
+        .get("x-exetrouter-replay-mode")
+        .is_some_and(|mode| mode == "rebuild");
+    let eligible = if rebuild {
+        upstream.select_replay(&body.model, owner).await.is_ok()
+    } else {
+        upstream
+            .replay_replacement(&body.model, owner)
+            .await
+            .is_some()
+    };
+    if !eligible {
         return StatusCode::NO_CONTENT.into_response();
     }
     match affinity::issue(

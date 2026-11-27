@@ -122,8 +122,11 @@ rejects `generate=false` locally without submission/accounting or closing the WS
 Ordinary full-history clients do not need a plugin or a replay ticket. A client
 recovering an encrypted legacy checkpoint can exchange it with `POST /v1/responses/replay`:
 send `{chat, model, checkpoint}`, where `chat` is a lowercase 64-hex chat digest.
-A `204` carries `x-exetrouter-replay-ticket` only when the linked resource is
-eligible. Use it with `x-exetrouter-replay-chat` on Responses HTTP requests or the
+A `204` carries `x-exetrouter-replay-ticket` when the linked resource is
+eligible. An explicit `x-exetrouter-replay-mode: rebuild` on the exchange also
+allows the original resource if it is eligible, for example when replacing a
+legacy checkpoint with a textual summary. Use the ticket with
+`x-exetrouter-replay-chat` on Responses HTTP requests or the
 WebSocket upgrade, and send the rebuilt transcript as the regular input. The
 ticket is scoped to the bearer user, chat and wire model. It keeps routing within
 the same linked pair without granting access to any opaque input. The ticket
