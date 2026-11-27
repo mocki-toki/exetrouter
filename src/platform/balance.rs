@@ -156,12 +156,6 @@ pub(crate) fn display_remaining_nanos(balance: &serde_json::Value) -> Option<i64
         .checked_sub(e["spent_usd_nanos"].as_i64()?)
 }
 
-pub(crate) fn unpriced_note(balance: &serde_json::Value) -> Option<String> {
-    let count = unpriced_count(balance)?;
-    let noun = if count == 1 { "request" } else { "requests" };
-    Some(format!("{count} unpriced {noun} excluded"))
-}
-
 fn dollars(nanos: Option<i64>) -> String {
     nanos
         .map(|n| crate::money::usd(n as f64 / 1e9))
@@ -171,27 +165,20 @@ fn dollars(nanos: Option<i64>) -> String {
 pub fn headline(platform: &serde_json::Value) -> String {
     let b = &platform["balance"];
     if b.is_object() {
-        let remaining = display_remaining_nanos(b);
-        let label = if remaining.is_some() && unpriced_count(b).is_some() {
-            "partial estimate"
-        } else {
-            "estimated"
-        };
         format!(
-            "Platform API  ·  {} / {} left · {label}",
-            dollars(remaining),
+            "Platform API  ·  {} / {} left",
+            dollars(display_remaining_nanos(b)),
             dollars(b["initial_usd_nanos"].as_i64())
         )
     } else {
-        "Platform API  ·  Set a manual balance to estimate remaining funds".into()
+        "Platform API".into()
     }
 }
 
 pub fn detail(platform: &serde_json::Value) -> String {
     let b = &platform["balance"];
     if !b.is_object() {
-        return "Manual balance not set; provider balance is not available through Admin API."
-            .into();
+        return String::new();
     }
     let org = &b["organization"];
     let date = |v: &serde_json::Value| {
@@ -204,18 +191,22 @@ pub fn detail(platform: &serde_json::Value) -> String {
             })
             .unwrap_or_else(|| "Unknown".into())
     };
-    let partial = unpriced_note(b)
-        .map(|note| format!(" · partial estimate: {note}"))
-        .unwrap_or_default();
-    format!(
-        "Manual {} · {}\nExetRouter: {} left · standard token estimate; excludes external usage, tool fees and tier adjustments{partial}\nPlatform organization: {} left · {} · through {}",
+    let mut text = format!(
+        "Manual {} · {}",
         dollars(b["initial_usd_nanos"].as_i64()),
         date(&b["entered_at"]),
-        dollars(display_remaining_nanos(b)),
-        dollars(org["remaining_usd_nanos"].as_i64()),
-        org["status"].as_str().unwrap_or("awaiting_report").replace('_', " "),
-        date(&org["through_utc"])
-    )
+    );
+    if org["remaining_usd_nanos"].is_i64() {
+        text.push_str(&format!(
+            "\nPlatform organization: {} left · through {}",
+            dollars(org["remaining_usd_nanos"].as_i64()),
+            date(&org["through_utc"])
+        ));
+    }
+    if b["exetrouter"]["status"] == "configuration_changed" {
+        text.push_str("\nPlatform balance invalidated by a configuration change.");
+    }
+    text
 }
 
 #[cfg(test)]
@@ -361,10 +352,11 @@ mod tests {
         assert_eq!(b.exetrouter.unpriced_requests, 1);
         let platform = serde_json::json!({"balance": b});
         assert_eq!(display_remaining_nanos(&platform["balance"]), Some(-791000));
-        assert!(headline(&platform).ends_with("partial estimate"));
+        assert!(headline(&platform).ends_with("left"));
+        assert!(!headline(&platform).contains("estimate"));
         let report = detail(&platform);
-        assert!(report.contains("1 unpriced request excluded"));
-        assert!(report.contains("Platform organization: Unknown left"));
+        assert!(!report.contains("unpriced"));
+        assert!(!report.contains("Platform organization"));
         set(&conn, 1, 0, 103).unwrap();
         begin(&conn, &token, "known", 1, "gpt-5.5", "platform_http_json");
         finish(&conn, "known", "platform_http_json", Some(100));

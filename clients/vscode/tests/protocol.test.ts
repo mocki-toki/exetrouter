@@ -254,7 +254,7 @@ test("account quota meters show Platform percentage above the manual dollar esti
     } },
   }] })
   assert.deepEqual(row.meters?.map((m) => [m.label, m.remaining, m.caption]), [
-    ["Weekly", 72, "Resets Unknown"], ["Platform API · partial estimate", 50, "$43 / $86"],
+    ["Weekly", 72, "Resets Unknown"], ["Platform API", 50, "$43 / $86"],
   ])
   assert.deepEqual(row.children?.at(-1)?.args, [1])
   assert.equal(row.children?.at(-1)?.description, "50% left")

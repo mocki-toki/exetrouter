@@ -116,7 +116,7 @@ fn platform_history<'a>(account: &Value, history: &'a History) -> Option<&'a Pla
     .then_some(series)
 }
 
-pub(super) fn platform_summary(platform: &Value) -> (&'static str, String, Option<f64>) {
+pub(super) fn platform_summary(platform: &Value) -> (String, Option<f64>) {
     let balance = &platform["balance"];
     let remaining = crate::platform::balance::display_remaining_nanos(balance);
     let initial = balance["initial_usd_nanos"].as_i64();
@@ -125,16 +125,14 @@ pub(super) fn platform_summary(platform: &Value) -> (&'static str, String, Optio
     if let Some(initial) = initial {
         amount.push_str(&format!(" / {}", dollars(initial)));
     }
-    let label = if remaining.is_some() && balance["exetrouter"]["status"] == "unpriced_requests" {
-        "Platform API · partial estimate"
-    } else {
-        "Platform API"
-    };
+    if platform["refresh_error"].is_string() {
+        amount.push_str(" · Platform refresh failed");
+    }
     let percent = remaining
         .zip(initial)
         .filter(|(_, initial)| *initial > 0)
         .map(|(left, initial)| (left as f64 / initial as f64 * 100.0).clamp(0., 100.));
-    (label, amount, percent)
+    (amount, percent)
 }
 fn put(buf: &mut Buffer, y: u16, value: impl Into<Line<'static>>, color: Color) {
     Paragraph::new(value.into())
@@ -223,13 +221,13 @@ pub(super) fn draw(
                     format!("{} left{eta}", render::percent(&w["remaining_percent"])),
                 )
             } else {
-                let (label, value, percent) = platform_summary(&account["platform"]);
+                let (value, percent) = platform_summary(&account["platform"]);
                 meter(&mut buf, line(2), percent);
                 Paragraph::new(value)
                     .style(Style::default().fg(Color::Gray))
                     .render(line(3), &mut buf);
                 (
-                    label.into(),
+                    "Platform API".into(),
                     percent.map_or_else(
                         || "Unknown".into(),
                         |p| format!("{} left", render::percent_value(p)),

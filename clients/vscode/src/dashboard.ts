@@ -40,8 +40,8 @@ const date = (v: unknown) =>
 const finite = (v: unknown) => typeof v === "number" && Number.isFinite(v) ? v : null
 const percent = (p: number) => `${p.toLocaleString("en", { maximumFractionDigits: 1 })}% left`
 
-function platformMeter(platform: unknown): QuotaMeter {
-  const balance = record(record(platform).balance), estimate = record(balance.exetrouter)
+function platformMeter(value: unknown): QuotaMeter {
+  const platform = record(value), balance = record(platform.balance), estimate = record(balance.exetrouter)
   const initial = finite(balance.initial_usd_nanos), spent = finite(estimate.spent_usd_nanos)
   const unpriced = finite(estimate.unpriced_requests)
   const partial = estimate.status === "unpriced_requests" && unpriced !== null && unpriced > 0 && initial !== null && spent !== null
@@ -53,10 +53,10 @@ function platformMeter(platform: unknown): QuotaMeter {
       minimumFractionDigits: 0, maximumFractionDigits: Math.abs(usd) >= 1 ? 2 : 9 })
   }
   return {
-    label: partial ? "Platform API · partial estimate" : "Platform API",
+    label: "Platform API",
     remaining: left !== null && initial !== null && initial > 0 ? Math.max(0, Math.min(100, left / initial * 100)) : null,
     caption: `${left === null ? "Unknown" : dollars(left)}${initial === null ? "" : ` / ${dollars(initial)}`}`,
-    hint: partial ? `${unpriced} unpriced ${unpriced === 1 ? "request" : "requests"} excluded` : "Estimated funds remaining through ExetRouter",
+    ...(platform.refresh_error ? { hint: "Platform refresh failed", historical: true } : {}),
   }
 }
 
@@ -114,7 +114,7 @@ export function accountRows(body: unknown): Row[] {
       children.push({
         label: meter.label,
         description: meter.remaining === null ? "Unknown remaining" : percent(meter.remaining),
-        detail: `${meter.caption} · ${meter.hint}`,
+        detail: meter.hint ? `${meter.caption} · ${meter.hint}` : meter.caption,
         ...history,
       })
     }

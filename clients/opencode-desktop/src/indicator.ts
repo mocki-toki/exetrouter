@@ -12,11 +12,10 @@ export function quotaIndicator(state: DashboardState | undefined, now: number, o
   const title = `ExetRouter · ${account.label} · last confirmed account used by this chat`
   if (observation.resource === "platform") {
     const balance = account.platform?.balance
-    const { usd, excluded } = platformRemaining(balance)
     return {
       id: account.id,
-      label: `Platform API ${percent(platformPercent(usd, balance?.initialUSD), 0)}`,
-      title: `${title} via Platform API · ${excluded ? "partial balance estimate" : "estimated balance"}${cached ? "; cached snapshot" : ""}`,
+      label: `Platform API ${percent(platformPercent(platformRemaining(balance), balance?.initialUSD), 0)}`,
+      title: `${title} via Platform API${account.platform?.refreshError ? " · Platform refresh failed" : ""}`,
     }
   }
   const windows = visibleWindows(account)

@@ -2144,12 +2144,11 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
             y += 3;
         }
         if account["platform"].is_object() {
-            let (label, amount, percent) =
-                super::account_details::platform_summary(&account["platform"]);
+            let (amount, percent) = super::account_details::platform_summary(&account["platform"]);
             if y >= inner.y as i32 && y < end {
                 let remaining = percent.map_or_else(|| "Unknown".into(), render::percent_value);
                 frame.render_widget(
-                    Paragraph::new(format!("{label}  ·  {remaining}"))
+                    Paragraph::new(format!("Platform API  ·  {remaining}"))
                         .style(Style::default().fg(Color::White)),
                     Rect::new(inner.x, y as u16, inner.width, 1),
                 );
