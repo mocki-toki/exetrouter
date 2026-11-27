@@ -313,7 +313,7 @@ exr models --json --format opencode-v2-json --model exetrouter/gpt-5.6-sol
       "settings": {
         "baseURL": "https://api.example.com/v1",
         "compaction": {
-          "type": "native"
+          "type": "summary"
         },
         "store": false,
         "transport": "websocket"

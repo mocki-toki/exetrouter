@@ -104,7 +104,7 @@ OPENCODE_CONFIG="$PWD/exetrouter-v2.json" opencode --standalone
 
 Run from the configuration file’s directory, or use its absolute path in `OPENCODE_CONFIG`.
 
-Both exports create a dedicated provider named **ExetRouter**, with models and metadata from your account pool. V1 uses `@ai-sdk/openai`; V2 uses `@opencode/ai/providers/openai/responses`, WebSocket, `store=false` and native compaction. For V2 HTTP/SSE, set `providers.exetrouter.settings.transport` to `http`. `--standalone` starts a private OpenCode server that reads the fresh configuration.
+Both exports create a dedicated provider named **ExetRouter**, with models and metadata from your account pool. V1 uses `@ai-sdk/openai`; V2 uses `@opencode/ai/providers/openai/responses`, WebSocket, `store=false` and portable summary compaction. For V2 HTTP/SSE, set `providers.exetrouter.settings.transport` to `http`. `--standalone` starts a private OpenCode server that reads the fresh configuration.
 
 `exetrouter/gpt-5.6-sol` means provider/model. The model must appear in `exr models`; `--model` rejects unavailable IDs. Choose another imported model through `/models`. Without a model override, OpenCode follows its configured/recent/default preferences and may select another provider. Omitting the exporter's `--model` leaves the top-level `model` unset. V2 also supports `opencode run --standalone --model exetrouter/gpt-5.6-sol`.
 

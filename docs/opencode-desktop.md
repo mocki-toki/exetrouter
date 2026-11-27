@@ -41,6 +41,9 @@ does not expose account management through the OpenCode HTTP RPC surface.
   the panel, but are never automatically installed into OpenCode Accounts.
 - Select discovered models in the normal picker. Router metadata supplies limits,
   modalities and reasoning variants without inheriting a bundled OpenAI catalog.
+  The plugin uses OpenCode's summary compaction so new checkpoints can be replayed
+  on either resource of the same linked account. An existing encrypted checkpoint
+  still requires its original resource or a client-rebuilt transcript.
 - The single panel contains Overview, Usage, Tokens, Models and Settings, with
   native web controls and no separate OpenCode Settings page. The native composer
    quota indicator shows the account actually serving this chat and opens account

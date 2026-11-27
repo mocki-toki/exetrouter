@@ -118,7 +118,7 @@ test("packed plugin loads in OpenCode 2.2.0 with native credentials and a loopba
   assert.equal(provider.package, "@opencode/ai/providers/openai/responses")
   assert.equal(provider.settings?.transport, "websocket")
   assert.equal(provider.settings?.store, false)
-  assert.deepEqual(provider.settings?.compaction, { type: "native" })
+  assert.deepEqual(provider.settings?.compaction, { type: "summary" })
 
   await client.integration.connect.key({ integrationID: "exetrouter", key: "synthetic-second", location }, request)
   await client.rpc(ExetRouter).refresh({}, { ...request, location })
