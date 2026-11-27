@@ -258,6 +258,8 @@ budget is 900 seconds, with redirects disabled and no router input-size ceiling.
 Platform [compaction](https://developers.openai.com/api/reference/resources/responses/methods/compact)
 uses the public unary `/responses/compact` operation, not Codex's SSE trigger.
 Its returned visible prefix and opaque checkpoint are both preserved.
+An in-band Codex `compaction_trigger` on a Platform route is rejected before
+submission. The OpenCode plugin uses portable summary compaction instead.
 
 With both resources enabled, Codex remains first choice. Same-model Platform
 fallback requires exhaustion of **every eligible Codex subscription for that model**.
