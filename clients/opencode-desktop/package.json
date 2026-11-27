@@ -4,13 +4,19 @@
   "private": true,
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=22.12.0" },
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./rpc": "./src/rpc.ts",
     "./gui-experimental": "./dist/gui-experimental.cjs"
   },
-  "files": ["src", "dist", "README.md"],
+  "files": [
+    "src",
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "vite build",
     "typecheck": "tsc --noEmit",
@@ -18,11 +24,11 @@
     "test": "node --import tsx --test tests/*.test.ts tests/*.test.mjs"
   },
   "dependencies": {
-    "@opencode/plugin": "2.3.0",
+    "@opencode/plugin": "2.4.2",
     "effect": "4.1.0"
   },
   "devDependencies": {
-    "@opencode/client": "2.3.0",
+    "@opencode/client": "2.4.2",
     "@types/node": "22.19.7",
     "happy-dom": "21.0.4",
     "solid-js": "1.9.17",

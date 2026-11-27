@@ -1,4 +1,5 @@
 import type { SessionAccount } from "./schemas"
+import { publicModelID } from "./replay"
 
 export const observationHeader = "x-exetrouter-account"
 export const observeHeader = "x-exetrouter-observe-account"
@@ -38,7 +39,7 @@ export class SessionAccounts {
     // through completion/idle until another valid alias or provider switch.
     if (typeof key !== "string" || !/^[a-f0-9]{64}$/.test(key)) return
     this.set(event.sessionID, {
-      key, model: event.model.id, observedAt: Math.floor(Date.now() / 1000),
+      key, model: publicModelID(event.model.id), observedAt: Math.floor(Date.now() / 1000),
       ...(resource === "codex" || resource === "platform" ? { resource } : {}),
     })
   }
