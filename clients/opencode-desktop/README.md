@@ -1,15 +1,13 @@
 # ExetRouter for OpenCode Desktop (experimental)
 
 A local OpenCode V2 plugin with a dynamically discovered **ExetRouter** provider,
-a single native-web dashboard panel. Targets the
-OpenCode **2.3.0** plugin contract, with support for 2.2.x and 2.3.x hosts and an installed-package smoke test on 2.4.0; GUI APIs are experimental. This package is not
+a single native-web dashboard panel. The dashboard supports OpenCode 2.2–2.4;
+legacy recovery uses the hooks tested on stock OpenCode **2.4.2**. GUI APIs are experimental. This package is not
 published to npm. See [the integration guide](../../docs/opencode-desktop.md).
 
-For configured Platform accounts, Overview shows estimated remaining funds from
-the operator's manual balance minus ExetRouter standard token costs. Account
-details also show a separate organization-wide estimate from delayed Costs API
-reports. New entries restart both calculations; neither is a live provider
-balance. Missing data stays explicitly unavailable. See [manual balance setup](../../docs/platform-api.md#manual-remaining-funds-estimates).
+For configured Platform accounts, Overview and account details show estimated
+remaining funds from the operator's manual balance minus known ExetRouter
+standard token costs. Missing balances stay unknown. See [manual balance setup](../../docs/platform-api.md#manual-remaining-funds-estimates).
 
 ## Build
 
@@ -209,8 +207,10 @@ running. This is not an OS service installer or supervisor.
 ## Safety and limits
 
 - Generation goes directly through OpenCode's native OpenAI Responses provider,
-  with `store=false` and portable summary compaction. There are no inference hooks, retries,
-  prompt/response logging, or JavaScript routing proxy.
+  with `store=false` and portable summary compaction. On stock OpenCode 2.4.2,
+  an eligible legacy session can use native history replay while the router
+  keeps it on its linked account. The plugin does not alter messages or tools,
+  start or retry inference, or proxy provider requests.
 - Catalog GETs use the native connection's bearer, refuse redirects, have a
   15-second deadline and a 2 MiB metadata bound. Only model limits, modalities,
   reasoning options and names are imported; remote executable/endpoint overlays
@@ -247,7 +247,8 @@ management HTTP API is exposed; ordinary CLI terminal/secret guards are intact.
 ## Native package smoke test
 
 After building, an optional isolated test packs and installs the package, then
-loads it in a supplied OpenCode 2.2.x, 2.3.x or 2.4.x binary against a synthetic loopback catalog:
+loads it in a supplied OpenCode 2.2.x, 2.3.x or 2.4.x binary against a synthetic
+loopback router. The 2.4.2 run also checks legacy replay and compaction:
 
 ```sh
 EXETROUTER_OPENCODE_PLUGIN_BIN=/absolute/path/to/opencode npm test

@@ -17,9 +17,9 @@ Desktop window → typed IPC → Electron main → exr doctor/usage --json
                                            → standalone / restricted SSH
 ```
 
-The server entry registers only the ExetRouter integration, provider and a
-content-free catalog-status/refresh RPC. It neither edits global configuration
-nor intercepts model requests. Account-specific inventory is bound to its
+The server entry registers the ExetRouter provider, catalog and account RPCs,
+and hooks for account observation and eligible legacy replay. It does not edit
+global configuration or proxy requests. Account-specific inventory is bound to its
 OpenCode connection, refreshed after credential changes and atomically replaced.
 A temporary same-connection discovery failure keeps the last inventory marked
 stale. A location reload can also reuse a recent in-memory inventory while
@@ -43,6 +43,13 @@ does not expose account management through the OpenCode HTTP RPC surface.
   the panel, but are never automatically installed into OpenCode Accounts.
 - Select discovered models in the normal picker. Router metadata supplies limits,
   modalities and reasoning variants without inheriting a bundled OpenAI catalog.
+  The plugin uses summary compaction so new checkpoints can be replayed on either
+  resource of the same linked account. With stock OpenCode 2.4.2+ and a router
+  that supports replay tickets, it can also recover an existing encrypted
+  checkpoint automatically when the linked resource is eligible. OpenCode
+  rebuilds the transcript from its own history for that chat. Once a portable
+  summary replaces the old checkpoint, OpenCode uses its normal history selection
+  again. The selected model, tool settings and prompt cache key are preserved.
 - The single panel contains Overview, Usage, Tokens, Models and Settings, with
   native web controls and no separate OpenCode Settings page. The native composer
    quota indicator shows the account actually serving this chat and opens account
