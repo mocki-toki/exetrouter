@@ -256,6 +256,8 @@ impl Run<'_> {
                 options["providers"]["exetrouter"]["settings"]["transport"] =
                     json!(if self.websocket { "websocket" } else { "http" });
                 if let Some(policy) = policy {
+                    options["providers"]["exetrouter"]["settings"]["compaction"]["type"] =
+                        json!("native");
                     let window = options["providers"]["exetrouter"]["models"][self.model]["limit"]
                         ["input"]
                         .as_u64()

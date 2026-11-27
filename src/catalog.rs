@@ -445,7 +445,7 @@ fn opencode_projection(models: &[Model], v1: bool) -> Result<Value> {
         json!({"providers":{"exetrouter":{
             "name":"ExetRouter","package":"@opencode/ai/providers/openai/responses",
             "env":["EXETROUTER_TOKEN"],
-            "settings":{"transport":"websocket","store":false,"compaction":{"type":"native"}},
+            "settings":{"transport":"websocket","store":false,"compaction":{"type":"summary"}},
             "models":entries
         }}})
     })

@@ -9,6 +9,7 @@ ExetRouter supports the routes below, authenticated with a router bearer. The op
 | `POST /v1/responses` | JSON or SSE |
 | `GET /v1/responses` with WS upgrade | Sequential native `response.create` |
 | `POST /v1/responses/compact` | One opaque compaction checkpoint |
+| `POST /v1/responses/replay` | ExetRouter extension: exchange an owned checkpoint for a stateless routing ticket, without inference |
 | `POST /v1/chat/completions` | Limited Chat JSON or SSE |
 | `POST /v1/embeddings` | Unary JSON, using the configured Platform project only |
 | `POST /v1/images/generations`, `/v1/images/edits` | [Native unary Codex images](native-tools.md#image-api), JSON, one `gpt-image-2` output |
@@ -116,6 +117,16 @@ rejects `generate=false` locally without submission/accounting or closing the WS
 
 ### Context ownership
 
+Ordinary full-history clients do not need a plugin or a replay ticket. A client
+recovering an encrypted legacy checkpoint can exchange it with `POST /v1/responses/replay`:
+send `{chat, model, checkpoint}`, where `chat` is a lowercase 64-hex chat digest.
+A `204` carries `x-exetrouter-replay-ticket` only when the linked resource is
+eligible. Use it with `x-exetrouter-replay-chat` on Responses HTTP requests or the
+WebSocket upgrade, and send the rebuilt transcript as the regular input. The
+ticket is scoped to the bearer user, chat and wire model. It keeps routing within
+the same linked pair without granting access to any opaque input. The ticket
+and chat digest are never sent upstream and do not change prompt cache keys.
+
 - `previous_response_id` is supported only for responses owned by the current WS. HTTP/new-socket previous IDs are unsupported. Bearer validity is checked on every `response.create`.
 - `encrypted_content` and native `encrypted_function_args` carry authenticated opaque envelopes; empty argument arrays are valid. The upstream receives the original values after verification. Proofs bind values to their user and issuing account without a router-imposed time limit or per-output database rows, including proofs with a passed legacy expiry. Restart preserves them with the existing key and user/account state. Current bearer validity and account authorization/eligibility still apply. Raw values without a router proof are rejected even when their digests remain stored. Unknown/foreign/tampered input returns `context_not_found`; conflicting untransferred owners return `context_account_mismatch`.
 - A context snapshot accepts up to 16,384 unique opaque values, including encrypted tool arguments. Duplicate values count once per field kind. Larger snapshots must be compacted; there is no router-defined request byte ceiling.
@@ -178,9 +189,11 @@ Additional metadata is limited to bounded `openai-model`, `x-openai-model`, `x-m
 
 Clients may opt into content-free account observation with
 `x-exetrouter-observe-account: true`. Successful HTTP replies add
-`x-exetrouter-account`; native WS adds it in `response.metadata` after each
+`x-exetrouter-account` and `x-exetrouter-resource` (`codex` or `platform`);
+native WS adds both in `response.metadata` after each
 generation's `response.created`, including reused connections and account
-transfers. It is a domain-separated user/account HMAC alias matching that user's
+transfers. The resource is the one actually serving the request. Both resources
+of one parent account report the same `x-exetrouter-account`, a domain-separated user/account HMAC alias matching that user's
 authenticated management `quota_accounts[].observation_key`, not an upstream
 identity, account selector, ownership proof or credential. Other users receive
 different aliases. The opt-in header is not forwarded upstream; ordinary clients

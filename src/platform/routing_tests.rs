@@ -839,6 +839,276 @@ async fn native_handshake_quota_fallback_keeps_downstream_ws_and_recovers_platfo
 }
 
 #[tokio::test]
+async fn existing_chat_uses_its_linked_project_and_returns_to_recovered_codex() {
+    use codex_websocket::tungstenite::{client::IntoClientRequest, Message};
+    use futures_util::{SinkExt, StreamExt};
+    for platform_only in [false, true] {
+        let (dir, db, mock, upstream) = fixture().await;
+        mock.state.lock().unwrap().native_success = true;
+        db.call(|conn| Resources::Both.set(conn)).await.unwrap();
+        let api = Api::open(&dir, &db, upstream).await;
+        let mut request = (api.base.replace("http://", "ws://") + "/v1/responses")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", api.token).parse().unwrap(),
+        );
+        let (mut socket, _) = codex_websocket::connect_async(request).await.unwrap();
+        let mut full = vec![json!({"role":"user","content":"original visible text"})];
+        let mut previous = None;
+        for (step, expected) in ["resp_native_1", "resp_platform_1", "resp_native_2"]
+            .into_iter()
+            .enumerate()
+        {
+            let input = if step == 0 {
+                full.clone()
+            } else {
+                vec![json!({"role":"user","content":format!("follow-up {step}")})]
+            };
+            if step != 0 {
+                full.extend(input.clone());
+            }
+            let body = json!({"type":"response.create","model":"gpt-6.1-sol","store":false,"input":input,"previous_response_id":previous});
+            socket
+                .send(Message::Text(body.to_string().into()))
+                .await
+                .unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let message = socket.next().await.unwrap().unwrap();
+                    if let Ok(text) = message.to_text() {
+                        let event: Value = serde_json::from_str(text).unwrap();
+                        assert_ne!(event["type"], "error", "{event}");
+                        if event["type"] == "response.completed" {
+                            break event["response"].clone();
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(response["id"], expected);
+            previous = Some(expected);
+            if step < 2 {
+                full.extend(response["output"].as_array().unwrap().iter().cloned());
+            }
+            if step == 0 {
+                exhausted(&db).await;
+                if platform_only {
+                    db.call(|conn| Resources::Platform.set(conn)).await.unwrap();
+                }
+            }
+            if step == 1 {
+                db.call(|conn| {
+                    Resources::Both.set(conn)?;
+                    conn.execute("UPDATE oauth_quota_windows SET used_percent=25,observed_at=?1 WHERE account_id=1", [chrono::Utc::now().timestamp()])?;
+                    Ok(())
+                }).await.unwrap();
+            }
+        }
+        socket.close(None).await.unwrap();
+        // A full resend after reconnect may still carry reasoning from both resources.
+        let reply = api
+            .post("responses", &json!({"model":"gpt-6.1-sol","input":full}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(reply.json::<Value>().await.unwrap()["id"], "resp_native_3");
+        let state = mock.state.lock().unwrap();
+        assert_eq!(state.inferences.len(), 1);
+        assert_eq!(state.native_inputs.len(), 3);
+        let platform = state.inferences[0].to_string();
+        let returned = state.native_inputs[1].to_string();
+        assert!(
+            platform.contains("original visible text")
+                && platform.contains("synthetic Codex output")
+        );
+        assert!(
+            returned.contains("original visible text")
+                && returned.contains("synthetic Platform output")
+        );
+        assert!(!platform.contains("codex-reasoning-fixture"));
+        assert!(!returned.contains("platform-opaque-fixture"));
+    }
+}
+
+#[tokio::test]
+async fn replay_ticket_preserves_parent_and_cache_key_on_http_and_ws() {
+    use codex_websocket::tungstenite::{client::IntoClientRequest, Message};
+    use futures_util::{SinkExt, StreamExt};
+    let (dir, db, mock, upstream) = fixture().await;
+    mock.state.lock().unwrap().native_success = true;
+    db.call(|conn| Resources::Both.set(conn)).await.unwrap();
+    let api = Api::open(&dir, &db, upstream).await;
+    let model = "gpt-6.1-sol";
+    let chat = "a".repeat(64);
+    let checkpoint =
+        affinity::issue("legacy-checkpoint", affinity::Kind::Content, &[7; 32], 1, 1).unwrap();
+    let scope = json!({"chat":chat,"model":model,"checkpoint":checkpoint});
+    let body = json!({"model":model,"store":false,"prompt_cache_key":"stable-open-code-cache","input":[{"role":"user","content":"saved user message"},{"type":"function_call","call_id":"call_1","name":"echo","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"saved result"}]});
+    let initial = api.post("responses", &body).send().await.unwrap();
+    assert_eq!(initial.status(), StatusCode::OK);
+    let parent = initial.headers()["x-exetrouter-account"].clone();
+    assert_eq!(
+        initial.json::<Value>().await.unwrap()["id"],
+        "resp_native_1"
+    );
+    let healthy = api.post("responses/replay", &scope).send().await.unwrap();
+    assert_eq!(healthy.status(), StatusCode::NO_CONTENT);
+    assert!(!healthy.headers().contains_key("x-exetrouter-replay-ticket"));
+    exhausted(&db).await;
+    let foreign = affinity::issue(
+        "foreign-checkpoint",
+        affinity::Kind::Content,
+        &[7; 32],
+        2,
+        1,
+    )
+    .unwrap();
+    let mut invalid = scope.clone();
+    invalid["checkpoint"] = json!(foreign);
+    assert_eq!(
+        api.post("responses/replay", &invalid)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let reply = api.post("responses/replay", &scope).send().await.unwrap();
+    assert_eq!(reply.status(), StatusCode::NO_CONTENT);
+    let ticket = reply.headers()["x-exetrouter-replay-ticket"].clone();
+    assert!(!ticket.to_str().unwrap().contains("legacy-checkpoint"));
+    let response = api
+        .post("responses", &body)
+        .header("x-exetrouter-replay-chat", "b".repeat(64))
+        .header("x-exetrouter-replay-ticket", ticket.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(mock.state.lock().unwrap().inferences.is_empty());
+
+    let mut request = (api.base.replace("http://", "ws://") + "/v1/responses")
+        .into_client_request()
+        .unwrap();
+    for (name, value) in [
+        ("authorization", format!("Bearer {}", api.token)),
+        ("x-exetrouter-replay-chat", chat.clone()),
+        (
+            "x-exetrouter-replay-ticket",
+            ticket.to_str().unwrap().to_owned(),
+        ),
+        ("x-exetrouter-observe-account", "true".into()),
+    ] {
+        request.headers_mut().insert(name, value.parse().unwrap());
+    }
+    let (mut socket, _) = codex_websocket::connect_async(request).await.unwrap();
+    for resource in ["platform", "platform", "codex"] {
+        if resource == "codex" {
+            db.call(|conn| {
+                conn.execute("UPDATE oauth_quota_windows SET used_percent=25,observed_at=?1 WHERE account_id=1", [chrono::Utc::now().timestamp()])?;
+                Ok(())
+            }).await.unwrap();
+        }
+        let mut frame = body.clone();
+        frame["type"] = json!("response.create");
+        socket
+            .send(Message::Text(frame.to_string().into()))
+            .await
+            .unwrap();
+        let observed = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut observed = None;
+            loop {
+                let event = socket.next().await.unwrap().unwrap();
+                if let Ok(text) = event.to_text() {
+                    let event: Value = serde_json::from_str(text).unwrap();
+                    assert_ne!(event["type"], "error", "{event}");
+                    if event["type"] == "response.metadata" {
+                        observed = Some(event["headers"].clone());
+                    }
+                    if event["type"] == "response.completed" {
+                        break observed.unwrap();
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(observed["x-exetrouter-resource"], resource);
+        assert_eq!(observed["x-exetrouter-account"], parent.to_str().unwrap());
+    }
+    socket.close(None).await.unwrap();
+    // After a portable summary and a reconnect the ticket is sufficient, even without opaque output items.
+    let mut summary = body;
+    summary["input"] = json!([{"role":"user","content":"portable summary"}]);
+    let reply = api
+        .post("responses", &summary)
+        .header("x-exetrouter-replay-chat", chat)
+        .header("x-exetrouter-replay-ticket", ticket)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    assert_eq!(reply.headers()["x-exetrouter-account"], parent);
+    assert_eq!(reply.json::<Value>().await.unwrap()["id"], "resp_native_3");
+    let state = mock.state.lock().unwrap();
+    assert_eq!(state.inferences.len(), 2);
+    assert_eq!(state.native_inputs.len(), 3);
+    let original = &state.native_inputs[0]["prompt_cache_key"];
+    assert!(original.as_str().is_some());
+    for input in state.inferences.iter().chain(&state.native_inputs) {
+        assert_eq!(&input["prompt_cache_key"], original);
+        assert_eq!(input["model"], model);
+    }
+    assert_eq!(state.inferences[0]["input"][2]["output"], "saved result");
+}
+
+#[tokio::test]
+async fn unsupported_platform_trigger_is_rejected_before_inference_on_http_and_ws() {
+    use codex_websocket::tungstenite::{client::IntoClientRequest, Message};
+    use futures_util::{SinkExt, StreamExt};
+    let (dir, db, mock, upstream) = fixture().await;
+    let api = Api::open(&dir, &db, upstream).await;
+    let mut body = json!({"model":"gpt-6-astra","stream":true,"input":[{"role":"user","content":"synthetic"},{"type":"compaction_trigger"}]});
+    let reply = api.post("responses", &body).send().await.unwrap();
+    assert_eq!(reply.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        reply.json::<Value>().await.unwrap()["error"]["type"],
+        "unsupported_parameter"
+    );
+    let mut request = (api.base.replace("http://", "ws://") + "/v1/responses")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", api.token).parse().unwrap(),
+    );
+    let (mut socket, _) = codex_websocket::connect_async(request).await.unwrap();
+    body["type"] = json!("response.create");
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
+    let error: Value =
+        serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(error["error"]["code"], "unsupported_parameter");
+    socket.close(None).await.unwrap();
+    assert!(mock.state.lock().unwrap().inferences.is_empty());
+    assert_eq!(
+        db.call(|conn| Ok(
+            conn.query_row("SELECT COUNT(*) FROM usage_events", [], |r| r
+                .get::<_, i64>(0))?
+        ))
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn quota_refusal_falls_back_same_model_only_when_enabled_and_keeps_each_attempt_durable() {
     let (dir, db, mock, upstream) = fixture().await;
     let api = Api::open(&dir, &db, upstream.clone()).await;

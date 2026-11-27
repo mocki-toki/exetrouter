@@ -405,6 +405,28 @@ fn backend_event_error(event: &Value) -> Option<(StatusCode, Value)> {
 }
 
 impl RequestLog {
+    fn account_observation(&self) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-exetrouter-account",
+            HeaderValue::from_str(&crate::account_preferences::observation_key(
+                &self.context_key,
+                self.user_id,
+                self.observation_account_id,
+            ))
+            .expect("hex metadata"),
+        );
+        headers.insert(
+            "x-exetrouter-resource",
+            HeaderValue::from_static(if self.account_id < 0 {
+                "platform"
+            } else {
+                "codex"
+            }),
+        );
+        headers
+    }
+
     async fn begin(
         state: &AppState,
         mut record: RequestRecord,
@@ -960,6 +982,111 @@ impl ContextError {
         (if storage { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::BAD_REQUEST },Json(json!({"error":{"type":if storage {"storage_unavailable"} else {"invalid_request_error"},"code":self.code(),"message":self.message()}}))).into_response()
     }
 }
+
+fn replay_scope(chat: &str, model: &str) -> Option<String> {
+    (chat.len() == 64
+        && chat
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && !model.is_empty()
+        && model.len() <= 256
+        && model.bytes().all(|b| b.is_ascii_graphic()))
+    .then(|| format!("{chat}.{model}"))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReplayRequest {
+    chat: String,
+    model: String,
+    checkpoint: String,
+}
+
+/// Exchange an already issued, user-owned opaque proof for an account-only
+/// ticket. This endpoint never connects to either inference backend.
+pub(super) async fn replay_ticket(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    body: std::result::Result<Json<ReplayRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = body else {
+        return ContextError::Invalid.response();
+    };
+    let Some(scope) = replay_scope(&body.chat, &body.model) else {
+        return ContextError::Invalid.response();
+    };
+    let Ok(owner) = affinity::reasoning_owner(&body.checkpoint, &state.key, identity.user_id)
+    else {
+        return ContextError::Missing.response();
+    };
+    let Some(upstream) = &state.upstream else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    if upstream
+        .replay_replacement(&body.model, owner)
+        .await
+        .is_none()
+    {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    match affinity::issue(
+        &scope,
+        affinity::Kind::Replay,
+        &state.key,
+        identity.user_id,
+        owner,
+    ) {
+        Ok(ticket) => (
+            StatusCode::NO_CONTENT,
+            [
+                ("cache-control", "no-store"),
+                ("x-exetrouter-replay-ticket", ticket.as_str()),
+            ],
+        )
+            .into_response(),
+        Err(_) => ContextError::Storage.response(),
+    }
+}
+
+fn replay_owner(
+    state: &AppState,
+    identity: &Identity,
+    model: &str,
+) -> std::result::Result<Option<i64>, ContextError> {
+    match (&identity.replay_ticket, &identity.replay_chat) {
+        (None, None) => Ok(None),
+        (Some(ticket), Some(chat)) => {
+            let scope = chat
+                .to_str()
+                .ok()
+                .and_then(|chat| replay_scope(chat, model))
+                .ok_or(ContextError::Invalid)?;
+            let ticket = ticket.to_str().map_err(|_| ContextError::Invalid)?;
+            affinity::replay_owner(ticket, &scope, &state.key, identity.user_id)
+                .map(Some)
+                .map_err(|_| ContextError::Missing)
+        }
+        _ => Err(ContextError::Invalid),
+    }
+}
+
+async fn verify_replay_owner(
+    upstream: &crate::upstream::Upstream,
+    replay: Option<i64>,
+    context: Option<i64>,
+) -> std::result::Result<(), ContextError> {
+    if let Some((replay, context)) = replay.zip(context).filter(|(a, b)| a != b) {
+        if !upstream
+            .linked_resources(replay, context)
+            .await
+            .map_err(|_| ContextError::Storage)?
+        {
+            return Err(ContextError::Conflict);
+        }
+    }
+    Ok(())
+}
+
 async fn context_account(
     state: &AppState,
     identity: &Identity,
@@ -1096,22 +1223,95 @@ async fn token_is_active(state: &AppState, identity: &Identity) -> bool {
     )
 }
 
+/// Use the latest backend's reasoning on a reconnect, or the existing socket's
+/// when available. A full transcript can carry both sides of the linked route.
+async fn project_mixed_reasoning(
+    state: &AppState,
+    identity: &Identity,
+    upstream: &crate::upstream::Upstream,
+    payload: &mut Value,
+    bound: Option<i64>,
+) -> std::result::Result<(), ContextError> {
+    if !crate::platform::replay_safe(payload) || !payload["previous_response_id"].is_null() {
+        return Ok(());
+    }
+    let owners = replay_owners(state, identity, payload)?;
+    let (Some(first), Some(last)) = (
+        owners.iter().flatten().copied().chain(bound).min(),
+        owners.iter().flatten().copied().chain(bound).max(),
+    ) else {
+        return Ok(());
+    };
+    if first == last {
+        return Ok(());
+    }
+    if owners.iter().flatten().any(|&id| id != first && id != last)
+        || !upstream
+            .linked_resources(first, last)
+            .await
+            .map_err(|_| ContextError::Storage)?
+    {
+        return Err(ContextError::Conflict);
+    }
+    let selected = bound
+        .filter(|&id| id == first || id == last)
+        .unwrap_or_else(|| *owners.iter().flatten().next_back().expect("observed owner"));
+    retain_reasoning(payload, owners, selected);
+    Ok(())
+}
+
+fn replay_owners(
+    state: &AppState,
+    identity: &Identity,
+    payload: &Value,
+) -> std::result::Result<Vec<Option<i64>>, ContextError> {
+    payload["input"]
+        .as_array()
+        .expect("replayable transcript")
+        .iter()
+        .map(|item| {
+            crate::platform::replay_reasoning(item)
+                .map(|proof| {
+                    affinity::reasoning_owner(proof, &state.key, identity.user_id)
+                        .map_err(|_| ContextError::Missing)
+                })
+                .transpose()
+        })
+        .collect()
+}
+
+fn retain_reasoning(payload: &mut Value, owners: Vec<Option<i64>>, target: i64) {
+    let mut owners = owners.into_iter();
+    payload["input"]
+        .as_array_mut()
+        .expect("replayable transcript")
+        .retain(|_| owners.next().flatten().is_none_or(|id| id == target));
+}
+
 async fn select_context_account(
     upstream: &crate::upstream::Upstream,
     model: &str,
     session: Option<&str>,
     owner: Option<i64>,
     payload: &Value,
+    replay: Option<i64>,
 ) -> std::result::Result<crate::upstream::Selection, crate::upstream::SelectError> {
     if !payload["conversation"].is_null() {
         let id = owner.ok_or(crate::upstream::SelectError::UpstreamUnavailable)?;
         upstream.select_pinned(model, id).await
     } else {
-        let selected = upstream.select_continuation(model, session, owner).await?;
+        let owner = owner.or(replay);
+        let selected = if replay.is_some() {
+            upstream
+                .select_replay(model, owner.expect("replay owner"))
+                .await?
+        } else {
+            upstream.select_continuation(model, session, owner).await?
+        };
         if let Some(id) =
             owner.filter(|id| *id != selected.info.id && (*id < 0 || selected.info.id < 0))
         {
-            if !crate::platform::transfer_safe(payload) {
+            if !crate::platform::transfer_safe(payload) && !crate::platform::replay_safe(payload) {
                 return upstream.select_pinned(model, id).await;
             }
         }
@@ -1141,13 +1341,37 @@ async fn transfer_context(
     state: &AppState,
     identity: &Identity,
     payload: &mut Value,
+    previous_account: i64,
     account: &Account,
     pending: &mut Vec<Value>,
 ) -> std::result::Result<(), ContextError> {
     if !payload["conversation"].is_null() {
         return Err(ContextError::Conflict);
     }
-    if account.info.id < 0 && !crate::platform::transfer_safe(payload) {
+    let target = account.info.id;
+    if (previous_account < 0) != (target < 0) {
+        if !payload["previous_response_id"].is_null()
+            || !state
+                .upstream
+                .as_ref()
+                .expect("configured upstream")
+                .linked_resources(previous_account, target)
+                .await
+                .map_err(|_| ContextError::Storage)?
+        {
+            return Err(ContextError::Conflict);
+        }
+        if !crate::platform::transfer_safe(payload) {
+            if !crate::platform::replay_safe(payload) {
+                return Err(ContextError::Conflict);
+            }
+            let owners = replay_owners(state, identity, payload)?;
+            if owners.iter().flatten().any(|&id| id != previous_account) {
+                return Err(ContextError::Conflict);
+            }
+            retain_reasoning(payload, owners, target);
+        }
+    } else if target < 0 && !crate::platform::transfer_safe(payload) {
         return Err(ContextError::Conflict);
     }
     let refs = affinity::references(&payload["input"], &state.key, identity.user_id)
@@ -1183,14 +1407,21 @@ async fn transfer_context(
     Ok(())
 }
 
-fn routing_outputs<'a>(payload: &Value, pending: &'a [Value]) -> &'a [Value] {
-    // A compaction checkpoint replaces the preceding context, so it needs no
-    // separate receipt and must retain its exact one-checkpoint output contract.
-    if payload["input"].as_array().is_some_and(|items| {
+const PLATFORM_TRIGGER_UNSUPPORTED: &str =
+    "Platform API requires /v1/responses/compact or client-side summary compaction";
+
+fn has_compaction_trigger(payload: &Value) -> bool {
+    payload["input"].as_array().is_some_and(|items| {
         items
             .iter()
             .any(|item| item["type"] == "compaction_trigger")
-    }) {
+    })
+}
+
+fn routing_outputs<'a>(payload: &Value, pending: &'a [Value]) -> &'a [Value] {
+    // A compaction checkpoint replaces the preceding context, so it needs no
+    // separate receipt and must retain its exact one-checkpoint output contract.
+    if has_compaction_trigger(payload) {
         &[]
     } else {
         pending
@@ -1257,15 +1488,7 @@ fn ws_response_metadata(
 ) -> std::result::Result<Option<String>, WsInterruption> {
     let mut safe = response_metadata(headers);
     if observe_account {
-        safe.insert(
-            "x-exetrouter-account",
-            HeaderValue::from_str(&crate::account_preferences::observation_key(
-                &log.context_key,
-                log.user_id,
-                log.observation_account_id,
-            ))
-            .expect("hex metadata"),
-        );
+        safe.extend(log.account_observation());
     }
     if let Some(value) = headers.get("x-codex-turn-state") {
         let turn = value
@@ -1381,6 +1604,11 @@ pub(super) async fn http(
         Ok(account) => account,
         Err(err) => return err.response(),
     };
+    if let Err(err) =
+        project_mixed_reasoning(&state, &identity, &upstream, &mut payload, None).await
+    {
+        return err.response();
+    }
     if turn_account.is_some_and(|account| transferred_turn(&state, &identity, &payload, account)) {
         turn_account = None;
         turn_state = None;
@@ -1417,6 +1645,13 @@ pub(super) async fn http(
         return ContextError::Conflict.response();
     }
     let owner = context.or(turn_account);
+    let replay = match replay_owner(&state, &identity, &model) {
+        Ok(replay) => replay,
+        Err(err) => return err.response(),
+    };
+    if let Err(err) = verify_replay_owner(&upstream, replay, owner).await {
+        return err.response();
+    }
     let mut backoff = AdmissionBackoff::default();
     let selected = backoff
         .check(state.stopped.clone(), || {
@@ -1426,6 +1661,7 @@ pub(super) async fn http(
                 cache.preferred.then_some(cache.session.as_str()),
                 owner,
                 &payload,
+                replay,
             )
         })
         .await;
@@ -1455,12 +1691,21 @@ pub(super) async fn http(
             )
         }
     };
+    let trigger_requires_codex = !compact && has_compaction_trigger(&payload);
+    if trigger_requires_codex && account.info.id < 0 {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "unsupported_parameter",
+            PLATFORM_TRIGGER_UNSUPPORTED,
+        );
+    }
     let mut pending_routing = Vec::new();
-    if owner.is_some_and(|id| id != account.info.id) {
+    if let Some(previous) = owner.filter(|&id| id != account.info.id) {
         if let Err(err) = transfer_context(
             &state,
             &identity,
             &mut payload,
+            previous,
             &account,
             &mut pending_routing,
         )
@@ -1665,18 +1910,33 @@ pub(super) async fn http(
                     {
                         excluded.push(account.info.id);
                         if excluded.len() < 4 {
-                            if let Ok(alternate) =
-                                upstream.select_excluding(&model, None, &excluded).await
+                            if let Ok(alternate) = upstream
+                                .select_after_quota_refusal(
+                                    &model,
+                                    account.info.id,
+                                    &excluded,
+                                    replay.is_some(),
+                                )
+                                .await
                             {
                                 if (account.info.id < 0 || alternate.info.id < 0)
                                     && !crate::platform::transfer_safe(&payload)
+                                    && !crate::platform::replay_safe(&payload)
                                 {
                                     break 'platform_refusal;
+                                }
+                                if trigger_requires_codex && alternate.info.id < 0 {
+                                    return error(
+                                        StatusCode::BAD_REQUEST,
+                                        "unsupported_parameter",
+                                        PLATFORM_TRIGGER_UNSUPPORTED,
+                                    );
                                 }
                                 if let Err(err) = transfer_context(
                                     &state,
                                     &identity,
                                     &mut payload,
+                                    account.info.id,
                                     &alternate,
                                     &mut pending_routing,
                                 )
@@ -1778,14 +2038,7 @@ pub(super) async fn http(
         tracing::info!(event="upstream_stream_opened",request_id=%log.id,turn_state_returned=response_turn_state.is_some());
         Source::Http(response)
     };
-    let observation = identity.observe_account.then(|| {
-        HeaderValue::from_str(&crate::account_preferences::observation_key(
-            &state.key,
-            identity.user_id,
-            log.observation_account_id,
-        ))
-        .expect("hex metadata")
-    });
+    let observation = identity.observe_account.then(|| log.account_observation());
     let (send, receive) = mpsc::channel::<Bytes>(crate::payload::SSE_QUEUE_CHUNKS);
     let (mut json_send, json_receive) = tokio::sync::oneshot::channel::<Result<JsonReply>>();
     state.jobs.spawn(async move {
@@ -1993,9 +2246,7 @@ pub(super) async fn http(
     };
     response.headers_mut().extend(response_headers);
     if let Some(observation) = observation.filter(|_| response.status().is_success()) {
-        response
-            .headers_mut()
-            .insert("x-exetrouter-account", observation);
+        response.headers_mut().extend(observation);
     }
     if let Some(value) = response_turn_state {
         response.headers_mut().insert("x-codex-turn-state", value);
@@ -2249,15 +2500,7 @@ async fn platform_compact(
 fn unary_json(value: Value, log: &RequestLog, observe_account: bool) -> Response {
     let mut response = Json(value).into_response();
     if observe_account {
-        response.headers_mut().insert(
-            "x-exetrouter-account",
-            HeaderValue::from_str(&crate::account_preferences::observation_key(
-                &log.context_key,
-                log.user_id,
-                log.observation_account_id,
-            ))
-            .expect("hex metadata"),
-        );
+        response.headers_mut().extend(log.account_observation());
     }
     response
 }
@@ -3053,6 +3296,13 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             .await;
             continue;
         };
+        let replay = match replay_owner(&state, &identity, &model) {
+            Ok(replay) => replay,
+            Err(err) => {
+                let _ = send_client(&mut client, ws_error(err.code(), err.message())).await;
+                continue;
+            }
+        };
         normalize_messages(&mut payload);
         if enforce_fast_mode(&state, &identity, &mut payload)
             .await
@@ -3175,6 +3425,18 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
             // Codex replays its first turn token even after an authorized transfer.
             // Authenticate and discard retired state before comparing it with the
             // replacement account's opaque output in a full-context request.
+            if let Err(err) = project_mixed_reasoning(
+                &state,
+                &identity,
+                &upstream,
+                &mut payload,
+                binding.as_ref().map(|b| b.account.info.id),
+            )
+            .await
+            {
+                let _ = send_client(&mut client, ws_error(err.code(), err.message())).await;
+                continue 'frames;
+            }
             let (mut context, portable) = match context_account(&state, &identity, &payload).await {
                 Ok(context) => context,
                 Err(err) => {
@@ -3209,6 +3471,10 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                 continue 'frames;
             }
             let context = context.or(owner);
+            if let Err(err) = verify_replay_owner(&upstream, replay, context).await {
+                let _ = send_client(&mut client, ws_error(err.code(), err.message())).await;
+                continue 'frames;
+            }
             if let Some(value) = &frame_turn {
                 let metadata = payload
                     .as_object_mut()
@@ -3260,7 +3526,13 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                             continue 'frames;
                         }
                     };
-                    if disabled
+                    let prefer_codex = if id < 0 {
+                        upstream.recovered_codex(&model, id).await
+                    } else {
+                        None
+                    };
+                    if prefer_codex.is_some()
+                        || disabled
                         || upstream.quota_exhausted(id).await.unwrap_or(false)
                         || upstream.threshold_reached(id).await.unwrap_or(false)
                         || upstream
@@ -3268,11 +3540,23 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                             .await
                             .unwrap_or(false)
                     {
-                        if let Ok(account) =
-                            select_context_account(&upstream, &model, None, Some(id), &payload)
+                        let selected = match prefer_codex {
+                            Some(account) => Ok(account),
+                            None => {
+                                select_context_account(
+                                    &upstream,
+                                    &model,
+                                    None,
+                                    Some(id),
+                                    &payload,
+                                    replay,
+                                )
                                 .await
-                        {
+                            }
+                        };
+                        if let Ok(account) = selected {
                             if account.info.id != id {
+                                let crosses_resource = (id < 0) != (account.info.id < 0);
                                 let required =
                                     disabled || upstream.quota_exhausted(id).await.unwrap_or(true);
                                 let previous = payload
@@ -3292,10 +3576,11 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                     if !required {
                                         break 'migration;
                                     }
-                                    let code = if bound
-                                        .connection
-                                        .as_ref()
-                                        .is_some_and(ResponsesConnection::is_http)
+                                    let code = if crosses_resource
+                                        || bound
+                                            .connection
+                                            .as_ref()
+                                            .is_some_and(ResponsesConnection::is_http)
                                     {
                                         "previous_response_not_found"
                                     } else {
@@ -3304,9 +3589,19 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                     let _ = send_client(&mut client, ws_error(code, "account unavailable; full current context required before switching accounts")).await;
                                     continue 'frames;
                                 }
-                                if (id < 0 || account.info.id < 0)
+                                if crosses_resource
                                     && !crate::platform::transfer_safe(&payload)
+                                    && !crate::platform::replay_safe(&payload)
                                 {
+                                    if required {
+                                        let err = ContextError::Conflict;
+                                        let _ = send_client(
+                                            &mut client,
+                                            ws_error(err.code(), err.message()),
+                                        )
+                                        .await;
+                                        continue 'frames;
+                                    }
                                     break 'migration;
                                 }
                                 // Keep only bounded routing metadata to restore a soft
@@ -3331,6 +3626,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                             )
                                             .expect("validated context"),
                                             responses_lite,
+                                            replay.is_some(),
                                         )
                                         .instrument(client_log.handshake_span())
                                         .await
@@ -3359,6 +3655,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                             &state,
                                             &identity,
                                             &mut payload,
+                                            id,
                                             &account,
                                             &mut pending_routing,
                                         )
@@ -3371,6 +3668,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                             .await;
                                             continue 'frames;
                                         }
+                                        retired_accounts.remove(&account.info.id);
                                         let mut old = binding
                                             .replace(WsBinding::new(account, socket, metadata))
                                             .expect("bound socket");
@@ -3435,6 +3733,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                             cache.preferred.then_some(cache.session.as_str()),
                             context,
                             &payload,
+                            replay,
                         )
                     })
                     .await
@@ -3518,6 +3817,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         &mut affinity::upstream_payload(&payload, &state.key, identity.user_id)
                             .expect("validated context"),
                         responses_lite,
+                        replay.is_some(),
                     )
                     .instrument(client_log.handshake_span())
                     .await
@@ -3569,6 +3869,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                         &state,
                         &identity,
                         &mut payload,
+                        initial_id,
                         &account,
                         &mut pending_routing,
                     )
@@ -3834,6 +4135,14 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     }
                 }
             }
+            if account.info.id < 0 && has_compaction_trigger(&payload) {
+                let _ = send_client(
+                    &mut client,
+                    ws_error("unsupported_parameter", PLATFORM_TRIGGER_UNSUPPORTED),
+                )
+                .await;
+                continue 'frames;
+            }
             let connection = connection.as_mut().expect("connected transport");
             let http = connection.is_http();
             let id = RequestId::new();
@@ -4095,7 +4404,12 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                     && upstream.account_enabled(old_id).await.unwrap_or(false)
                 {
                     if let Ok(alternate) = upstream
-                        .select_excluding(&model, None, &rejected_accounts)
+                        .select_after_quota_refusal(
+                            &model,
+                            old_id,
+                            &rejected_accounts,
+                            replay.is_some(),
+                        )
                         .await
                     {
                         let recoverable = payload
@@ -4128,6 +4442,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                     )
                                     .expect("validated context"),
                                     responses_lite,
+                                    replay.is_some(),
                                 )
                                 .instrument(client_log.handshake_span())
                                 .await
@@ -4136,6 +4451,7 @@ async fn ws_loop(mut client: WebSocket, session: WsSession) {
                                     &state,
                                     &identity,
                                     &mut payload,
+                                    old_id,
                                     &alternate,
                                     &mut pending_routing,
                                 )

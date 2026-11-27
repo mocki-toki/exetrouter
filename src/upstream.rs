@@ -761,8 +761,10 @@ impl Upstream {
             return self.select_cached(model, affinity).await;
         };
         if id < 0 {
-            // A project-owned opaque continuation never changes backend merely
-            // because another subscription recovered or this key is paused.
+            if let Some(parent) = self.recovered_codex(model, id).await {
+                return Ok(parent);
+            }
+            // Cross-resource replay is decided by transport after validating the input.
             if !self
                 .account_enabled(id)
                 .await
@@ -783,7 +785,10 @@ impl Upstream {
             .await
             .map_err(|_| SelectError::UpstreamUnavailable)?
         {
-            return self.select_excluding(model, affinity, &[id]).await;
+            return match self.select_excluding(model, affinity, &[id]).await {
+                Ok(alternate) if alternate.info.id < 0 => self.linked_platform(model, id).await,
+                result => result,
+            };
         }
         let pinned = self.select_pinned(model, id).await;
         let exhausted = self.quota_exhausted(id).await?;
@@ -814,7 +819,12 @@ impl Upstream {
                         || !threshold
                         || !self.threshold_reached(alternate.info.id).await?)
                 {
-                    return Ok(alternate);
+                    if alternate.info.id > 0 {
+                        return Ok(alternate);
+                    }
+                    if let Ok(project) = self.linked_platform(model, id).await {
+                        return Ok(project);
+                    }
                 }
             }
         }
@@ -1280,6 +1290,7 @@ impl Upstream {
         identity: (&str, &str),
         payload: &mut Value,
         responses_lite: bool,
+        same_pair: bool,
     ) -> std::result::Result<(Selection, ResponsesConnection, HeaderMap), SocketError> {
         let mut excluded = Vec::new();
         loop {
@@ -1294,11 +1305,12 @@ impl Upstream {
                         return Err(SocketError::Cooldown(until));
                     }
                     let alternate = self
-                        .select_excluding(model, None, &excluded)
+                        .select_after_quota_refusal(model, account.info.id, &excluded, same_pair)
                         .await
                         .map_err(|_| SocketError::Cooldown(until))?;
                     if (account.info.id < 0 || alternate.info.id < 0)
                         && !crate::platform::transfer_safe(payload)
+                        && !crate::platform::replay_safe(payload)
                     {
                         return Err(SocketError::Cooldown(until));
                     }

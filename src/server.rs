@@ -88,6 +88,8 @@ struct Identity {
     thread_hint: Option<String>,
     turn_state: Option<HeaderValue>,
     lite_mode: Option<HeaderValue>,
+    replay_ticket: Option<HeaderValue>,
+    replay_chat: Option<HeaderValue>,
 }
 
 #[derive(Clone)]
@@ -535,6 +537,10 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/v1/models/opencode-v2", get(opencode_v2_models))
         .route("/v1/responses", get(transport::websocket).post(responses))
         .route("/v1/responses/compact", post(compact))
+        .route(
+            "/v1/responses/replay",
+            post(transport::replay_ticket).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/images/generations", post(native::generate))
@@ -644,6 +650,8 @@ async fn authorize(
                 .headers()
                 .get("x-openai-internal-codex-responses-lite")
                 .cloned();
+            let replay_ticket = request.headers().get("x-exetrouter-replay-ticket").cloned();
+            let replay_chat = request.headers().get("x-exetrouter-replay-chat").cloned();
             request.extensions_mut().insert(Identity {
                 observe_account,
                 user_id,
@@ -653,6 +661,8 @@ async fn authorize(
                 thread_hint,
                 turn_state,
                 lite_mode,
+                replay_ticket,
+                replay_chat,
             });
             let request = match encoding::prepare(&state, request).await {
                 Ok(request) => request,

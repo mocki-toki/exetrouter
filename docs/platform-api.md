@@ -226,7 +226,7 @@ require a configured working key and an active, operator-enabled parent account.
 
 The change is durable and applies to new admissions, including new frames on
 existing WebSockets. It does not cancel in-flight generations, deactivate accounts,
-delete credentials, or implicitly move saved conversations or opaque context.
+delete credentials, or move saved conversations or opaque checkpoints.
 If context cannot safely transfer, reconnect or resend self-contained text/tool
 history. Disabling Codex also prevents reset-credit redemption and the weekly
 activation probe. Read-only diagnostics and configured Platform key maintenance
@@ -258,6 +258,8 @@ budget is 900 seconds, with redirects disabled and no router input-size ceiling.
 Platform [compaction](https://developers.openai.com/api/reference/resources/responses/methods/compact)
 uses the public unary `/responses/compact` operation, not Codex's SSE trigger.
 Its returned visible prefix and opaque checkpoint are both preserved.
+An in-band Codex `compaction_trigger` on a Platform route is rejected before
+submission. The OpenCode plugin uses portable summary compaction instead.
 
 With both resources enabled, Codex remains first choice. Same-model Platform
 fallback requires exhaustion of **every eligible Codex subscription for that model**.
@@ -275,11 +277,21 @@ erase an outstanding project quota rejection. Durable usage records retain the p
 account and actual `platform_http_sse`/`platform_http_json` transport, including
 unknown outcomes on interruption/restart.
 
-Opaque reasoning, checkpoints and saved conversations remain user- and
-project-owned. Codex receipts/legacy registry overrides cannot authorize Platform
-state. Cross-backend or cross-project opaque transfer is not assumed portable:
-fallback requires self-contained text/tool context, without project-owned file or
-container references. No checkpoint or reasoning history is silently discarded.
+For an existing chat, a Codex account and its configured Platform project are
+paired. When Platform serves the chat, the next portable request returns to the
+same Codex account as soon as a fresh observation confirms usable quota (or the
+operator selects Codex-only). Ordinary model, availability and backoff checks
+continue to apply. Mixed-mode spending still requires all eligible Codex routes
+for the model to be exhausted.
+
+Opaque state remains user- and project-owned. Cross-resource replay requires a
+self-contained transcript or recoverable current WebSocket history. Standalone
+backend-specific reasoning can be omitted from the outbound replay of a full
+text/tool transcript; it stays in the client's saved chat and is never sent to
+the other resource. Mixed reasoning from a full resend is accepted only when its
+proofs belong to the same linked pair. Checkpoints, encrypted tool arguments,
+saved conversations and project-owned file/container references still prevent
+cross-resource replay. Codex receipts cannot authorize Platform state.
 Same-project HTTP continuations and bounded WS recovery preserve exact input;
 unrecoverable incremental WS requests fail before accounting/submission and need
 client-supplied full input. Public HTTP cannot emulate `generate=false` native
