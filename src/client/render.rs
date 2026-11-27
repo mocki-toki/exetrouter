@@ -93,11 +93,12 @@ pub(super) fn system_timezone() -> String {
 pub(super) fn percent(v: &Value) -> String {
     v.as_f64()
         .filter(|p| p.is_finite())
-        .map(|p| {
-            let text = format!("{p:.1}");
-            format!("{}%", text.trim_end_matches('0').trim_end_matches('.'))
-        })
+        .map(percent_value)
         .unwrap_or_else(|| "—".into())
+}
+pub(super) fn percent_value(p: f64) -> String {
+    let text = format!("{p:.1}");
+    format!("{}%", text.trim_end_matches('0').trim_end_matches('.'))
 }
 pub(super) fn subscription(v: &Value) -> String {
     let mut lines = Vec::new();

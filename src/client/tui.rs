@@ -2147,22 +2147,24 @@ fn overview(frame: &mut Frame<'_>, area: Rect, state: &State, value: &Value) {
             let (label, amount, percent) =
                 super::account_details::platform_summary(&account["platform"]);
             if y >= inner.y as i32 && y < end {
+                let remaining = percent.map_or_else(|| "Unknown".into(), render::percent_value);
                 frame.render_widget(
-                    Paragraph::new(label).style(Style::default().fg(Color::Gray)),
+                    Paragraph::new(format!("{label}  ·  {remaining}"))
+                        .style(Style::default().fg(Color::White)),
                     Rect::new(inner.x, y as u16, inner.width, 1),
                 );
             }
             if y + 1 >= inner.y as i32 && y + 1 < end {
-                frame.render_widget(
-                    Paragraph::new(amount).style(Style::default().fg(Color::White).bold()),
+                super::account_details::meter(
+                    frame.buffer_mut(),
                     Rect::new(inner.x, (y + 1) as u16, inner.width, 1),
+                    percent,
                 );
             }
             if y + 2 >= inner.y as i32 && y + 2 < end {
-                super::account_details::cost_meter(
-                    frame.buffer_mut(),
+                frame.render_widget(
+                    Paragraph::new(amount).style(Style::default().fg(Color::Gray)),
                     Rect::new(inner.x, (y + 2) as u16, inner.width, 1),
-                    percent,
                 );
             }
             y += 3;

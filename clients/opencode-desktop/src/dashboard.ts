@@ -24,6 +24,12 @@ export function platformRemaining(balance: typeof PlatformBalance.Type | null | 
   return { usd: estimate.remainingUSD, excluded: 0 }
 }
 
+export function platformPercent(remainingUSD: number | null, initialUSD: number | undefined) {
+  return remainingUSD !== null && initialUSD !== undefined && initialUSD > 0
+    ? Math.max(0, Math.min(100, remainingUSD / initialUSD * 100))
+    : null
+}
+
 /** Match the runtime's projections to the quota observation they describe. */
 export function historicalForecast(account: Account, window: Window, now: number): QuotaForecast | undefined {
   if (account.refreshError || window.status !== "current" || !fresh(window.observedAt, now)) return

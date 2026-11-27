@@ -128,29 +128,13 @@ pub(super) fn platform_summary(platform: &Value) -> (&'static str, String, Optio
     let label = if remaining.is_some() && balance["exetrouter"]["status"] == "unpriced_requests" {
         "Platform API · partial estimate"
     } else {
-        "Platform API · estimated left"
+        "Platform API"
     };
     let percent = remaining
         .zip(initial)
         .filter(|(_, initial)| *initial > 0)
-        .map(|(left, initial)| left as f64 / initial as f64 * 100.0);
+        .map(|(left, initial)| (left as f64 / initial as f64 * 100.0).clamp(0., 100.));
     (label, amount, percent)
-}
-pub(super) fn cost_meter(buf: &mut Buffer, area: Rect, percent: Option<f64>) {
-    if area.is_empty() {
-        return;
-    }
-    let filled =
-        (f64::from(area.width) * percent.unwrap_or(0.).clamp(0., 100.) / 100.).round() as u16;
-    for x in 0..area.width {
-        buf[(area.x + x, area.y)]
-            .set_char('━')
-            .set_style(Style::default().fg(if x < filled {
-                Color::Rgb(210, 180, 125)
-            } else {
-                Color::DarkGray
-            }));
-    }
 }
 fn put(buf: &mut Buffer, y: u16, value: impl Into<Line<'static>>, color: Color) {
     Paragraph::new(value.into())
@@ -240,8 +224,17 @@ pub(super) fn draw(
                 )
             } else {
                 let (label, value, percent) = platform_summary(&account["platform"]);
-                cost_meter(&mut buf, line(2), percent);
-                (label.into(), value)
+                meter(&mut buf, line(2), percent);
+                Paragraph::new(value)
+                    .style(Style::default().fg(Color::Gray))
+                    .render(line(3), &mut buf);
+                (
+                    label.into(),
+                    percent.map_or_else(
+                        || "Unknown".into(),
+                        |p| format!("{} left", render::percent_value(p)),
+                    ),
+                )
             };
             Paragraph::new(label)
                 .style(Style::default().fg(Color::Gray))
@@ -610,7 +603,11 @@ mod tests {
             let buffer = terminal.backend().buffer();
             let titles: String = (0..104).map(|x| buffer[(x, 2)].symbol()).collect();
             let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
-            assert!(titles.contains("Weekly") && titles.contains("Platform API · estimated left"));
+            assert!(titles.contains("Weekly") && titles.contains("Platform API"));
+            let platform_x = titles.find("Platform API").unwrap() as u16;
+            assert_eq!(buffer[(platform_x, 4)].fg, Color::Rgb(232, 191, 82));
+            assert_eq!(buffer[(103, 4)].fg, Color::DarkGray);
+            assert!(text.contains("50% left"));
             assert!(
                 text.contains("$43 / $86") && text.contains(&format!("Platform API {platform}"))
             );
