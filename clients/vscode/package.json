@@ -2,7 +2,7 @@
   "name": "exetrouter",
   "displayName": "ExetRouter",
   "description": "ExetRouter models in VS Code Chat and a native account dashboard.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "exetrouter",
   "private": true,
   "license": "MIT",
@@ -51,6 +51,7 @@
         {
           "id": "exetrouter.usage",
           "name": "Usage",
+          "type": "webview",
           "visibility": "collapsed"
         },
         {
@@ -62,20 +63,15 @@
           "id": "exetrouter.models",
           "name": "Models",
           "visibility": "collapsed"
-        },
-        {
-          "id": "exetrouter.settings",
-          "name": "Settings",
-          "visibility": "collapsed"
         }
       ]
     },
     "commands": [
       {
-        "command": "exetrouter.manageToken",
-        "title": "Manage Profile Tokens",
+        "command": "exetrouter.createToken",
+        "title": "Create Token",
         "category": "ExetRouter",
-        "icon": "$(key)"
+        "icon": "$(add)"
       },
       {
         "command": "exetrouter.history",
@@ -84,10 +80,10 @@
         "icon": "$(history)"
       },
       {
-        "command": "exetrouter.group",
-        "title": "Group Usage By",
+        "command": "exetrouter.openUsage",
+        "title": "Open Usage Chart",
         "category": "ExetRouter",
-        "icon": "$(group-by-ref-type)"
+        "icon": "$(graph)"
       },
       {
         "command": "exetrouter.copyModel",
@@ -115,20 +111,14 @@
         "command": "exetrouter.accounts",
         "title": "Show All Accounts",
         "category": "ExetRouter"
-      },
-      {
-        "command": "exetrouter.period",
-        "title": "Select Usage Period",
-        "category": "ExetRouter",
-        "icon": "$(calendar)"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "exetrouter.manageToken",
+          "command": "exetrouter.createToken",
           "when": "view == exetrouter.tokens",
-          "group": "navigation"
+          "group": "navigation@1"
         },
         {
           "command": "exetrouter.history",
@@ -136,7 +126,7 @@
           "group": "navigation"
         },
         {
-          "command": "exetrouter.group",
+          "command": "exetrouter.openUsage",
           "when": "view == exetrouter.usage",
           "group": "navigation"
         },
@@ -151,8 +141,8 @@
           "group": "navigation"
         },
         {
-          "command": "exetrouter.period",
-          "when": "view == exetrouter.usage",
+          "command": "exetrouter.refresh",
+          "when": "view == exetrouter.models",
           "group": "navigation"
         }
       ]
