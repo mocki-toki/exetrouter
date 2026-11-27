@@ -1,4 +1,13 @@
 import { record } from "./catalog"
+
+export interface QuotaMeter {
+  label: string
+  remaining: number | null
+  caption: string
+  historical?: boolean
+  hint?: string
+}
+
 export interface Row {
   label: string
   description?: string
@@ -10,6 +19,7 @@ export interface Row {
   tokenState?: string
   fastMode?: boolean | null
   children?: Row[]
+  meters?: QuotaMeter[]
 }
 export function statusSummary(accounts: Row[]) {
   const counts = new Map<string, number>()
@@ -27,6 +37,29 @@ const text = (v: unknown, fallback = "Unknown") =>
 const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v.toLocaleString() : "Unknown")
 const date = (v: unknown) =>
   typeof v === "number" && Number.isFinite(v) ? new Date(v * 1000).toLocaleString() : "Unknown"
+const finite = (v: unknown) => typeof v === "number" && Number.isFinite(v) ? v : null
+const percent = (p: number) => `${p.toLocaleString("en", { maximumFractionDigits: 1 })}% left`
+
+function platformMeter(platform: unknown): QuotaMeter {
+  const balance = record(record(platform).balance), estimate = record(balance.exetrouter)
+  const initial = finite(balance.initial_usd_nanos), spent = finite(estimate.spent_usd_nanos)
+  const unpriced = finite(estimate.unpriced_requests)
+  const partial = estimate.status === "unpriced_requests" && unpriced !== null && unpriced > 0 && initial !== null && spent !== null
+  const left = finite(estimate.remaining_usd_nanos) ?? (partial ? initial - spent : null)
+  const dollars = (nanos: number) => {
+    const usd = nanos / 1e9
+    return usd.toLocaleString("en", { style: "currency", currency: "USD",
+      notation: Math.abs(usd) >= 1000 ? "compact" : "standard",
+      minimumFractionDigits: 0, maximumFractionDigits: Math.abs(usd) >= 1 ? 2 : 9 })
+  }
+  return {
+    label: partial ? "Platform API · partial estimate" : "Platform API",
+    remaining: left !== null && initial !== null && initial > 0 ? Math.max(0, Math.min(100, left / initial * 100)) : null,
+    caption: `${left === null ? "Unknown" : dollars(left)}${initial === null ? "" : ` / ${dollars(initial)}`}`,
+    hint: partial ? `${unpriced} unpriced ${unpriced === 1 ? "request" : "requests"} excluded` : "Estimated funds remaining through ExetRouter",
+  }
+}
+
 export function routerRow(body: unknown): Row {
   const root = record(body),
     r = record(root.server ?? root),
@@ -52,32 +85,45 @@ export function accountRows(body: unknown): Row[] {
     const a = record(entry),
       quota = record(a.quota),
       pref = record(a.preference)
+    const id = typeof a.id === "number" && Number.isSafeInteger(a.id) && a.id > 0 ? a.id : undefined
     const status = pref.enabled === false ? "Disabled" : text(quota.status)
+    const meters: QuotaMeter[] = []
+    const history = id === undefined ? {} : { command: "exetrouter.history", args: [id] }
     const children: Row[] = (Array.isArray(quota.windows) ? quota.windows : []).map((v) => {
       const w = record(v)
+      const minutes = finite(w.window_minutes), remaining = finite(w.remaining_percent)
+      const label = minutes === null ? text(w.kind) : minutes === 10080 ? "Weekly"
+        : minutes % 60 === 0 ? `${count(minutes / 60)}h` : `${count(minutes)} min`
+      const reset = date(w.reset_at), resetAt = finite(w.reset_at), checkedAt = finite(report.checked_at)
+      const historical = typeof a.refresh_error === "string" || w.status !== "current" ||
+        (resetAt !== null && checkedAt !== null && resetAt <= checkedAt)
+      if (minutes !== null && minutes > 0) meters.push({
+        label, remaining: remaining !== null && remaining >= 0 && remaining <= 100 ? remaining : null,
+        caption: `Resets ${reset}`, historical,
+      })
       return {
-        label:
-          typeof w.window_minutes !== "number"
-            ? text(w.kind)
-            : w.window_minutes % 1440 === 0
-              ? `${count(w.window_minutes / 1440)}d`
-              : w.window_minutes % 60 === 0
-                ? `${count(w.window_minutes / 60)}h`
-                : `${count(w.window_minutes)} min`,
-        description: `${typeof w.remaining_percent === "number" ? `${count(w.remaining_percent)}% left` : "Unknown remaining"} · ${text(w.status)}`,
-        detail: `Resets: ${date(w.reset_at)} · Observed: ${date(w.observed_at)}`,
+        label,
+        description: `${remaining === null ? "Unknown remaining" : percent(remaining)} · ${text(w.status)}`,
+        detail: `Resets: ${reset} · Observed: ${date(w.observed_at)}`,
+        ...history,
       }
     })
-    if (a.platform)
+    if (a.platform && typeof a.platform === "object" && !Array.isArray(a.platform)) {
+      const meter = platformMeter(a.platform)
+      meters.push(meter)
       children.push({
-        label: "Platform inference",
-        description: record(a.platform).inference_enabled === true ? "Enabled" : "Disabled",
+        label: meter.label,
+        description: meter.remaining === null ? "Unknown remaining" : percent(meter.remaining),
+        detail: `${meter.caption} · ${meter.hint}`,
+        ...history,
       })
+    }
     return {
       label: text(a.label, `Account ${i + 1}`),
-      ...(typeof a.id === "number" && Number.isSafeInteger(a.id) && a.id > 0 ? { accountId: a.id } : {}),
+      accountId: id,
       description: status,
       children,
+      meters,
       detail: [status, ...children.map((c) => `${c.label}: ${c.description}`)].join(" · "),
     }
   })

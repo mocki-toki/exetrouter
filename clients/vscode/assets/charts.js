@@ -6,6 +6,7 @@
   const palette = ["#4b9ffa", "#36b78c", "#ce89f3", "#eaac46", "#ec789a", "#63bec4", "#f08760", "#a4af68"]
   const format = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 })
   const compact = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 })
+  const percent = new Intl.NumberFormat("en", { maximumFractionDigits: 1 })
   let chart, plot, times = [], selected = -1
   const hidden = new Set()
   const text = (tag, value) => {
@@ -22,12 +23,34 @@
   for (const control of controls) control.addEventListener("change", () => send())
   byId("refresh").addEventListener("click", () => send(true))
 
-  function shape(name, attrs, value) {
+  function shape(name, attrs, value, target = svg) {
     const item = document.createElementNS("http://www.w3.org/2000/svg", name)
     for (const [key, val] of Object.entries(attrs)) item.setAttribute(key, String(val))
     if (value !== undefined) item.textContent = value
-    svg.append(item)
+    target.append(item)
     return item
+  }
+  function renderQuotaMeters(meters, stale) {
+    const grid = byId("quota-meters")
+    if (!grid) return
+    grid.replaceChildren()
+    grid.hidden = !meters?.length
+    for (const { label, remaining, caption, historical, hint } of meters ?? []) {
+      const card = document.createElement("div"), heading = document.createElement("div")
+      card.className = "quota-meter"
+      card.dataset.tone = remaining === null || historical || stale ? "neutral" : remaining <= 20 ? "danger" : remaining <= 50 ? "warning" : "success"
+      heading.className = "quota-meter-label"
+      const name = text("span", label)
+      if (hint) name.title = hint
+      heading.append(name, text("strong", remaining === null ? "Unknown" : `${percent.format(remaining)}% left`))
+      const track = shape("svg", { class: "quota-meter-track", viewBox: "0 0 100 4", preserveAspectRatio: "none", "aria-hidden": "true" }, undefined, card)
+      if (remaining !== null) shape("rect", { width: remaining, height: 4 }, undefined, track)
+      const footer = text("div", caption)
+      footer.className = "quota-meter-caption"
+      card.prepend(heading)
+      card.append(footer)
+      grid.append(card)
+    }
   }
   function nearestIndex(sorted, target, key = (value) => value) {
     let low = 0, high = sorted.length
@@ -155,6 +178,7 @@
     byId("title").textContent = data.title
     byId("notice").textContent = data.notice || ""
     if (data.loading) return
+    renderQuotaMeters(data.meters, data.staleMeters)
     chart = data.chart
     if (!chart) {
       bounds.hidden = true

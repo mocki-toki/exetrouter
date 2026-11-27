@@ -96,6 +96,7 @@ export function chartDocument(webview: Webview, script: Uri, css: Uri, kind: Cha
   <link rel="stylesheet" href="${webview.asWebviewUri(css)}"><title>ExetRouter chart</title></head>
   <body data-kind="${kind}"><main><header><div class="heading"><h1 id="title">${kind === "usage" ? "Usage" : "Quota history"}</h1>
   <p id="range"></p></div><button id="refresh" type="button">Refresh</button></header>
+  ${kind === "quota" ? '<section id="quota-meters" aria-label="Account limits" hidden></section>' : ""}
   <div id="controls"><label>Period <select id="period"><option>24h</option><option selected>7d</option><option>30d</option><option>90d</option></select></label>
   ${kind === "usage" ? `<label>Group <select id="group"><option value="total">Total</option><option value="model" selected>Model</option><option value="user">User</option><option value="token">Token</option></select></label>
   <label>Metric <select id="metric"><option value="tokens">Tokens</option><option value="requests">Requests</option><option value="usd">API-equivalent USD</option></select></label>` : ""}</div>
