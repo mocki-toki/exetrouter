@@ -92,8 +92,9 @@ Router 0.12.1 uses schema 21, the same as 0.12.0. Review the [routing resource m
 Select an `exetrouter/<model>` through the normal model picker. No default model
 is forcibly selected. **Open ExetRouter** opens the panel in the current session.
 The side panel's **+** menu also offers ExetRouter. A native quota indicator above
-the composer shows the short/weekly windows of the account actually used by this
-chat; click it for live account details. It follows primary HTTP/WS response
+the composer shows the short/weekly windows when the chat uses Codex, or the
+linked account's estimated Platform balance percentage when it uses Platform.
+Click it for live account details. It follows primary HTTP/WS response
 observations, including account transfers, not the global Best recommendation or
 token activity. Title/compaction/auxiliary requests and other chats do not change it.
 This requires router/native `exr` version 0.8.3 or later and a matching
@@ -208,7 +209,7 @@ running. This is not an OS service installer or supervisor.
 ## Safety and limits
 
 - Generation goes directly through OpenCode's native OpenAI Responses provider,
-  with `store=false` and native compaction. There are no inference hooks, retries,
+  with `store=false` and portable summary compaction. There are no inference hooks, retries,
   prompt/response logging, or JavaScript routing proxy.
 - Catalog GETs use the native connection's bearer, refuse redirects, have a
   15-second deadline and a 2 MiB metadata bound. Only model limits, modalities,

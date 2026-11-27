@@ -1,10 +1,25 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { SessionAccounts, observationHeader } from "../src/session-account"
+import { SessionAccounts, observationHeader, resourceHeader } from "../src/session-account"
 
 const a = "a".repeat(64), b = "b".repeat(64)
 const request = { sessionID: "chat-a", kind: "primary", model: { providerID: "exetrouter", id: "synthetic" } }
 const frame = (key: string) => JSON.stringify({ type: "response.metadata", headers: { [observationHeader]: key, authorization: "private-marker", "x-codex-turn-state": "private-marker" } })
+
+test("one parent account can change resource without changing the chat or model", () => {
+  const accounts = new SessionAccounts(() => {})
+  const receive = (resource: string, kind = "primary") => accounts.websocket({ ...request, kind,
+    frame: JSON.stringify({ type: "response.metadata", headers: { [observationHeader]: a, [resourceHeader]: resource } }) })
+  receive("codex")
+  assert.equal(accounts.get(request.sessionID)?.resource, "codex")
+  receive("platform")
+  receive("codex", "title")
+  assert.equal(accounts.get(request.sessionID)?.resource, "platform")
+  accounts.http({ ...request, response: new Response(null, { headers: { [observationHeader]: a, [resourceHeader]: "codex" } }) })
+  assert.equal(accounts.get(request.sessionID)?.resource, "codex")
+  receive("unrecognized")
+  assert.equal(accounts.get(request.sessionID)?.resource, undefined)
+})
 
 test("actual primary WS and HTTP responses are isolated by session and follow failover", () => {
   const changed: string[] = [], accounts = new SessionAccounts((session) => changed.push(session))

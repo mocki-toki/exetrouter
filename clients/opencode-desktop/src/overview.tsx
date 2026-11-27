@@ -1,18 +1,19 @@
 import { For, Show, type Accessor } from "solid-js"
 import type { Context } from "@opencode/plugin/gui"
 import { best, fresh, priority, routingFresh, routingReason, visibleWindows, type ForecastLookup } from "./dashboard"
-import { count, date, dollars, duration, freshness, percent, requestAge, subscriptionPlan } from "./format"
+import { count, date, dollars, duration, freshness, requestAge, subscriptionPlan } from "./format"
 import type { Account, DashboardState, Window } from "./schemas"
 import { Badge, EmptyState, Fields, List, Notice, Row, Section, useDashboardState, useDialog, useHost } from "./ui"
 import { QuotaHistoryView } from "./quota-history-view"
 import { PlatformStatus } from "./platform-status"
+import { QuotaMeter } from "./quota-meter"
 
 function AccountDetails(props: { account: Account; now: number; historical: boolean; forecast: ForecastLookup }) {
   const a = () => props.account
   return <div class="exr exr-dialog-content">
     <div class="exr-detail-quotas">
       <For each={visibleWindows(a())}>{(window) => <div class="exr-detail-quota"><Quota window={window} historical={props.historical || a().refreshError || freshness(window, props.now) !== "current"} forecast={props.historical ? undefined : props.forecast(a(), window, props.now)} /></div>}</For>
-      <Show when={a().platform}>{(platform) => <div class="exr-detail-quota exr-platform"><PlatformStatus platform={platform()} /></div>}</Show>
+      <Show when={a().platform}>{(platform) => <div class="exr-detail-quota exr-platform"><PlatformStatus platform={platform()} historical={props.historical} /></div>}</Show>
     </div>
     <QuotaHistoryView account={a()} />
     <Show when={a().subscription}>{(subscription) => <Section title="Subscription & billing">
@@ -46,16 +47,11 @@ export function openAccount(ctx: Context, open: Context["dialogs"]["open"], id: 
 
 function Quota(props: { window: Window; historical: boolean; forecast?: string }) {
   const ui = useHost().ui
-  const remaining = () => props.window.remaining
-  const tone = () => remaining() === null || props.historical ? "neutral" : remaining()! <= 20 ? "danger" : remaining()! <= 50 ? "warning" : "success"
-  return <div class="exr-quota" data-tone={tone()}>
-    <div class="exr-inline"><span>{duration(props.window.minutes)}</span><strong>{percent(remaining())}<span class="exr-caption"> left</span></strong></div>
-    <div class="exr-quota-track" role={remaining() === null ? "img" : "meter"} aria-label={`${duration(props.window.minutes)} quota remaining${remaining() === null ? ": unknown" : ""}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={remaining() ?? undefined}>
-      <Show when={remaining() !== null}><span style={{ width: `${remaining()}%` }} /></Show>
-    </div>
-    <div class="exr-inline exr-caption"><ui.Tooltip value={`Resets ${date(props.window.resetAt)} · observed ${date(props.window.observedAt)}`}><span>Resets {date(props.window.resetAt)}</span></ui.Tooltip>
-      <Show when={props.forecast}>{(label) => <span class="exr-quota-eta" aria-label={`Estimated time to limit: ${label().slice(1)}`}>{label()}</span>}</Show></div>
-  </div>
+  const label = () => duration(props.window.minutes)
+  return <QuotaMeter label={label()} meterLabel={`${label()} quota remaining`} remaining={props.window.remaining} historical={props.historical}>
+    <ui.Tooltip value={`Resets ${date(props.window.resetAt)} · observed ${date(props.window.observedAt)}`}><span>Resets {date(props.window.resetAt)}</span></ui.Tooltip>
+    <Show when={props.forecast}>{(forecast) => <span class="exr-quota-eta" aria-label={`Estimated time to limit: ${forecast().slice(1)}`}>{forecast()}</span>}</Show>
+  </QuotaMeter>
 }
 
 function AccountCard(props: { account: Account; now: number; historical: boolean; recommended: boolean; forecast: ForecastLookup }) {
@@ -75,7 +71,7 @@ function AccountCard(props: { account: Account; now: number; historical: boolean
     <div class="exr-quota-area" data-paused={a().cooldownUntil !== null ? "" : undefined}><div class="exr-quota-grid"><For each={visibleWindows(a())} fallback={<p class="exr-caption">Limits not reported · {a().quotaStatus}</p>}>{(window) =>
       <Quota window={window} historical={props.historical || a().refreshError || freshness(window, props.now) !== "current"} forecast={props.historical ? undefined : props.forecast(a(), window, props.now)} />
     }</For></div><Show when={a().cooldownUntil !== null}><ui.Tooltip value={`Cooldown source: ${a().cooldownSource}`}><span class="exr-quota-pause">Paused until {date(a().cooldownUntil)}</span></ui.Tooltip></Show></div>
-    <Show when={a().platform}>{platform=><div class="exr-platform"><PlatformStatus platform={platform()} /></div>}</Show>
+    <Show when={a().platform}>{platform=><div class="exr-platform"><PlatformStatus platform={platform()} historical={props.historical} /></div>}</Show>
     <footer class="exr-account-footer">
       <ui.Tooltip value={`Reset credits: ${count(a().credits.count)} available${a().credits.expiries.length ? ` · next expires ${date(a().credits.expiries[0])}` : ""}${creditsStale() ? " · historical" : ""}`}>
         <span class="exr-meta" data-tone={expiresSoon() ? "warning" : "neutral"}><ui.Icon name="outline-reset" size="small" />{a().credits.count === null ? "Resets unavailable" : `${count(a().credits.count)} ${a().credits.count === 1 ? "reset" : "resets"}`}{a().credits.expiries.length ? ` · expires ${date(Math.min(...a().credits.expiries))}` : ""}{creditsStale() ? " · historical" : ""}</span>
