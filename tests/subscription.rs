@@ -183,9 +183,9 @@ fn standalone_owner_and_server_operator_share_billing_rules_and_json() {
     let human = run_local(&["account", "platform", "status", "1"]);
     assert!(human.status.success());
     let human = String::from_utf8(human.stdout).unwrap();
-    assert!(
-        human.contains("ExetRouter: $0 left") && human.contains("Platform organization: Unknown")
-    );
+    assert!(human.contains("Platform API  ·  $0 / $0 left"));
+    assert!(!human.contains("awaiting report"));
+    assert!(!human.contains("API routing"));
     for output in [
         run_local(&["account", "platform", "set-balance", "1", "--usd", "-1"]),
         run_server(&[
